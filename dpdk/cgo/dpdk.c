@@ -395,11 +395,11 @@ void print_stats(int port_index) {
     struct rte_eth_stats new_stats;
     rte_eth_stats_get(port_id, &new_stats);
     printf("[rte_eth_stats]\tport:%2u | "
-           "rx:%10llu (pps) | "
-           "tx:%10llu (pps) | "
-           "drop:%10llu (pps) | "
-           "rx:%20llu (byte/s) | "
-           "tx:%20llu (byte/s)",
+           "rx:%10lu (pps) | "
+           "tx:%10lu (pps) | "
+           "drop:%10lu (pps) | "
+           "rx:%20lu (byte/s) | "
+           "tx:%20lu (byte/s)\n",
            port_id,
            new_stats.ipackets - old_stats.ipackets,
            new_stats.opackets - old_stats.opackets,
@@ -912,14 +912,14 @@ int dpdk_main(struct dpdk_config *config) {
     if (rte_kni_release(kni)) {
         printf("fail to release kni\n");
     }
-    free(port_id_list);
-    free(port_ring_buffer);
-    free(port_old_stats);
     for (int i = 0; i < port_count; i++) {
         rte_eth_dev_stop(port_id_list[i]);
         rte_free(port_ring_buffer[i].mem_send_head);
         rte_free(port_ring_buffer[i].mem_recv_head);
     }
+    free(port_id_list);
+    free(port_ring_buffer);
+    free(port_old_stats);
 
     return 0;
 }

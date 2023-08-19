@@ -107,6 +107,9 @@ func EthernetHub() {
 				break
 			}
 			pkt := <-dpdk.Rx(0)
+			if pkt == nil {
+				continue
+			}
 			dpdk.Tx(1) <- pkt
 		}
 	}()
@@ -117,6 +120,9 @@ func EthernetHub() {
 				break
 			}
 			pkt := <-dpdk.Rx(1)
+			if pkt == nil {
+				continue
+			}
 			dpdk.Tx(0) <- pkt
 		}
 	}()

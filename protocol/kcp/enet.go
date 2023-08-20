@@ -16,19 +16,17 @@ import (
 
 // Enet Enet协议上报结构体
 type Enet struct {
-	Addr      string
 	SessionId uint32
 	Conv      uint32
-	ConnType  uint8
+	ConnType  string
 	EnetType  uint32
 }
 
 // Enet连接状态类型
 const (
-	ConnEnetSyn        = 1
-	ConnEnetEst        = 2
-	ConnEnetFin        = 3
-	ConnEnetAddrChange = 4
+	ConnEnetSyn = "ConnEnetSyn"
+	ConnEnetEst = "ConnEnetEst"
+	ConnEnetFin = "ConnEnetFin"
 )
 
 // Enet连接状态类型幻数
@@ -66,7 +64,7 @@ const (
 	EnetClientConnectKey       = 1234567890
 )
 
-func BuildEnet(connType uint8, enetType uint32, sessionId uint32, conv uint32) []byte {
+func BuildEnet(connType string, enetType uint32, sessionId uint32, conv uint32) []byte {
 	data := make([]byte, 20)
 	if connType == ConnEnetSyn {
 		copy(data[0:4], MagicEnetSynHead)
@@ -86,7 +84,7 @@ func BuildEnet(connType uint8, enetType uint32, sessionId uint32, conv uint32) [
 	return data
 }
 
-func ParseEnet(data []byte) (connType uint8, enetType uint32, sessionId uint32, conv uint32, rawConv uint64, err error) {
+func ParseEnet(data []byte) (connType string, enetType uint32, sessionId uint32, conv uint32, rawConv uint64, err error) {
 	sessionId = binary.BigEndian.Uint32(data[4:8])
 	conv = binary.BigEndian.Uint32(data[8:12])
 	rawConv = binary.LittleEndian.Uint64(data[4:12])
@@ -119,5 +117,5 @@ func ParseEnet(data []byte) (connType uint8, enetType uint32, sessionId uint32, 
 		connType = ConnEnetFin
 		return connType, enetType, sessionId, conv, rawConv, nil
 	}
-	return 0, 0, 0, 0, 0, errors.New("unknown conn type")
+	return "", 0, 0, 0, 0, errors.New("unknown conn type")
 }

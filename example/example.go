@@ -40,11 +40,11 @@ func DirectDpdk() {
 func NetworkEngine() {
 	// 启动dpdk
 	dpdk.Run(&dpdk.Config{
-		GolangCpuCoreList: []int{5, 6},
+		GolangCpuCoreList: []int{7, 8, 9, 10},
 		StatsLog:          true,
-		DpdkCpuCoreList:   []int{1, 2, 3, 4},
+		DpdkCpuCoreList:   []int{1, 2, 3, 4, 5, 6},
 		DpdkMemChanNum:    4,
-		PortIdList:        []int{0},
+		PortIdList:        []int{0, 1},
 		RingBufferSize:    1024 * 1024 * 128,
 	})
 
@@ -62,6 +62,15 @@ func NetworkEngine() {
 				EthRxChan:     dpdk.Rx(0),          // 物理层接收管道
 				EthTxChan:     dpdk.Tx(0),          // 物理层发送管道
 			},
+			{
+				Name:          "eth1",
+				MacAddr:       "BB:BB:BB:BB:BB:BB",
+				IpAddr:        "192.168.111.111",
+				NetworkMask:   "255.255.255.0",
+				GatewayIpAddr: "192.168.111.1",
+				EthRxChan:     dpdk.Rx(1),
+				EthTxChan:     dpdk.Tx(1),
+			},
 		},
 	})
 	if err != nil {
@@ -72,11 +81,9 @@ func NetworkEngine() {
 	e.RunEngine()
 
 	// kcp协议栈测试
-	e.GetNetIf("eth0").HandleUdp = kcp.UdpRx
-	kcp.UdpTx = e.GetNetIf("eth0").TxUdp
-	go kcpServer()
+	go kcpServer(e.GetNetIf("eth0"))
 	time.Sleep(time.Second)
-	go kcpClient()
+	go kcpClient(e.GetNetIf("eth1"))
 	time.Sleep(time.Minute)
 
 	// 停止协议栈
@@ -197,8 +204,33 @@ func DDoS() {
 	dpdk.Exit()
 }
 
-func kcpServer() {
-	listener, err := kcp.ListenWithOptions("0.0.0.0:22222")
+func kcpServer(netIf *engine.NetIf) {
+	rxChan := make(chan []byte, 1024)
+	txChan := make(chan []byte, 1024)
+	netIf.HandleUdp = func(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, ipv4SrcAddr []byte) {
+		if udpDstPort != 22222 {
+			return
+		}
+		rxChan <- udpPayload
+	}
+	go func() {
+		for {
+			pkt, ok := <-txChan
+			if !ok {
+				break
+			}
+			for {
+				if netIf.TxUdp(pkt, 22222, 33333, []byte{192, 168, 111, 111}) != nil {
+					break
+				}
+				time.Sleep(time.Second)
+			}
+		}
+	}()
+	listener, err := kcp.Listen(&kcp.Conn{
+		RxChan: rxChan,
+		TxChan: txChan,
+	})
 	if err != nil {
 		return
 	}
@@ -206,7 +238,6 @@ func kcpServer() {
 		enetNotify := <-listener.EnetNotify
 		if enetNotify.ConnType == kcp.ConnEnetSyn {
 			listener.SendEnetNotifyToPeer(&kcp.Enet{
-				Addr:      enetNotify.Addr,
 				SessionId: 1,
 				Conv:      1,
 				ConnType:  kcp.ConnEnetEst,
@@ -226,24 +257,49 @@ func kcpServer() {
 			break
 		}
 		buf = buf[:size]
-		fmt.Printf("recv kcp data: %v\n", buf)
+		fmt.Printf("kcp server recv data: %02x\n", buf)
 		_, err = conn.Write([]byte{0x01, 0x23, 0xcd, 0xef})
 		if err != nil {
 			break
 		}
 	}
-	_ = conn.Close()
 	conn.SendEnetNotifyToPeer(&kcp.Enet{
-		Addr:      conn.RemoteAddr().String(),
 		SessionId: conn.GetSessionId(),
 		Conv:      conn.GetConv(),
 		ConnType:  kcp.ConnEnetFin,
 		EnetType:  kcp.EnetClientClose,
 	})
+	netIf.HandleUdp = nil
+	_ = conn.Close()
 }
 
-func kcpClient() {
-	conn, err := kcp.DialWithOptions("192.168.100.100:22222", "0.0.0.0:30000")
+func kcpClient(netIf *engine.NetIf) {
+	rxChan := make(chan []byte, 1024)
+	txChan := make(chan []byte, 1024)
+	netIf.HandleUdp = func(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, ipv4SrcAddr []byte) {
+		if udpDstPort != 33333 {
+			return
+		}
+		rxChan <- udpPayload
+	}
+	go func() {
+		for {
+			pkt, ok := <-txChan
+			if !ok {
+				break
+			}
+			for {
+				if netIf.TxUdp(pkt, 33333, 22222, []byte{192, 168, 100, 100}) != nil {
+					break
+				}
+				time.Sleep(time.Second)
+			}
+		}
+	}()
+	conn, err := kcp.Dial(&kcp.Conn{
+		RxChan: rxChan,
+		TxChan: txChan,
+	})
 	if err != nil {
 		return
 	}
@@ -259,14 +315,14 @@ func kcpClient() {
 			break
 		}
 		buf = buf[:size]
-		fmt.Printf("recv kcp data: %v\n", buf)
+		fmt.Printf("kcp client recv data: %02x\n", buf)
 	}
-	_ = conn.Close()
 	conn.SendEnetNotifyToPeer(&kcp.Enet{
-		Addr:      conn.RemoteAddr().String(),
 		SessionId: conn.GetSessionId(),
 		Conv:      conn.GetConv(),
 		ConnType:  kcp.ConnEnetFin,
 		EnetType:  kcp.EnetClientClose,
 	})
+	netIf.HandleUdp = nil
+	_ = conn.Close()
 }

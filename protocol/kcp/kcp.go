@@ -2,7 +2,6 @@ package kcp
 
 import (
 	"encoding/binary"
-	"sync/atomic"
 	"time"
 )
 
@@ -137,7 +136,6 @@ func (seg *segment) encode(ptr []byte) []byte {
 	ptr = ikcp_encode32u(ptr, seg.sn)
 	ptr = ikcp_encode32u(ptr, seg.una)
 	ptr = ikcp_encode32u(ptr, uint32(len(seg.data)))
-	atomic.AddUint64(&DefaultSnmp.OutSegs, 1)
 	return ptr
 }
 
@@ -596,7 +594,6 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 			flag |= 1
 			latest = ts
 		} else if cmd == IKCP_CMD_PUSH {
-			repeat := true
 			if _itimediff(sn, kcp.rcv_nxt+kcp.rcv_wnd) < 0 {
 				kcp.ack_push(sn, ts)
 				if _itimediff(sn, kcp.rcv_nxt) >= 0 {
@@ -609,11 +606,8 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 					seg.sn = sn
 					seg.una = una
 					seg.data = data[:length] // delayed data copying
-					repeat = kcp.parse_data(seg)
+					kcp.parse_data(seg)
 				}
-			}
-			if regular && repeat {
-				atomic.AddUint64(&DefaultSnmp.RepeatSegs, 1)
 			}
 		} else if cmd == IKCP_CMD_WASK {
 			// ready to send back IKCP_CMD_WINS in Ikcp_flush
@@ -628,7 +622,6 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 		inSegs++
 		data = data[length:]
 	}
-	atomic.AddUint64(&DefaultSnmp.InSegs, inSegs)
 
 	// update rtt with the latest ts
 	// ignore the FEC packet
@@ -868,19 +861,11 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 
 	// counter updates
 	sum := lostSegs
-	if lostSegs > 0 {
-		atomic.AddUint64(&DefaultSnmp.LostSegs, lostSegs)
-	}
 	if fastRetransSegs > 0 {
-		atomic.AddUint64(&DefaultSnmp.FastRetransSegs, fastRetransSegs)
 		sum += fastRetransSegs
 	}
 	if earlyRetransSegs > 0 {
-		atomic.AddUint64(&DefaultSnmp.EarlyRetransSegs, earlyRetransSegs)
 		sum += earlyRetransSegs
-	}
-	if sum > 0 {
-		atomic.AddUint64(&DefaultSnmp.RetransSegs, sum)
 	}
 
 	// cwnd update

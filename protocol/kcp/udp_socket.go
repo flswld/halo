@@ -4,23 +4,11 @@ import (
 	"encoding/binary"
 )
 
-func (s *UDPSession) readLoop() {
+func (s *UDPSession) rx() {
 	buf := make([]byte, mtuLimit)
-	var src string
 	for {
-		if n, addr, err := s.conn.ReadFrom(buf); err == nil {
+		if n, err := s.conn.ReadFrom(buf); err == nil {
 			udpPayload := buf[:n]
-
-			// make sure the packet is from the same source
-			if src == "" { // set source address
-				src = addr.String()
-			} else if addr.String() != src {
-				// atomic.AddUint64(&DefaultSnmp.InErrs, 1)
-				// continue
-				s.remote = addr
-				src = addr.String()
-			}
-
 			if n == 20 {
 				connType, _, sessionId, conv, _, err := ParseEnet(udpPayload)
 				if err != nil {
@@ -30,7 +18,7 @@ func (s *UDPSession) readLoop() {
 					continue
 				}
 				if connType == ConnEnetFin {
-					s.Close()
+					_ = s.Close()
 					continue
 				}
 			}
@@ -46,14 +34,14 @@ func (s *UDPSession) readLoop() {
 func (l *Listener) monitor() {
 	buf := make([]byte, mtuLimit)
 	for {
-		if n, from, err := l.conn.ReadFrom(buf); err == nil {
+		if n, err := l.conn.ReadFrom(buf); err == nil {
 			udpPayload := buf[:n]
 			var sessionId uint32 = 0
 			var conv uint32 = 0
 			var rawConv uint64 = 0
 			if n == 20 {
 				// 连接控制协议
-				var connType uint8 = 0
+				var connType = ""
 				var enetType uint32 = 0
 				connType, enetType, sessionId, conv, rawConv, err = ParseEnet(udpPayload)
 				if err != nil {
@@ -63,7 +51,6 @@ func (l *Listener) monitor() {
 				case ConnEnetSyn:
 					// 客户端前置握手获取conv
 					l.EnetNotify <- &Enet{
-						Addr:      from.String(),
 						SessionId: sessionId,
 						Conv:      conv,
 						ConnType:  ConnEnetSyn,
@@ -72,7 +59,6 @@ func (l *Listener) monitor() {
 				case ConnEnetEst:
 					// 连接建立
 					l.EnetNotify <- &Enet{
-						Addr:      from.String(),
 						SessionId: sessionId,
 						Conv:      conv,
 						ConnType:  ConnEnetEst,
@@ -81,7 +67,6 @@ func (l *Listener) monitor() {
 				case ConnEnetFin:
 					// 连接断开
 					l.EnetNotify <- &Enet{
-						Addr:      from.String(),
 						SessionId: sessionId,
 						Conv:      conv,
 						ConnType:  ConnEnetFin,
@@ -96,25 +81,45 @@ func (l *Listener) monitor() {
 				conv = binary.LittleEndian.Uint32(udpPayload[4:8])
 				rawConv = binary.LittleEndian.Uint64(udpPayload[0:8])
 			}
-			l.sessionLock.RLock()
-			conn, exist := l.sessions[rawConv]
-			l.sessionLock.RUnlock()
-			if exist {
-				if conn.remote.String() != from.String() {
-					conn.remote = from
-					// 连接地址改变
-					l.EnetNotify <- &Enet{
-						Addr:      conn.remote.String(),
-						SessionId: sessionId,
-						Conv:      conv,
-						ConnType:  ConnEnetAddrChange,
-					}
-				}
-			}
-			l.packetInput(udpPayload, from, rawConv)
+			l.packetInput(udpPayload, rawConv)
 		} else {
 			l.notifyReadError(err)
 			return
 		}
 	}
+}
+
+func (s *UDPSession) tx(txqueue []Message) {
+	nbytes := 0
+	npkts := 0
+	for k := range txqueue {
+		var n = 0
+		var err error = nil
+		n, err = s.conn.WriteTo(txqueue[k].Buffers[0])
+		if err == nil {
+			nbytes += n
+			npkts++
+		} else {
+			s.notifyWriteError(err)
+			break
+		}
+	}
+}
+
+func (l *Listener) SendEnetNotifyToPeer(enet *Enet) {
+	data := BuildEnet(enet.ConnType, enet.EnetType, enet.SessionId, enet.Conv)
+	if data == nil {
+		return
+	}
+	_, _ = l.conn.WriteTo(data)
+}
+
+func (s *UDPSession) SendEnetNotifyToPeer(enet *Enet) {
+	data := BuildEnet(enet.ConnType, enet.EnetType, s.GetSessionId(), s.GetConv())
+	if data == nil {
+		return
+	}
+	s.tx([]Message{{
+		Buffers: [][]byte{data},
+	}})
 }

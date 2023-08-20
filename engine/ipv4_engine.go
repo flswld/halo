@@ -33,7 +33,6 @@ func (i *NetIf) TxIpv4(ipv4Payload []byte, ipv4HeadProto uint8, ipv4DstAddr []by
 		fmt.Printf("build ip packet error: %v\n", err)
 		return nil
 	}
-	// ip路由
 	var ethDstMac []byte = nil
 	localIpUint32 := protocol.ConvIpAddrToUint32(i.IpAddr)
 	dstIpUint32 := protocol.ConvIpAddrToUint32(ipv4DstAddr)
@@ -46,7 +45,7 @@ func (i *NetIf) TxIpv4(ipv4Payload []byte, ipv4HeadProto uint8, ipv4DstAddr []by
 			return nil
 		}
 		i.EthRxChan <- ethFrm
-		return nil
+		return ethFrm
 	} else if localIpUint32&networkMaskUint32 == dstIpUint32&networkMaskUint32 {
 		// 同一子网
 		ethDstMac = i.GetArpCache(ipv4DstAddr)

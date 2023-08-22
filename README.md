@@ -90,7 +90,6 @@ import (
 
 	"github.com/flswld/halo/dpdk"
 	"github.com/flswld/halo/engine"
-	"github.com/flswld/halo/protocol/kcp"
 )
 
 // DirectDpdk 直接使用dpdk收发网络报文
@@ -123,42 +122,80 @@ func DirectDpdk() {
 func NetworkEngine() {
 	// 启动dpdk
 	dpdk.Run(&dpdk.Config{
-		GolangCpuCoreList: []int{5, 6},
+		GolangCpuCoreList: []int{7, 8, 9, 10},
 		StatsLog:          true,
-		DpdkCpuCoreList:   []int{1, 2, 3, 4},
+		DpdkCpuCoreList:   []int{1, 2, 3, 4, 5, 6},
 		DpdkMemChanNum:    4,
-		PortIdList:        []int{0},
+		PortIdList:        []int{0, 1},
 		RingBufferSize:    1024 * 1024 * 128,
 	})
+
 	// 初始化协议栈
-	e, _ := engine.InitEngine(&engine.Config{
+	e1, err := engine.InitEngine(&engine.Config{
 		DebugLog: false, // 调试日志
 		// 网卡列表
-		NetIfConfigList: []*engine.NetIfConfig{
+		NetIfList: []*engine.NetIfConfig{
 			{
-				Name:          "eth0",              // 网卡名
-				MacAddr:       "AA:AA:AA:AA:AA:AA", // mac地址
-				IpAddr:        "192.168.100.100",   // ip地址
-				NetworkMask:   "255.255.255.0",     // 子网掩码
-				GatewayIpAddr: "192.168.100.1",     // 网关ip地址
-				EthRxChan:     dpdk.Rx(0),          // 物理层接收管道
-				EthTxChan:     dpdk.Tx(0),          // 物理层发送管道
+				Name:        "eth0",              // 网卡名
+				MacAddr:     "AA:AA:AA:AA:AA:AA", // mac地址
+				IpAddr:      "192.168.100.100",   // ip地址
+				NetworkMask: "255.255.255.0",     // 子网掩码
+				EthRxChan:   dpdk.Rx(0),          // 物理层接收管道
+				EthTxChan:   dpdk.Tx(0),          // 物理层发送管道
+			},
+		},
+		// 路由表
+		RoutingTable: []*engine.RoutingEntryConfig{
+			{
+				DstIpAddr:   "0.0.0.0",       // 目的ip地址
+				NetworkMask: "0.0.0.0",       // 网络掩码
+				NextHop:     "192.168.100.1", // 下一跳
+				NetIf:       "eth0",          // 出接口
 			},
 		},
 	})
+	if err != nil {
+		panic(err)
+	}
+	e2, err := engine.InitEngine(&engine.Config{
+		DebugLog: false,
+		NetIfList: []*engine.NetIfConfig{
+			{
+				Name:        "eth0",
+				MacAddr:     "AA:AA:AA:AA:AA:BB",
+				IpAddr:      "192.168.111.111",
+				NetworkMask: "255.255.255.0",
+				EthRxChan:   dpdk.Rx(1),
+				EthTxChan:   dpdk.Tx(1),
+			},
+		},
+		RoutingTable: []*engine.RoutingEntryConfig{
+			{
+				DstIpAddr:   "0.0.0.0",
+				NetworkMask: "0.0.0.0",
+				NextHop:     "192.168.111.1",
+				NetIf:       "eth0",
+			},
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+
 	// 启动协议栈
-	e.RunEngine()
+	e1.RunEngine()
+	e2.RunEngine()
 
 	// kcp协议栈测试
-	e.GetNetIf("eth0").HandleUdp = kcp.UdpRx
-	kcp.UdpTx = e.GetNetIf("eth0").TxUdp
-	go kcpServer()
+	go kcpServer(e1.GetNetIf("eth0"))
 	time.Sleep(time.Second)
-	go kcpClient()
+	go kcpClient(e2.GetNetIf("eth0"))
 	time.Sleep(time.Minute)
 
 	// 停止协议栈
-	e.StopEngine()
+	e1.StopEngine()
+	e2.StopEngine()
+
 	// 停止dpdk
 	dpdk.Exit()
 }
@@ -170,6 +207,7 @@ func NetworkEngine() {
 - [X] 简易ARP+IPV4+ICMP协议栈
 - [X] KCP协议栈
 - [X] 多网卡支持
-- [ ] 路由转发功能
+- [X] 路由转发功能
 - [ ] NAT功能
 - [ ] 网卡多队列支持
+- [ ] DHCP功能

@@ -567,9 +567,13 @@ type (
 
 		rd atomic.Value // read deadline for Accept()
 
-		EnetNotify chan *Enet // Enet事件上报管道
+		enetNotifyChan chan *Enet // Enet事件上报管道
 	}
 )
+
+func (l *Listener) GetEnetNotifyChan() chan *Enet {
+	return l.enetNotifyChan
+}
 
 // packet input stage
 func (l *Listener) packetInput(data []byte, rawConv uint64) {
@@ -682,8 +686,8 @@ func Listen(conn *Conn) (*Listener, error) {
 	l.chAccepts = make(chan *UDPSession, acceptBacklog)
 	l.die = make(chan struct{})
 	l.chSocketReadError = make(chan struct{})
-	l.EnetNotify = make(chan *Enet, 1000)
-	go l.monitor()
+	l.enetNotifyChan = make(chan *Enet, 1000)
+	go l.rx()
 	return l, nil
 }
 

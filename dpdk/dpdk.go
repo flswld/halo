@@ -139,9 +139,11 @@ func BindCpuCore(core int) {
 // 收包
 func rx_pkt(port_index int) {
 	runtime.LockOSThread()
-	core := conf.GolangCpuCoreList[port_index*2+0]
+	core := 0
 	if conf.SingleCore {
 		core = conf.GolangCpuCoreList[0]
+	} else {
+		core = conf.GolangCpuCoreList[port_index*2+0]
 	}
 	ret := C.bind_cpu_core(C.int(core))
 	fmt.Printf("rx goroutine bind cpu core ret: %v, core: %v, port: %v\n", ret, core, conf.PortIdList[port_index])
@@ -171,9 +173,11 @@ func rx_pkt(port_index int) {
 // 发包
 func tx_pkt(port_index int) {
 	runtime.LockOSThread()
-	core := conf.GolangCpuCoreList[port_index*2+1]
+	core := 0
 	if conf.SingleCore {
 		core = conf.GolangCpuCoreList[0]
+	} else {
+		core = conf.GolangCpuCoreList[port_index*2+1]
 	}
 	ret := C.bind_cpu_core(C.int(core))
 	fmt.Printf("tx goroutine bind cpu core ret: %v, core: %v, port: %v\n", ret, core, conf.PortIdList[port_index])

@@ -117,3 +117,17 @@ func BuildIpv4Pkt(payload []byte, ipHeadProto uint8, srcAddr []byte, dstAddr []b
 	pkt = append(pkt, payload...)
 	return pkt, nil
 }
+
+func HandleIpv4PktTtl(pktRaw []byte) (pkt []byte, alive bool) {
+	if pktRaw[8] <= 1 {
+		return nil, false
+	}
+	pkt = pktRaw
+	pkt[8] -= 0x01
+	pkt[10] = 0x00
+	pkt[11] = 0x00
+	headerSum := GetCheckSum(pkt[:20])
+	pkt[10] = headerSum[0]
+	pkt[11] = headerSum[1]
+	return pkt, true
+}

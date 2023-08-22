@@ -24,11 +24,20 @@ func GetCheckSum(data []byte) []byte {
 	}
 }
 
-func ConvIpAddrToUint32(ipAddr []byte) (ipAddrUint32 uint32) {
-	ipAddrUint32 = uint32(0)
-	ipAddrUint32 += uint32(ipAddr[0]) << 24
-	ipAddrUint32 += uint32(ipAddr[1]) << 16
-	ipAddrUint32 += uint32(ipAddr[2]) << 8
-	ipAddrUint32 += uint32(ipAddr[3]) << 0
-	return ipAddrUint32
+func IpAddrToU(ipAddr []byte) (ipAddrU uint32) {
+	ipAddrU = uint32(0)
+	ipAddrU += uint32(ipAddr[0]) << 24
+	ipAddrU += uint32(ipAddr[1]) << 16
+	ipAddrU += uint32(ipAddr[2]) << 8
+	ipAddrU += uint32(ipAddr[3]) << 0
+	return ipAddrU
+}
+
+func UToIpAddr(ipAddrU uint32) (ipAddr []byte) {
+	ipAddr = make([]byte, 4)
+	ipAddr[0] = uint8(ipAddrU >> 24)
+	ipAddr[1] = uint8(ipAddrU >> 16)
+	ipAddr[2] = uint8(ipAddrU >> 8)
+	ipAddr[3] = uint8(ipAddrU >> 0)
+	return ipAddr
 }

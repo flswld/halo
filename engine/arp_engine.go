@@ -7,32 +7,32 @@ import (
 	"github.com/flswld/halo/protocol"
 )
 
-func (i *NetIf) ConvMacAddrToUint64(macAddr []byte) (macAddrUint64 uint64) {
-	macAddrUint64 = uint64(0)
-	macAddrUint64 += uint64(macAddr[0]) << 40
-	macAddrUint64 += uint64(macAddr[1]) << 32
-	macAddrUint64 += uint64(macAddr[2]) << 24
-	macAddrUint64 += uint64(macAddr[3]) << 16
-	macAddrUint64 += uint64(macAddr[4]) << 8
-	macAddrUint64 += uint64(macAddr[5]) << 0
-	return macAddrUint64
+func (i *NetIf) MacAddrToU(macAddr []byte) (macAddrU uint64) {
+	macAddrU = uint64(0)
+	macAddrU += uint64(macAddr[0]) << 40
+	macAddrU += uint64(macAddr[1]) << 32
+	macAddrU += uint64(macAddr[2]) << 24
+	macAddrU += uint64(macAddr[3]) << 16
+	macAddrU += uint64(macAddr[4]) << 8
+	macAddrU += uint64(macAddr[5]) << 0
+	return macAddrU
 }
 
-func (i *NetIf) ConvUint64ToMacAddr(macAddrUint64 uint64) (macAddr []byte) {
+func (i *NetIf) UToMacAddr(macAddrU uint64) (macAddr []byte) {
 	macAddr = make([]byte, 6)
-	macAddr[0] = uint8(macAddrUint64 >> 40)
-	macAddr[1] = uint8(macAddrUint64 >> 32)
-	macAddr[2] = uint8(macAddrUint64 >> 24)
-	macAddr[3] = uint8(macAddrUint64 >> 16)
-	macAddr[4] = uint8(macAddrUint64 >> 8)
-	macAddr[5] = uint8(macAddrUint64 >> 0)
+	macAddr[0] = uint8(macAddrU >> 40)
+	macAddr[1] = uint8(macAddrU >> 32)
+	macAddr[2] = uint8(macAddrU >> 24)
+	macAddr[3] = uint8(macAddrU >> 16)
+	macAddr[4] = uint8(macAddrU >> 8)
+	macAddr[5] = uint8(macAddrU >> 0)
 	return macAddr
 }
 
 func (i *NetIf) GetArpCache(ipAddr []byte) (macAddr []byte) {
-	ipAddrUint32 := protocol.ConvIpAddrToUint32(ipAddr)
+	ipAddrU := protocol.IpAddrToU(ipAddr)
 	i.ArpCacheTableLock.RLock()
-	macAddrUint64, exist := i.ArpCacheTable[ipAddrUint32]
+	macAddrU, exist := i.ArpCacheTable[ipAddrU]
 	i.ArpCacheTableLock.RUnlock()
 	if !exist {
 		// 不存在则发起ARP询问并返回空
@@ -41,26 +41,18 @@ func (i *NetIf) GetArpCache(ipAddr []byte) (macAddr []byte) {
 			fmt.Printf("build arp packet error: %v\n", err)
 			return
 		}
-		ethFrm, err := protocol.BuildEthFrm(arpPkt, BROADCAST_MAC_ADDR, i.MacAddr, protocol.ETH_PROTO_ARP)
-		if err != nil {
-			fmt.Printf("build ethernet frame error: %v\n", err)
-			return
-		}
-		if i.Engine.DebugLog {
-			fmt.Printf("tx arp pkt, eth frm len: %v, eth frm data: %v\n", len(ethFrm), ethFrm)
-		}
-		i.EthTxChan <- ethFrm
+		i.TxEthernet(arpPkt, BROADCAST_MAC_ADDR, protocol.ETH_PROTO_ARP)
 		return nil
 	}
-	macAddr = i.ConvUint64ToMacAddr(macAddrUint64)
+	macAddr = i.UToMacAddr(macAddrU)
 	return macAddr
 }
 
 func (i *NetIf) SetArpCache(ipAddr []byte, macAddr []byte) {
-	ipAddrUint32 := protocol.ConvIpAddrToUint32(ipAddr)
-	macAddrUint64 := i.ConvMacAddrToUint64(macAddr)
+	ipAddrU := protocol.IpAddrToU(ipAddr)
+	macAddrU := i.MacAddrToU(macAddr)
 	i.ArpCacheTableLock.Lock()
-	i.ArpCacheTable[ipAddrUint32] = macAddrUint64
+	i.ArpCacheTable[ipAddrU] = macAddrU
 	i.ArpCacheTableLock.Unlock()
 }
 
@@ -82,14 +74,6 @@ func (i *NetIf) HandleArp(ethPayload []byte, ethSrcMac []byte) {
 			fmt.Printf("build arp packet error: %v\n", err)
 			return
 		}
-		ethFrm, err := protocol.BuildEthFrm(arpPkt, arpSrcMac, i.MacAddr, protocol.ETH_PROTO_ARP)
-		if err != nil {
-			fmt.Printf("build ethernet frame error: %v\n", err)
-			return
-		}
-		if i.Engine.DebugLog {
-			fmt.Printf("tx arp pkt, eth frm len: %v, eth frm data: %v\n", len(ethFrm), ethFrm)
-		}
-		i.EthTxChan <- ethFrm
+		i.TxEthernet(arpPkt, arpSrcMac, protocol.ETH_PROTO_ARP)
 	}
 }

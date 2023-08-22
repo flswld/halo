@@ -10,7 +10,7 @@ func (s *UDPSession) rx() {
 		if n, err := s.conn.ReadFrom(buf); err == nil {
 			udpPayload := buf[:n]
 			if n == 20 {
-				connType, _, sessionId, conv, _, err := ParseEnet(udpPayload)
+				connType, enetType, sessionId, conv, _, err := ParseEnet(udpPayload)
 				if err != nil {
 					continue
 				}
@@ -18,11 +18,16 @@ func (s *UDPSession) rx() {
 					continue
 				}
 				if connType == ConnEnetFin {
+					s.SendEnetNotifyToPeer(&Enet{
+						SessionId: s.GetSessionId(),
+						Conv:      s.GetConv(),
+						ConnType:  ConnEnetFin,
+						EnetType:  enetType,
+					})
 					_ = s.Close()
 					continue
 				}
 			}
-
 			s.packetInput(udpPayload)
 		} else {
 			s.notifyReadError(err)
@@ -31,7 +36,7 @@ func (s *UDPSession) rx() {
 	}
 }
 
-func (l *Listener) monitor() {
+func (l *Listener) rx() {
 	buf := make([]byte, mtuLimit)
 	for {
 		if n, err := l.conn.ReadFrom(buf); err == nil {
@@ -50,28 +55,13 @@ func (l *Listener) monitor() {
 				switch connType {
 				case ConnEnetSyn:
 					// 客户端前置握手获取conv
-					l.EnetNotify <- &Enet{
-						SessionId: sessionId,
-						Conv:      conv,
-						ConnType:  ConnEnetSyn,
-						EnetType:  enetType,
-					}
+					l.enetNotifyChan <- &Enet{SessionId: sessionId, Conv: conv, ConnType: ConnEnetSyn, EnetType: enetType}
 				case ConnEnetEst:
 					// 连接建立
-					l.EnetNotify <- &Enet{
-						SessionId: sessionId,
-						Conv:      conv,
-						ConnType:  ConnEnetEst,
-						EnetType:  enetType,
-					}
+					l.enetNotifyChan <- &Enet{SessionId: sessionId, Conv: conv, ConnType: ConnEnetEst, EnetType: enetType}
 				case ConnEnetFin:
 					// 连接断开
-					l.EnetNotify <- &Enet{
-						SessionId: sessionId,
-						Conv:      conv,
-						ConnType:  ConnEnetFin,
-						EnetType:  enetType,
-					}
+					l.enetNotifyChan <- &Enet{SessionId: sessionId, Conv: conv, ConnType: ConnEnetFin, EnetType: enetType}
 				default:
 					continue
 				}
@@ -119,7 +109,5 @@ func (s *UDPSession) SendEnetNotifyToPeer(enet *Enet) {
 	if data == nil {
 		return
 	}
-	s.tx([]Message{{
-		Buffers: [][]byte{data},
-	}})
+	_, _ = s.conn.WriteTo(data)
 }

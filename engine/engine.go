@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"bytes"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,8 +23,22 @@ type NetIfConfig struct {
 	MacAddr     string      // mac地址
 	IpAddr      string      // ip地址
 	NetworkMask string      // 子网掩码
+	NatEnable   bool        // 网络地址转换
 	EthRxChan   chan []byte // 物理层接收管道
 	EthTxChan   chan []byte // 物理层发送管道
+}
+
+type OutNatEntry struct {
+	DstIpAddr uint32
+	DstPort   uint16
+	SrcIpAddr uint32
+	SrcPort   uint16
+}
+
+type InNatEntry struct {
+	IpAddr        uint32
+	Port          uint16
+	LastAliveTime uint32
 }
 
 type NetIf struct {
@@ -32,11 +48,15 @@ type NetIf struct {
 	NetworkMask []byte
 	EthRxChan   chan []byte
 	EthTxChan   chan []byte
+	LoChan      chan []byte
 	Engine      *Engine
 	// arp缓存表 key:ip value:mac
 	ArpCacheTable     map[uint32]uint64
 	ArpCacheTableLock sync.RWMutex
 	HandleUdp         func(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, ipv4SrcAddr []byte)
+	NatEnable         bool
+	NatTable          map[OutNatEntry]*InNatEntry
+	NatTableLock      sync.RWMutex
 }
 
 type RoutingEntryConfig struct {
@@ -119,10 +139,14 @@ func InitEngine(config *Config) (*Engine, error) {
 			NetworkMask:       networkMask,
 			EthRxChan:         netIfConfig.EthRxChan,
 			EthTxChan:         netIfConfig.EthTxChan,
+			LoChan:            make(chan []byte, 1024),
 			Engine:            r,
 			ArpCacheTable:     make(map[uint32]uint64),
 			ArpCacheTableLock: sync.RWMutex{},
 			HandleUdp:         nil,
+			NatEnable:         netIfConfig.NatEnable,
+			NatTable:          make(map[OutNatEntry]*InNatEntry),
+			NatTableLock:      sync.RWMutex{},
 		}
 		r.NetIfMap[netIf.Name] = netIf
 	}
@@ -187,7 +211,27 @@ func (i *NetIf) PacketHandle() {
 		if i.Engine.Stop {
 			break
 		}
-		ethFrm := <-i.EthRxChan
-		i.RxEthernet(ethFrm)
+		select {
+		case ethFrm := <-i.EthRxChan:
+			i.RxEthernet(ethFrm)
+		case ipv4Pkt := <-i.LoChan:
+			ipv4Payload, ipv4HeadProto, ipv4SrcAddr, ipv4DstAddr, err := protocol.ParseIpv4Pkt(ipv4Pkt)
+			if err != nil {
+				fmt.Printf("parse ip packet error: %v\n", err)
+				continue
+			}
+			if !bytes.Equal(ipv4DstAddr, i.IpAddr) {
+				continue
+			}
+			switch ipv4HeadProto {
+			case protocol.IPH_PROTO_ICMP:
+				i.RxIcmp(ipv4Payload, ipv4SrcAddr)
+			case protocol.IPH_PROTO_UDP:
+				i.RxUdp(ipv4Payload, ipv4SrcAddr)
+			case protocol.IPH_PROTO_TCP:
+				i.RxTcp()
+			default:
+			}
+		}
 	}
 }

@@ -17,7 +17,7 @@ import (
 +-----------------------------------------------+
 */
 
-func ParseUdpPkt(pkt []byte, srcAddr []byte, dstAddr []byte, checkSum bool) (payload []byte, srcPort uint16, dstPort uint16, err error) {
+func ParseUdpPkt(pkt []byte, srcAddr []byte, dstAddr []byte) (payload []byte, srcPort uint16, dstPort uint16, err error) {
 	if len(pkt) < 8 || len(pkt) > 1480 {
 		return nil, 0, 0, errors.New("udp packet len must >= 8 and <= 1480 bytes")
 	}
@@ -28,7 +28,7 @@ func ParseUdpPkt(pkt []byte, srcAddr []byte, dstAddr []byte, checkSum bool) (pay
 	// 总长度
 	totalLen := int(binary.BigEndian.Uint16([]byte{pkt[4], pkt[5]}))
 	// 检查校验和
-	if pkt[6] != 0x00 && pkt[7] != 0x00 && checkSum {
+	if pkt[6] != 0x00 && pkt[7] != 0x00 {
 		fakeHeader := make([]byte, 0)
 		fakeHeader = append(fakeHeader, srcAddr...)
 		fakeHeader = append(fakeHeader, dstAddr...)
@@ -47,7 +47,7 @@ func ParseUdpPkt(pkt []byte, srcAddr []byte, dstAddr []byte, checkSum bool) (pay
 	return payload, srcPort, dstPort, nil
 }
 
-func BuildUdpPkt(payload []byte, srcPort uint16, dstPort uint16, srcAddr []byte, dstAddr []byte, checkSum bool) (pkt []byte, err error) {
+func BuildUdpPkt(payload []byte, srcPort uint16, dstPort uint16, srcAddr []byte, dstAddr []byte) (pkt []byte, err error) {
 	if len(payload) > 1472 {
 		return nil, errors.New("payload len must <= 1472")
 	}
@@ -63,21 +63,19 @@ func BuildUdpPkt(payload []byte, srcPort uint16, dstPort uint16, srcAddr []byte,
 	pkt = append(pkt, 0x00, 0x00)
 	// 上层数据
 	pkt = append(pkt, payload...)
-	if checkSum {
-		// 计算校验和
-		fakeHeader := make([]byte, 0)
-		fakeHeader = append(fakeHeader, srcAddr...)
-		fakeHeader = append(fakeHeader, dstAddr...)
-		// 保留字节0x00+UDP协议号0x11
-		fakeHeader = append(fakeHeader, 0x00, 0x11)
-		// UDP报文总长度
-		fakeHeader = append(fakeHeader, byte(udpPktLen>>8), byte(udpPktLen))
-		sumData := make([]byte, 0)
-		sumData = append(sumData, fakeHeader...)
-		sumData = append(sumData, pkt...)
-		sum := GetCheckSum(sumData)
-		pkt[6] = sum[0]
-		pkt[7] = sum[1]
-	}
+	// 计算校验和
+	fakeHeader := make([]byte, 0)
+	fakeHeader = append(fakeHeader, srcAddr...)
+	fakeHeader = append(fakeHeader, dstAddr...)
+	// 保留字节0x00+UDP协议号0x11
+	fakeHeader = append(fakeHeader, 0x00, 0x11)
+	// UDP报文总长度
+	fakeHeader = append(fakeHeader, byte(udpPktLen>>8), byte(udpPktLen))
+	sumData := make([]byte, 0)
+	sumData = append(sumData, fakeHeader...)
+	sumData = append(sumData, pkt...)
+	sum := GetCheckSum(sumData)
+	pkt[6] = sum[0]
+	pkt[7] = sum[1]
 	return pkt, nil
 }

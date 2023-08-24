@@ -7,7 +7,7 @@ import (
 )
 
 func (i *NetIf) RxUdp(ipv4Payload []byte, ipv4SrcAddr []byte) {
-	udpPayload, udpSrcPort, udpDstPort, err := protocol.ParseUdpPkt(ipv4Payload, ipv4SrcAddr, i.IpAddr, true)
+	udpPayload, udpSrcPort, udpDstPort, err := protocol.ParseUdpPkt(ipv4Payload, ipv4SrcAddr, i.IpAddr)
 	if err != nil {
 		fmt.Printf("parse udp packet error: %v\n", err)
 		return
@@ -18,7 +18,7 @@ func (i *NetIf) RxUdp(ipv4Payload []byte, ipv4SrcAddr []byte) {
 }
 
 func (i *NetIf) TxUdp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, ipv4DstAddr []byte) []byte {
-	udpPkt, err := protocol.BuildUdpPkt(udpPayload, udpSrcPort, udpDstPort, i.IpAddr, ipv4DstAddr, true)
+	udpPkt, err := protocol.BuildUdpPkt(udpPayload, udpSrcPort, udpDstPort, i.IpAddr, ipv4DstAddr)
 	if err != nil {
 		fmt.Printf("build udp packet error: %v\n", err)
 		return nil

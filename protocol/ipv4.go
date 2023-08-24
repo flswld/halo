@@ -124,10 +124,108 @@ func HandleIpv4PktTtl(pktRaw []byte) (pkt []byte, alive bool) {
 	}
 	pkt = pktRaw
 	pkt[8] -= 0x01
+	pkt = ReCalcIpv4CheckSum(pkt)
+	return pkt, true
+}
+
+func ReCalcIpv4CheckSum(pktRaw []byte) (pkt []byte) {
+	pkt = pktRaw
 	pkt[10] = 0x00
 	pkt[11] = 0x00
 	headerSum := GetCheckSum(pkt[:20])
 	pkt[10] = headerSum[0]
 	pkt[11] = headerSum[1]
-	return pkt, true
+	return pkt
+}
+
+func ReCalcTcpCheckSum(pktRaw []byte) (pkt []byte) {
+	pkt = pktRaw
+	pkt[36] = 0x00
+	pkt[37] = 0x00
+	fakeHeader := make([]byte, 0)
+	fakeHeader = append(fakeHeader, pkt[12:16]...)
+	fakeHeader = append(fakeHeader, pkt[16:20]...)
+	fakeHeader = append(fakeHeader, 0x00, 0x06)
+	totalLen := int(binary.BigEndian.Uint16([]byte{pkt[2], pkt[3]}))
+	fakeHeader = append(fakeHeader, byte((totalLen-20)>>8), byte(totalLen-20))
+	checkSumSrc := make([]byte, 0)
+	checkSumSrc = append(checkSumSrc, fakeHeader...)
+	checkSumSrc = append(checkSumSrc, pkt[20:totalLen]...)
+	sum := GetCheckSum(checkSumSrc)
+	pkt[36] = sum[0]
+	pkt[37] = sum[1]
+	return pkt
+}
+
+func ReCalcUdpCheckSum(pktRaw []byte) (pkt []byte) {
+	pkt = pktRaw
+	pkt[26] = 0x00
+	pkt[27] = 0x00
+	fakeHeader := make([]byte, 0)
+	fakeHeader = append(fakeHeader, pkt[12:16]...)
+	fakeHeader = append(fakeHeader, pkt[16:20]...)
+	fakeHeader = append(fakeHeader, 0x00, 0x11)
+	totalLen := int(binary.BigEndian.Uint16([]byte{pkt[2], pkt[3]}))
+	fakeHeader = append(fakeHeader, byte((totalLen-20)>>8), byte(totalLen-20))
+	sumData := make([]byte, 0)
+	sumData = append(sumData, fakeHeader...)
+	sumData = append(sumData, pkt[20:totalLen]...)
+	sum := GetCheckSum(sumData)
+	pkt[26] = sum[0]
+	pkt[27] = sum[1]
+	return pkt
+}
+
+func NatGetSrcDstPort(pkt []byte) (srcPort uint16, dstPort uint16) {
+	switch pkt[9] {
+	case IPH_PROTO_ICMP:
+		srcPort = 0
+		dstPort = 0
+	case IPH_PROTO_UDP:
+		fallthrough
+	case IPH_PROTO_TCP:
+		srcPort = binary.BigEndian.Uint16(pkt[20:22])
+		dstPort = binary.BigEndian.Uint16(pkt[22:24])
+	}
+	return srcPort, dstPort
+}
+
+func NatChangeSrc(pktRaw []byte, ipAddr []byte, port uint16) (pkt []byte) {
+	pkt = pktRaw
+	pkt[12] = ipAddr[0]
+	pkt[13] = ipAddr[1]
+	pkt[14] = ipAddr[2]
+	pkt[15] = ipAddr[3]
+	pkt = ReCalcIpv4CheckSum(pkt)
+	switch pkt[9] {
+	case IPH_PROTO_TCP:
+		pkt[20] = byte(port >> 8)
+		pkt[21] = byte(port)
+		pkt = ReCalcTcpCheckSum(pkt)
+	case IPH_PROTO_UDP:
+		pkt[20] = byte(port >> 8)
+		pkt[21] = byte(port)
+		pkt = ReCalcUdpCheckSum(pkt)
+	}
+	return pkt
+}
+
+func NatChangeDst(pktRaw []byte, ipAddr []byte, port uint16) (pkt []byte) {
+	pkt = pktRaw
+	pkt[16] = ipAddr[0]
+	pkt[17] = ipAddr[1]
+	pkt[18] = ipAddr[2]
+	pkt[19] = ipAddr[3]
+	pkt = ReCalcIpv4CheckSum(pkt)
+	switch pkt[9] {
+	case IPH_PROTO_TCP:
+		pkt[22] = byte(port >> 8)
+		pkt[23] = byte(port)
+		pkt = ReCalcTcpCheckSum(pkt)
+	case IPH_PROTO_UDP:
+		pkt[22] = byte(port >> 8)
+		pkt[23] = byte(port)
+		pkt = ReCalcUdpCheckSum(pkt)
+	}
+	return pkt
 }

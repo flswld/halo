@@ -58,6 +58,7 @@ func NetworkEngine() {
 				MacAddr:     "AA:AA:AA:AA:AA:AA", // mac地址
 				IpAddr:      "192.168.100.100",   // ip地址
 				NetworkMask: "255.255.255.0",     // 子网掩码
+				NatEnable:   false,               // 网络地址转换
 				EthRxChan:   dpdk.Rx(0),          // 物理层接收管道
 				EthTxChan:   dpdk.Tx(0),          // 物理层发送管道
 			},
@@ -187,6 +188,7 @@ func EthernetRouter() {
 				MacAddr:     "AA:AA:AA:AA:AA:AA",
 				IpAddr:      "192.168.100.100",
 				NetworkMask: "255.255.255.0",
+				NatEnable:   true,
 				EthRxChan:   dpdk.Rx(0),
 				EthTxChan:   dpdk.Tx(0),
 			},
@@ -195,6 +197,7 @@ func EthernetRouter() {
 				MacAddr:     "AA:AA:AA:AA:AA:BB",
 				IpAddr:      "192.168.99.99",
 				NetworkMask: "255.255.255.0",
+				NatEnable:   true,
 				EthRxChan:   dpdk.Rx(1),
 				EthTxChan:   dpdk.Tx(1),
 			},

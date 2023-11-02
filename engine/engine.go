@@ -29,34 +29,46 @@ type NetIfConfig struct {
 }
 
 type OutNatEntry struct {
-	DstIpAddr uint32
-	DstPort   uint16
-	SrcIpAddr uint32
-	SrcPort   uint16
+	DstIpAddr uint32 // 目的ip地址
+	DstPort   uint16 // 目的端口
+	SrcIpAddr uint32 // 源ip地址
+	SrcPort   uint16 // 源端口
 }
 
 type InNatEntry struct {
-	IpAddr        uint32
-	Port          uint16
-	LastAliveTime uint32
+	IpAddr        uint32 // ip地址
+	Port          uint16 // 端口
+	LastAliveTime uint32 // 上一次活跃时间
 }
 
 type NetIf struct {
-	Name        string
-	MacAddr     []byte
-	IpAddr      []byte
-	NetworkMask []byte
-	EthRxChan   chan []byte
-	EthTxChan   chan []byte
-	LoChan      chan []byte
-	Engine      *Engine
-	// arp缓存表 key:ip value:mac
-	ArpCacheTable     map[uint32]uint64
-	ArpCacheTableLock sync.RWMutex
+	Name              string                      // 接口名
+	MacAddr           []byte                      // mac地址
+	IpAddr            []byte                      // ip地址
+	NetworkMask       []byte                      // 子网掩码
+	EthRxChan         chan []byte                 // 物理层接收管道
+	EthTxChan         chan []byte                 // 物理层发送管道
+	LoChan            chan []byte                 // 本地回环管道
+	Engine            *Engine                     // 归属Engine指针
+	ArpCacheTable     map[uint32]uint64           // arp缓存表 key:ip value:mac
+	ArpCacheTableLock sync.RWMutex                // arp缓存表锁
+	NatEnable         bool                        // 是否开启nat
+	NatTable          map[OutNatEntry]*InNatEntry // nat表
+	NatTableLock      sync.RWMutex                // nat表锁
+	NatPortAlloc      map[uint32]*PortAlloc       // nat端口分配表 key:目的ip value:端口分配信息
+	NatPortAllocLock  sync.RWMutex                // nat端口分配表锁
 	HandleUdp         func(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, ipv4SrcAddr []byte)
-	NatEnable         bool
-	NatTable          map[OutNatEntry]*InNatEntry
-	NatTableLock      sync.RWMutex
+}
+
+type PortAlloc struct {
+	Lock          sync.RWMutex        // 锁
+	AllocPortMap  map[SrcAddr]uint16  // 分配端口集合 key:源地址 value:端口
+	RemainPortMap map[uint16]struct{} // 剩余端口集合 key:端口
+}
+
+type SrcAddr struct {
+	IpAddr uint32 // ip地址
+	Port   uint16 // 端口
 }
 
 type RoutingEntryConfig struct {
@@ -67,18 +79,18 @@ type RoutingEntryConfig struct {
 }
 
 type RoutingEntry struct {
-	DstIpAddr   []byte
-	NetworkMask []byte
-	NextHop     []byte
-	NetIf       string
+	DstIpAddr   []byte // 目的ip地址
+	NetworkMask []byte // 网络掩码
+	NextHop     []byte // 下一跳
+	NetIf       string // 出接口
 }
 
 type Engine struct {
-	DebugLog       bool
-	Stop           bool
-	NetIfMap       map[string]*NetIf
-	RoutingTable   []*RoutingEntry
-	Ipv4PktFwdHook func(ipv4Pkt []byte) []byte
+	DebugLog       bool                        // 调试日志
+	Stop           bool                        // 停止标志
+	NetIfMap       map[string]*NetIf           // 网络接口集合 key:接口名 value:接口实例
+	RoutingTable   []*RoutingEntry             // 路由表
+	Ipv4PktFwdHook func(ipv4Pkt []byte) []byte // ip报文路由转发数据修改钩子
 }
 
 var (
@@ -143,10 +155,12 @@ func InitEngine(config *Config) (*Engine, error) {
 			Engine:            r,
 			ArpCacheTable:     make(map[uint32]uint64),
 			ArpCacheTableLock: sync.RWMutex{},
-			HandleUdp:         nil,
 			NatEnable:         netIfConfig.NatEnable,
 			NatTable:          make(map[OutNatEntry]*InNatEntry),
 			NatTableLock:      sync.RWMutex{},
+			NatPortAlloc:      make(map[uint32]*PortAlloc),
+			NatPortAllocLock:  sync.RWMutex{},
+			HandleUdp:         nil,
 		}
 		r.NetIfMap[netIf.Name] = netIf
 	}
@@ -194,6 +208,9 @@ func InitEngine(config *Config) (*Engine, error) {
 func (e *Engine) RunEngine() {
 	for _, netIf := range e.NetIfMap {
 		go netIf.PacketHandle()
+		if netIf.NatEnable {
+			go netIf.NatTableClear()
+		}
 	}
 	time.Sleep(time.Second * 10)
 }
@@ -233,5 +250,31 @@ func (i *NetIf) PacketHandle() {
 			default:
 			}
 		}
+	}
+}
+
+func (i *NetIf) NatTableClear() {
+	ticker := time.NewTicker(time.Minute * 10)
+	for {
+		<-ticker.C
+		if i.Engine.Stop {
+			break
+		}
+		now := uint32(time.Now().Unix())
+		i.NatTableLock.Lock()
+		for outNatEntry, inNatEntry := range i.NatTable {
+			if now-inNatEntry.LastAliveTime > 600 {
+				delete(i.NatTable, outNatEntry)
+				portAlloc := i.NatPortAlloc[outNatEntry.DstIpAddr]
+				if portAlloc == nil {
+					continue
+				}
+				portAlloc.Lock.Lock()
+				delete(portAlloc.AllocPortMap, SrcAddr{IpAddr: inNatEntry.IpAddr, Port: inNatEntry.Port})
+				portAlloc.RemainPortMap[outNatEntry.SrcPort] = struct{}{}
+				portAlloc.Lock.Unlock()
+			}
+		}
+		i.NatTableLock.Unlock()
 	}
 }

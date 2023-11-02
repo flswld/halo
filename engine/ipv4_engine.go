@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/flswld/halo/protocol"
@@ -39,16 +40,18 @@ func (i *NetIf) RxIpv4(ethPayload []byte) {
 		dstIpAddrU := protocol.IpAddrToU(ipv4DstAddr)
 		var nextHopIpAddr []byte = nil
 		outNetIfName := ""
+		lpmNetworkMaskU := uint32(0)
 		for _, routingEntry := range i.Engine.RoutingTable {
-			// TODO 最长前缀匹配
 			routeDstIpAddrU := protocol.IpAddrToU(routingEntry.DstIpAddr)
 			routeNetworkMaskU := protocol.IpAddrToU(routingEntry.NetworkMask)
 			if dstIpAddrU&routeNetworkMaskU != routeDstIpAddrU {
 				continue
 			}
-			nextHopIpAddr = routingEntry.NextHop
-			outNetIfName = routingEntry.NetIf
-			break
+			if routeNetworkMaskU >= lpmNetworkMaskU {
+				lpmNetworkMaskU = routeNetworkMaskU
+				nextHopIpAddr = routingEntry.NextHop
+				outNetIfName = routingEntry.NetIf
+			}
 		}
 		if nextHopIpAddr == nil && outNetIfName == "" {
 			fmt.Printf("no route found for: %v\n", ipv4DstAddr)
@@ -72,12 +75,51 @@ func (i *NetIf) RxIpv4(ethPayload []byte) {
 		if !alive {
 			return
 		}
+		if outNetIf.Engine.Ipv4PktFwdHook != nil {
+			ethPayload = outNetIf.Engine.Ipv4PktFwdHook(ethPayload)
+		}
 		if outNetIf.NatEnable {
 			// 私网地址 -> 公网地址
 			srcPort, dstPort := protocol.NatGetSrcDstPort(ethPayload)
 			newSrcAddr := outNetIf.IpAddr
-			// TODO 支持多个私网地址访问同一个公网地址
-			newSrcPort := srcPort
+			newSrcPort := uint16(0)
+			if srcPort != 0 {
+				// nat端口分配
+				outNetIf.NatPortAllocLock.RLock()
+				portAlloc, exist := outNetIf.NatPortAlloc[protocol.IpAddrToU(ipv4DstAddr)]
+				outNetIf.NatPortAllocLock.RUnlock()
+				if !exist {
+					portAlloc = &PortAlloc{
+						Lock:          sync.RWMutex{},
+						AllocPortMap:  make(map[SrcAddr]uint16),
+						RemainPortMap: make(map[uint16]struct{}),
+					}
+					for port := uint16(10000); port < 60000; port++ {
+						portAlloc.RemainPortMap[port] = struct{}{}
+					}
+					outNetIf.NatPortAllocLock.Lock()
+					outNetIf.NatPortAlloc[protocol.IpAddrToU(ipv4DstAddr)] = portAlloc
+					outNetIf.NatPortAllocLock.Unlock()
+				}
+				portAlloc.Lock.RLock()
+				newSrcPort, exist = portAlloc.AllocPortMap[SrcAddr{IpAddr: protocol.IpAddrToU(ipv4SrcAddr), Port: srcPort}]
+				portAlloc.Lock.RUnlock()
+				if !exist {
+					portAlloc.Lock.Lock()
+					if len(portAlloc.RemainPortMap) != 0 {
+						for port := range portAlloc.RemainPortMap {
+							newSrcPort = port
+							portAlloc.AllocPortMap[SrcAddr{IpAddr: protocol.IpAddrToU(ipv4SrcAddr), Port: srcPort}] = port
+							delete(portAlloc.RemainPortMap, port)
+							break
+						}
+					}
+					portAlloc.Lock.Unlock()
+				}
+				if newSrcPort == 0 {
+					return
+				}
+			}
 			outNetIf.NatTableLock.Lock()
 			outNetIf.NatTable[OutNatEntry{
 				DstIpAddr: protocol.IpAddrToU(ipv4DstAddr),
@@ -91,9 +133,6 @@ func (i *NetIf) RxIpv4(ethPayload []byte) {
 			}
 			outNetIf.NatTableLock.Unlock()
 			ethPayload = protocol.NatChangeSrc(ethPayload, newSrcAddr, newSrcPort)
-		}
-		if outNetIf.Engine.Ipv4PktFwdHook != nil {
-			ethPayload = outNetIf.Engine.Ipv4PktFwdHook(ethPayload)
 		}
 		outNetIf.TxEthernet(ethPayload, ethDstMac, protocol.ETH_PROTO_IPV4)
 		return
@@ -119,16 +158,18 @@ func (i *NetIf) TxIpv4(ipv4Payload []byte, ipv4HeadProto uint8, ipv4DstAddr []by
 	dstIpAddrU := protocol.IpAddrToU(ipv4DstAddr)
 	var nextHopIpAddr []byte = nil
 	outNetIfName := ""
+	lpmNetworkMaskU := uint32(0)
 	for _, routingEntry := range i.Engine.RoutingTable {
-		// TODO 最长前缀匹配
 		routeDstIpAddrU := protocol.IpAddrToU(routingEntry.DstIpAddr)
 		routeNetworkMaskU := protocol.IpAddrToU(routingEntry.NetworkMask)
 		if dstIpAddrU&routeNetworkMaskU != routeDstIpAddrU {
 			continue
 		}
-		nextHopIpAddr = routingEntry.NextHop
-		outNetIfName = routingEntry.NetIf
-		break
+		if routeNetworkMaskU >= lpmNetworkMaskU {
+			lpmNetworkMaskU = routeNetworkMaskU
+			nextHopIpAddr = routingEntry.NextHop
+			outNetIfName = routingEntry.NetIf
+		}
 	}
 	if nextHopIpAddr == nil && outNetIfName == "" {
 		fmt.Printf("no route found for: %v\n", ipv4DstAddr)

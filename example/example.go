@@ -232,12 +232,12 @@ func EthernetRouter() {
 	// 启动协议栈
 	e.RunEngine()
 
-	e.Ipv4PktFwdHook = func(ipv4Pkt []byte) []byte {
-		payload, _, srcAddr, dstAddr, err := protocol.ParseIpv4Pkt(ipv4Pkt)
+	e.Ipv4PktFwdHook = func(raw []byte) (drop bool, mod []byte) {
+		payload, _, srcAddr, dstAddr, err := protocol.ParseIpv4Pkt(raw)
 		if err == nil {
 			fmt.Printf("[IPV4 ROUTE FWD] src: %v -> dst: %v, len: %v\n", srcAddr, dstAddr, len(payload))
 		}
-		return ipv4Pkt
+		return false, raw
 	}
 
 	time.Sleep(time.Minute)

@@ -39,7 +39,7 @@ func (i *NetIf) GetArpCache(ipAddr []byte) (macAddr []byte) {
 		arpPkt, err := protocol.BuildArpPkt(protocol.ARP_REQUEST, i.MacAddr, i.IpAddr, BROADCAST_MAC_ADDR, ipAddr)
 		if err != nil {
 			fmt.Printf("build arp packet error: %v\n", err)
-			return
+			return nil
 		}
 		i.TxEthernet(arpPkt, BROADCAST_MAC_ADDR, protocol.ETH_PROTO_ARP)
 		return nil

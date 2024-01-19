@@ -10,12 +10,8 @@ import (
 	"unsafe"
 )
 
-// 确保CGO开启并添加以下环境变量
-// export CGO_CFLAGS_ALLOW=.*
-// export CGO_LDFLAGS_ALLOW=.*
-
-// #cgo CFLAGS: -I/root/dpdk-stable-18.11.11/x86_64-native-linuxapp-gcc/include -msse4.2
-// #cgo LDFLAGS: -L/root/dpdk-stable-18.11.11/x86_64-native-linuxapp-gcc/lib -Wl,--whole-archive -ldpdk -Wl,--no-whole-archive -ldl -pthread -lnuma -lm
+// #cgo CFLAGS: -msse4.2
+// #cgo LDFLAGS: -Wl,--whole-archive -ldpdk -Wl,--no-whole-archive -ldl -pthread -lnuma -lm
 // #include "./cgo/dpdk.c"
 import "C"
 
@@ -77,7 +73,7 @@ func Run(config *Config) {
 	}
 	go run_dpdk()
 	// 等待DPDK启动完成
-	time.Sleep(time.Second * 10)
+	time.Sleep(time.Second * 60)
 	port_ring_buffer = make([]ring_buffer, len(conf.PortIdList))
 	port_dpdk_rx_chan = make([]chan []byte, len(conf.PortIdList))
 	port_dpdk_tx_chan = make([]chan []byte, len(conf.PortIdList))

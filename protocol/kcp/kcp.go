@@ -21,7 +21,7 @@ const (
 	IKCP_MTU_DEF     = 1400
 	IKCP_ACK_FAST    = 3
 	IKCP_INTERVAL    = 100
-	IKCP_OVERHEAD    = 24 + 4 // KCP组合会话id是8个字节
+	IKCP_OVERHEAD    = 24 + 4 + 4 // KCP组合会话id是8个字节
 	IKCP_DEADLINK    = 20
 	IKCP_THRESH_INIT = 2
 	IKCP_THRESH_MIN  = 2
@@ -136,6 +136,7 @@ func (seg *segment) encode(ptr []byte) []byte {
 	ptr = ikcp_encode32u(ptr, seg.sn)
 	ptr = ikcp_encode32u(ptr, seg.una)
 	ptr = ikcp_encode32u(ptr, uint32(len(seg.data)))
+	ptr = ikcp_encode32u(ptr, uint32(0))
 	return ptr
 }
 
@@ -549,7 +550,7 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 	var windowSlides bool
 
 	for {
-		var ts, sn, length, una uint32
+		var ts, sn, length, una, crc uint32
 		var conv uint64
 		var wnd uint16
 		var cmd, frg uint8
@@ -570,6 +571,7 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 		data = ikcp_decode32u(data, &sn)
 		data = ikcp_decode32u(data, &una)
 		data = ikcp_decode32u(data, &length)
+		data = ikcp_decode32u(data, &crc)
 		if len(data) < int(length) {
 			return -2
 		}

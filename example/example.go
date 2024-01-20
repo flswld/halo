@@ -232,7 +232,7 @@ func EthernetRouter() {
 	// 启动协议栈
 	e.RunEngine()
 
-	e.Ipv4PktFwdHook = func(raw []byte) (drop bool, mod []byte) {
+	e.Ipv4PktFwdHook = func(raw []byte, dir int) (drop bool, mod []byte) {
 		payload, _, srcAddr, dstAddr, err := protocol.ParseIpv4Pkt(raw)
 		if err == nil {
 			fmt.Printf("[IPV4 ROUTE FWD] src: %v -> dst: %v, len: %v\n", srcAddr, dstAddr, len(payload))
@@ -311,6 +311,109 @@ func DDoS() {
 	time.Sleep(time.Minute)
 	exit = true
 	time.Sleep(time.Second)
+
+	// 停止协议栈
+	e.StopEngine()
+
+	// 停止dpdk
+	dpdk.Exit()
+}
+
+// MagicPacketModifier 魔法改包器
+func MagicPacketModifier() {
+	// 启动dpdk
+	dpdk.Run(&dpdk.Config{
+		GolangCpuCoreList: []int{7, 8, 9, 10},
+		StatsLog:          true,
+		DpdkCpuCoreList:   []int{1, 2, 3, 4, 5, 6},
+		DpdkMemChanNum:    4,
+		PortIdList:        []int{0, 1},
+		RingBufferSize:    1024 * 1024 * 128,
+	})
+
+	// 初始化协议栈
+	e, err := engine.InitEngine(&engine.Config{
+		DebugLog: false,
+		NetIfList: []*engine.NetIfConfig{
+			{
+				Name:        "wan0",
+				MacAddr:     "AA:AA:AA:AA:AA:AA",
+				IpAddr:      "192.168.100.100",
+				NetworkMask: "255.255.255.0",
+				NatEnable:   true,
+				EthRxChan:   dpdk.Rx(0),
+				EthTxChan:   dpdk.Tx(0),
+			},
+			{
+				Name:        "lan0",
+				MacAddr:     "AA:AA:AA:AA:AA:BB",
+				IpAddr:      "192.168.111.111",
+				NetworkMask: "255.255.255.0",
+				EthRxChan:   dpdk.Rx(1),
+				EthTxChan:   dpdk.Tx(1),
+			},
+		},
+		RoutingTable: []*engine.RoutingEntryConfig{
+			{
+				DstIpAddr:   "0.0.0.0",
+				NetworkMask: "0.0.0.0",
+				NextHop:     "192.168.100.1",
+				NetIf:       "wan0",
+			},
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// 启动协议栈
+	e.RunEngine()
+
+	e.Ipv4PktFwdHook = func(raw []byte, dir int) (drop bool, mod []byte) {
+		// 数据包监听回调
+		ipv4Payload, ipHeadProto, srcAddr, dstAddr, err := protocol.ParseIpv4Pkt(raw)
+		if err != nil {
+			return false, raw
+		}
+		// 只对UDP包加魔法
+		if ipHeadProto != protocol.IPH_PROTO_UDP {
+			return false, raw
+		}
+		if len(raw) > 1000 {
+			// 超过1000的包直接丢掉
+			return true, nil
+		} else if len(raw) > 500 {
+			// 500-1000的包末尾大部分字节改为0x00
+			mod = make([]byte, len(raw))
+			for i := len(mod) - 1; i > 100; i-- {
+				mod[i] = 0x00
+			}
+			mod = protocol.ReCalcIpv4CheckSum(mod)
+			mod = protocol.ReCalcUdpCheckSum(mod)
+			return false, mod
+		} else {
+			// 500以下的包
+			if dir == engine.WanToLan {
+				// 对于服务器下行包复制一份延迟一秒后再裁剪一半数据发给客户端
+				udpPayload, srcPort, dstPort, err := protocol.ParseUdpPkt(ipv4Payload, srcAddr, dstAddr)
+				if err != nil {
+					return false, raw
+				}
+				go func() {
+					time.Sleep(time.Second)
+					e.GetNetIf("wan0").SendUdpPktByFlow(engine.NatFlowHash{
+						RemoteIpAddr:  protocol.IpAddrToU(srcAddr),
+						RemotePort:    srcPort,
+						LanHostIpAddr: protocol.IpAddrToU(dstAddr),
+						LanHostPort:   dstPort,
+					}, engine.WanToLan, udpPayload[:len(udpPayload)/2])
+				}()
+			}
+			return false, raw
+		}
+	}
+
+	time.Sleep(time.Minute)
 
 	// 停止协议栈
 	e.StopEngine()

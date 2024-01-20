@@ -73,7 +73,7 @@ func Run(config *Config) {
 	}
 	go run_dpdk()
 	// 等待DPDK启动完成
-	time.Sleep(time.Second * 60)
+	time.Sleep(time.Second * 30)
 	port_ring_buffer = make([]ring_buffer, len(conf.PortIdList))
 	port_dpdk_rx_chan = make([]chan []byte, len(conf.PortIdList))
 	port_dpdk_tx_chan = make([]chan []byte, len(conf.PortIdList))

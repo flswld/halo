@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"fmt"
+	"time"
 
 	"github.com/flswld/halo/protocol"
 )
@@ -18,16 +19,17 @@ func (i *NetIf) RxIpv4(ethPayload []byte) {
 		return
 	}
 	if !bytes.Equal(ipv4DstAddr, i.IpAddr) || i.NatEnable {
-		// 三层路由
+		// DNAT 公网地址 -> 私网地址
 		if i.NatEnable {
-			// DNAT 公网地址 -> 私网地址
 			srcPort, dstPort := protocol.NatGetSrcDstPort(ethPayload)
 			natFlow := i.NatGetFlowByWan(ipv4SrcAddr, srcPort, ipv4DstAddr, dstPort)
 			if natFlow == nil {
 				return
 			}
+			natFlow.LastAliveTime = uint32(time.Now().Unix())
 			ethPayload = protocol.NatChangeDst(ethPayload, protocol.UToIpAddr(natFlow.LanHostIpAddr), natFlow.LanHostPort)
 		}
+		// 三层路由
 		nextHopIpAddr, outNetIfName := i.FindRoute(ipv4DstAddr)
 		if nextHopIpAddr == nil && outNetIfName == "" {
 			fmt.Printf("no route found for: %v\n", ipv4DstAddr)
@@ -46,22 +48,39 @@ func (i *NetIf) RxIpv4(ethPayload []byte) {
 		if !alive {
 			return
 		}
+		// 外部钩子回调
 		if outNetIf.Engine.Ipv4PktFwdHook != nil {
-			drop, mod := outNetIf.Engine.Ipv4PktFwdHook(ethPayload)
+			dir := 0
+			if i.NatEnable {
+				dir = WanToLan
+			} else {
+				dir = LanToWan
+			}
+			drop, mod := outNetIf.Engine.Ipv4PktFwdHook(ethPayload, dir)
 			if drop {
 				return
 			}
 			ethPayload = mod
 		}
+		// SNAT 私网地址 -> 公网地址
 		if outNetIf.NatEnable {
-			// SNAT 私网地址 -> 公网地址
 			srcPort, dstPort := protocol.NatGetSrcDstPort(ethPayload)
-			natFlow := outNetIf.NatAddFlow(ipv4SrcAddr, ipv4DstAddr, srcPort, dstPort)
+			natFlow := outNetIf.NatGetFlowByHash(NatFlowHash{
+				RemoteIpAddr:  protocol.IpAddrToU(ipv4DstAddr),
+				RemotePort:    dstPort,
+				LanHostIpAddr: protocol.IpAddrToU(ipv4SrcAddr),
+				LanHostPort:   srcPort,
+			})
 			if natFlow == nil {
-				return
+				natFlow = outNetIf.NatAddFlow(ipv4SrcAddr, ipv4DstAddr, srcPort, dstPort)
+				if natFlow == nil {
+					return
+				}
 			}
+			natFlow.LastAliveTime = uint32(time.Now().Unix())
 			ethPayload = protocol.NatChangeSrc(ethPayload, protocol.UToIpAddr(natFlow.WanIpAddr), natFlow.WanPort)
 		}
+		// 二层封装
 		var ethDstMac []byte = nil
 		if nextHopIpAddr != nil {
 			ethDstMac = outNetIf.GetArpCache(nextHopIpAddr)
@@ -105,6 +124,7 @@ func (i *NetIf) TxIpv4(ipv4Payload []byte, ipv4HeadProto uint8, ipv4DstAddr []by
 		outNetIf.LoChan <- ipv4Pkt
 		return ipv4Pkt
 	}
+	// 二层封装
 	var ethDstMac []byte = nil
 	if nextHopIpAddr != nil {
 		ethDstMac = outNetIf.GetArpCache(nextHopIpAddr)

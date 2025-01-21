@@ -84,13 +84,17 @@ type Config struct {
 	TrackLine    bool
 	TrackThread  bool
 	EnableFile   bool
+	FilePath     string
+	FileSizeCut  bool
 	FileMaxSize  int32
+	FileTimeCut  bool
 	DisableColor bool
 	EnableJson   bool
 }
 
 type Logger struct {
 	FileTagMap    map[string]*os.File
+	LastLogTime   time.Time
 	LogInfoChan   chan *LogInfo
 	WriteBuf      []byte
 	WriteCacheNum int32
@@ -119,18 +123,31 @@ func InitLogger(cfg *Config) {
 			TrackLine:    true,
 			TrackThread:  false,
 			EnableFile:   false,
-			FileMaxSize:  0,
+			FilePath:     "./log",
+			FileSizeCut:  false,
+			FileMaxSize:  defaultFileMaxSize,
+			FileTimeCut:  true,
 			DisableColor: false,
 			EnableJson:   false,
 		}
 	}
 	config = cfg
-	if config.FileMaxSize == 0 {
-		config.FileMaxSize = defaultFileMaxSize
+	if config.EnableFile {
+		if config.FilePath == "" {
+			config.FilePath = "./log"
+		}
+		if config.FileMaxSize == 0 {
+			config.FileMaxSize = defaultFileMaxSize
+		}
+		err := os.MkdirAll(config.FilePath, 0644)
+		if err != nil {
+			panic(fmt.Sprintf("make log dir error: %v", err))
+		}
 	}
 
 	logger = new(Logger)
 	logger.FileTagMap = make(map[string]*os.File)
+	logger.LastLogTime = time.Now()
 	logger.LogInfoChan = make(chan *LogInfo, logInfoChanSize)
 	logger.WriteBuf = make([]byte, 0)
 	logger.WriteCacheNum = 0
@@ -224,7 +241,7 @@ func (l *Logger) doLog() {
 			logBuf.Write(lineFeed)
 
 			logData := logBuf.Bytes()
-			l.writeLog(logData, logInfo.Tag)
+			l.writeLog(logData, logInfo.Tag, logInfo.Time)
 			putBuf(logInfo.Msg)
 			logInfoPool.Put(logInfo)
 			logBuf.Reset()
@@ -240,15 +257,31 @@ func (l *Logger) doLog() {
 	}
 }
 
-func (l *Logger) writeLog(logData []byte, logTag string) {
-	if config.EnableFile && logTag != "" {
-		l.writeLogFile(logData, logTag)
+func (l *Logger) writeLog(logData []byte, logTag string, logTime time.Time) {
+	defer func() {
+		l.LastLogTime = logTime
+	}()
+	if config.EnableFile {
+		if config.FileTimeCut {
+			if l.LastLogTime.Year() != logTime.Year() || l.LastLogTime.YearDay() != logTime.YearDay() {
+				for k := range l.FileTagMap {
+					l.cutLogFile(k)
+				}
+			}
+		}
+		if logTag != "" {
+			l.writeLogFile(logData, logTag)
+		}
 	}
 	l.WriteBuf = append(l.WriteBuf, logData...)
 	l.WriteCacheNum++
 	if len(l.LogInfoChan) != 0 && l.WriteCacheNum < maxWriteCacheNum {
 		return
 	}
+	l.flushLog()
+}
+
+func (l *Logger) flushLog() {
 	l.writeLogConsole(l.WriteBuf)
 	if config.EnableFile {
 		l.writeLogFile(l.WriteBuf, "")
@@ -264,7 +297,7 @@ func (l *Logger) writeLogConsole(logData []byte) {
 func (l *Logger) writeLogFile(logData []byte, logTag string) {
 	logFile := l.FileTagMap[logTag]
 	if logFile == nil {
-		fileName := "./log/" + config.AppName + ".log"
+		fileName := config.FilePath + "/" + config.AppName + ".log"
 		if logTag != "" {
 			fileName += "." + logTag
 		}
@@ -276,40 +309,50 @@ func (l *Logger) writeLogFile(logData []byte, logTag string) {
 		logFile = file
 		l.FileTagMap[logTag] = logFile
 	}
-	fileStat, err := logFile.Stat()
-	if err != nil {
-		_, _ = os.Stderr.WriteString(fmt.Sprintf(string(red)+"get log file stat error: %v\n"+string(reset), err))
-		return
+	if config.FileSizeCut {
+		fileStat, err := logFile.Stat()
+		if err != nil {
+			_, _ = os.Stderr.WriteString(fmt.Sprintf(string(red)+"get log file stat error: %v\n"+string(reset), err))
+			return
+		}
+		if fileStat.Size() >= int64(config.FileMaxSize) {
+			l.cutLogFile(logTag)
+			logFile = l.FileTagMap[logTag]
+			if logFile == nil {
+				return
+			}
+		}
 	}
-	if fileStat.Size() >= int64(config.FileMaxSize) {
-		err := logFile.Close()
-		if err != nil {
-			_, _ = os.Stderr.WriteString(fmt.Sprintf(string(red)+"close old log file error: %v\n"+string(reset), err))
-			return
-		}
-		timeStr := time.Now().Format("20060102150405")
-		err = os.Rename(logFile.Name(), logFile.Name()+"."+timeStr)
-		if err != nil {
-			_, _ = os.Stderr.WriteString(fmt.Sprintf(string(red)+"rename old log file error: %v\n"+string(reset), err))
-			return
-		}
-		fileName := "./log/" + config.AppName + ".log"
-		if logTag != "" {
-			fileName += "." + logTag
-		}
-		file, err := os.OpenFile(fileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err != nil {
-			_, _ = os.Stderr.WriteString(fmt.Sprintf(string(red)+"open new log file error: %v\n"+string(reset), err))
-			return
-		}
-		logFile = file
-		l.FileTagMap[logTag] = logFile
-	}
-	_, err = logFile.Write(logData)
+	_, err := logFile.Write(logData)
 	if err != nil {
 		_, _ = os.Stderr.WriteString(fmt.Sprintf(string(red)+"write log file error: %v\n"+string(reset), err))
 		return
 	}
+}
+
+func (l *Logger) cutLogFile(logTag string) {
+	logFile := l.FileTagMap[logTag]
+	err := logFile.Close()
+	if err != nil {
+		_, _ = os.Stderr.WriteString(fmt.Sprintf(string(red)+"close old log file error: %v\n"+string(reset), err))
+		return
+	}
+	timeStr := time.Now().Format("20060102150405")
+	err = os.Rename(logFile.Name(), logFile.Name()+"."+timeStr)
+	if err != nil {
+		_, _ = os.Stderr.WriteString(fmt.Sprintf(string(red)+"rename old log file error: %v\n"+string(reset), err))
+		return
+	}
+	fileName := config.FilePath + "/" + config.AppName + ".log"
+	if logTag != "" {
+		fileName += "." + logTag
+	}
+	file, err := os.OpenFile(fileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		_, _ = os.Stderr.WriteString(fmt.Sprintf(string(red)+"open new log file error: %v\n"+string(reset), err))
+		return
+	}
+	l.FileTagMap[logTag] = file
 }
 
 var bufPool = sync.Pool{New: func() any { return new([]byte) }}
@@ -457,7 +500,7 @@ func (l *Logger) getLineFunc() (fileName string, line int, funcName string) {
 	var pc uintptr
 	var file string
 	var ok bool
-	pc, file, line, ok = runtime.Caller(2)
+	pc, file, line, ok = runtime.Caller(3)
 	if !ok {
 		return "???", -1, "???"
 	}

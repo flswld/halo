@@ -54,13 +54,14 @@ func NetworkEngine() {
 		// 网卡列表
 		NetIfList: []*engine.NetIfConfig{
 			{
-				Name:        "eth0",              // 网卡名
-				MacAddr:     "AA:AA:AA:AA:AA:AA", // mac地址
-				IpAddr:      "192.168.100.100",   // ip地址
-				NetworkMask: "255.255.255.0",     // 子网掩码
-				NatEnable:   false,               // 网络地址转换
-				EthRxChan:   dpdk.Rx(0),          // 物理层接收管道
-				EthTxChan:   dpdk.Tx(0),          // 物理层发送管道
+				Name:        "eth0",                 // 网卡名
+				MacAddr:     "AA:AA:AA:AA:AA:AA",    // mac地址
+				IpAddr:      "192.168.100.100",      // ip地址
+				NetworkMask: "255.255.255.0",        // 子网掩码
+				NatEnable:   false,                  // 网络地址转换
+				NatType:     engine.NatTypeFullCone, // 网络地址转换类型
+				EthRxChan:   dpdk.Rx(0),             // 物理层接收管道
+				EthTxChan:   dpdk.Tx(0),             // 物理层发送管道
 			},
 		},
 		// 路由表
@@ -189,6 +190,7 @@ func EthernetRouter() {
 				IpAddr:      "192.168.100.100",
 				NetworkMask: "255.255.255.0",
 				NatEnable:   true,
+				NatType:     engine.NatTypeFullCone,
 				EthRxChan:   dpdk.Rx(0),
 				EthTxChan:   dpdk.Tx(0),
 			},
@@ -198,6 +200,7 @@ func EthernetRouter() {
 				IpAddr:      "192.168.99.99",
 				NetworkMask: "255.255.255.0",
 				NatEnable:   true,
+				NatType:     engine.NatTypeFullCone,
 				EthRxChan:   dpdk.Rx(1),
 				EthTxChan:   dpdk.Tx(1),
 			},
@@ -341,6 +344,7 @@ func MagicPacketModifier() {
 				IpAddr:      "192.168.100.100",
 				NetworkMask: "255.255.255.0",
 				NatEnable:   true,
+				NatType:     engine.NatTypeFullCone,
 				EthRxChan:   dpdk.Rx(0),
 				EthTxChan:   dpdk.Tx(0),
 			},

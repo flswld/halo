@@ -46,6 +46,12 @@ func (i *NetIf) RxIpv4(ethPayload []byte) {
 		alive := false
 		ethPayload, alive = protocol.HandleIpv4PktTtl(ethPayload)
 		if !alive {
+			icmpPkt, err := protocol.BuildIcmpPkt(ethPayload, protocol.ICMP_TTL, []byte{0x00, 0x00}, []byte{0x00, 0x00})
+			if err != nil {
+				fmt.Printf("build icmp packet error: %v\n", err)
+				return
+			}
+			i.TxIpv4(icmpPkt, protocol.IPH_PROTO_ICMP, ipv4SrcAddr)
 			return
 		}
 		// 外部钩子回调

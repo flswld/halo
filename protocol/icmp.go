@@ -25,6 +25,7 @@ var ICMP_DEFAULT_PAYLOAD = []byte{
 const (
 	ICMP_REQUEST uint8 = 0x08
 	ICMP_REPLY   uint8 = 0x00
+	ICMP_TTL     uint8 = 0x0b
 	ICMP_UNKNOWN uint8 = 0xff
 )
 

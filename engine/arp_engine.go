@@ -29,7 +29,19 @@ func (i *NetIf) UToMacAddr(macAddrU uint64) (macAddr []byte) {
 	return macAddr
 }
 
+func (i *NetIf) SendFreeArp() {
+	arpPkt, err := protocol.BuildArpPkt(protocol.ARP_REQUEST, i.MacAddr, i.IpAddr, BROADCAST_MAC_ADDR, i.IpAddr)
+	if err != nil {
+		fmt.Printf("build arp packet error: %v\n", err)
+		return
+	}
+	i.TxEthernet(arpPkt, BROADCAST_MAC_ADDR, protocol.ETH_PROTO_ARP)
+}
+
 func (i *NetIf) GetArpCache(ipAddr []byte) (macAddr []byte) {
+	if bytes.Equal(ipAddr, i.IpAddr) {
+		return nil
+	}
 	ipAddrU := protocol.IpAddrToU(ipAddr)
 	i.ArpCacheTableLock.RLock()
 	macAddrU, exist := i.ArpCacheTable[ipAddrU]
@@ -64,6 +76,10 @@ func (i *NetIf) HandleArp(ethPayload []byte, ethSrcMac []byte) {
 	}
 	if !bytes.Equal(arpSrcMac, ethSrcMac) {
 		fmt.Printf("arp packet src mac addr not match\n")
+		return
+	}
+	if bytes.Equal(arpSrcAddr, i.IpAddr) {
+		fmt.Printf("arp find ip addr conflect\n")
 		return
 	}
 	i.SetArpCache(arpSrcAddr, arpSrcMac)

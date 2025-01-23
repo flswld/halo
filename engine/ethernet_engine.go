@@ -9,11 +9,11 @@ import (
 
 func (i *NetIf) RxEthernet(ethFrm []byte) {
 	if i.Engine.DebugLog {
-		fmt.Printf("rx eth frm, len: %v, data: %v\n", len(ethFrm), ethFrm)
+		Log(fmt.Sprintf("rx eth frm, len: %v, data: %v\n", len(ethFrm), ethFrm))
 	}
 	ethPayload, ethDstMac, ethSrcMac, ethProto, err := protocol.ParseEthFrm(ethFrm)
 	if err != nil {
-		fmt.Printf("parse ethernet frame error: %v\n", err)
+		Log(fmt.Sprintf("parse ethernet frame error: %v\n", err))
 		return
 	}
 	if !bytes.Equal(ethDstMac, BROADCAST_MAC_ADDR) && !bytes.Equal(ethDstMac, i.MacAddr) {
@@ -31,11 +31,11 @@ func (i *NetIf) RxEthernet(ethFrm []byte) {
 func (i *NetIf) TxEthernet(ethPayload []byte, ethDstMac []byte, ethProto uint16) []byte {
 	ethFrm, err := protocol.BuildEthFrm(ethPayload, ethDstMac, i.MacAddr, ethProto)
 	if err != nil {
-		fmt.Printf("build ethernet frame error: %v\n", err)
+		Log(fmt.Sprintf("build ethernet frame error: %v\n", err))
 		return nil
 	}
 	if i.Engine.DebugLog {
-		fmt.Printf("tx eth frm, len: %v, data: %v\n", len(ethFrm), ethFrm)
+		Log(fmt.Sprintf("tx eth frm, len: %v, data: %v\n", len(ethFrm), ethFrm))
 	}
 	i.EthTxChan <- ethFrm
 	return ethFrm

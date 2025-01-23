@@ -1,7 +1,7 @@
 package list
 
 import (
-	"fmt"
+	"log"
 	"testing"
 
 	"github.com/flswld/halo/mem"
@@ -17,7 +17,7 @@ func TestArrayList(t *testing.T) {
 	}
 	arrayList.Set(10, 666)
 	arrayList.For(func(index int, value uint64) (next bool) {
-		fmt.Printf("index: %d, value: %d\n", index, value)
+		log.Printf("index: %d, value: %d\n", index, value)
 		return true
 	})
 	arrayList.Free()

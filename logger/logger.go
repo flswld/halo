@@ -105,6 +105,7 @@ type LogInfo struct {
 	Time        time.Time
 	Level       int
 	Msg         *[]byte
+	Raw         bool
 	FileName    string
 	FuncName    string
 	Line        int
@@ -171,76 +172,81 @@ func (l *Logger) doLog() {
 			exit = true
 			exitCountDown = len(l.LogInfoChan)
 		case logInfo := <-l.LogInfoChan:
-			if !config.DisableColor {
-				logBuf.Write(cyan)
-			}
-			logBuf.Write(leftBracket)
-			logBuf.Write(logInfo.Time.AppendFormat(timeBuf, "2006-01-02 15:04:05.000"))
-			logBuf.Write(rightBracket)
-			if !config.DisableColor {
-				logBuf.Write(reset)
-			}
-			logBuf.Write(space)
-
-			if !config.DisableColor {
-				switch logInfo.Level {
-				case DEBUG:
-					logBuf.Write(blue)
-				case INFO:
-					logBuf.Write(green)
-				case WARN:
-					logBuf.Write(yellow)
-				case ERROR:
-					logBuf.Write(red)
-				}
-			}
-			logBuf.Write(leftBracket)
-			logBuf.Write(levelMap[logInfo.Level])
-			logBuf.Write(rightBracket)
-			if !config.DisableColor {
-				logBuf.Write(reset)
-			}
-			logBuf.Write(space)
-
-			if !config.DisableColor && logInfo.Level == ERROR {
-				logBuf.Write(red)
-				logBuf.Write(*logInfo.Msg)
-				logBuf.Write(reset)
-			} else {
-				logBuf.Write(*logInfo.Msg)
-			}
-
-			if logInfo.TrackLine {
-				logBuf.Write(space)
+			var logData []byte = nil
+			if !logInfo.Raw {
 				if !config.DisableColor {
-					logBuf.Write(magenta)
+					logBuf.Write(cyan)
 				}
 				logBuf.Write(leftBracket)
-				logBuf.Write([]byte(logInfo.FileName))
-				logBuf.Write(colon)
-				logBuf.Write([]byte(strconv.Itoa(logInfo.Line)))
-				logBuf.Write(space)
-				logBuf.Write([]byte(logInfo.FuncName))
-				logBuf.Write(funcBracket)
-				if logInfo.TrackThread {
-					logBuf.Write(space)
-					logBuf.Write([]byte("goroutine"))
-					logBuf.Write(colon)
-					logBuf.Write([]byte(logInfo.GoroutineId))
-					logBuf.Write(space)
-					logBuf.Write([]byte("thread"))
-					logBuf.Write(colon)
-					logBuf.Write([]byte(logInfo.ThreadId))
-				}
+				logBuf.Write(logInfo.Time.AppendFormat(timeBuf, "2006-01-02 15:04:05.000"))
 				logBuf.Write(rightBracket)
 				if !config.DisableColor {
 					logBuf.Write(reset)
 				}
+				logBuf.Write(space)
+
+				if !config.DisableColor {
+					switch logInfo.Level {
+					case DEBUG:
+						logBuf.Write(blue)
+					case INFO:
+						logBuf.Write(green)
+					case WARN:
+						logBuf.Write(yellow)
+					case ERROR:
+						logBuf.Write(red)
+					}
+				}
+				logBuf.Write(leftBracket)
+				logBuf.Write(levelMap[logInfo.Level])
+				logBuf.Write(rightBracket)
+				if !config.DisableColor {
+					logBuf.Write(reset)
+				}
+				logBuf.Write(space)
+
+				if !config.DisableColor && logInfo.Level == ERROR {
+					logBuf.Write(red)
+					logBuf.Write(*logInfo.Msg)
+					logBuf.Write(reset)
+				} else {
+					logBuf.Write(*logInfo.Msg)
+				}
+
+				if logInfo.TrackLine {
+					logBuf.Write(space)
+					if !config.DisableColor {
+						logBuf.Write(magenta)
+					}
+					logBuf.Write(leftBracket)
+					logBuf.Write([]byte(logInfo.FileName))
+					logBuf.Write(colon)
+					logBuf.Write([]byte(strconv.Itoa(logInfo.Line)))
+					logBuf.Write(space)
+					logBuf.Write([]byte(logInfo.FuncName))
+					logBuf.Write(funcBracket)
+					if logInfo.TrackThread {
+						logBuf.Write(space)
+						logBuf.Write([]byte("goroutine"))
+						logBuf.Write(colon)
+						logBuf.Write([]byte(logInfo.GoroutineId))
+						logBuf.Write(space)
+						logBuf.Write([]byte("thread"))
+						logBuf.Write(colon)
+						logBuf.Write([]byte(logInfo.ThreadId))
+					}
+					logBuf.Write(rightBracket)
+					if !config.DisableColor {
+						logBuf.Write(reset)
+					}
+				}
+
+				logBuf.Write(lineFeed)
+				logData = logBuf.Bytes()
+			} else {
+				logData = *logInfo.Msg
+				logData = append(logData, lineFeed...)
 			}
-
-			logBuf.Write(lineFeed)
-
-			logData := logBuf.Bytes()
 			l.writeLog(logData, logInfo.Tag, logInfo.Time)
 			putBuf(logInfo.Msg)
 			logInfoPool.Put(logInfo)
@@ -388,6 +394,7 @@ func formatLog(level int, msg string, param []any) {
 	}
 	*buf = fmt.Appendf(*buf, newMsg, param...)
 	logInfo.Msg = buf
+	logInfo.Raw = false
 	if config.TrackLine || logFlag.LogLine == "true" {
 		logInfo.FileName, logInfo.Line, logInfo.FuncName = logger.getLineFunc()
 		logInfo.TrackLine = true
@@ -485,6 +492,24 @@ func Error(msg string, param ...any) {
 		return
 	}
 	formatLog(ERROR, msg, param)
+}
+
+func Raw(data []byte) {
+	logInfo := logInfoPool.Get().(*LogInfo)
+	logInfo.Time = time.Now()
+	buf := getBuf()
+	*buf = append(*buf, data...)
+	logInfo.Msg = buf
+	logInfo.Raw = true
+	logger.LogInfoChan <- logInfo
+}
+
+type LogWriter struct {
+}
+
+func (l *LogWriter) Write(p []byte) (n int, err error) {
+	Raw(p)
+	return len(p), nil
 }
 
 func (l *Logger) getGoroutineId() (goroutineId string) {

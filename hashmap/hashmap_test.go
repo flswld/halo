@@ -1,7 +1,7 @@
 package hashmap
 
 import (
-	"fmt"
+	"log"
 	"testing"
 
 	"github.com/flswld/halo/mem"
@@ -22,7 +22,7 @@ func TestHashMap(t *testing.T) {
 		hashMap.Set(i, 666)
 	}
 	hashMap.For(func(key int, value uint64) (next bool) {
-		fmt.Printf("key: %d, value: %d\n", key, value)
+		log.Printf("key: %d, value: %d\n", key, value)
 		return true
 	})
 	hashMap.Free()

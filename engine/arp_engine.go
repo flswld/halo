@@ -32,7 +32,7 @@ func (i *NetIf) UToMacAddr(macAddrU uint64) (macAddr []byte) {
 func (i *NetIf) SendFreeArp() {
 	arpPkt, err := protocol.BuildArpPkt(protocol.ARP_REQUEST, i.MacAddr, i.IpAddr, BROADCAST_MAC_ADDR, i.IpAddr)
 	if err != nil {
-		fmt.Printf("build arp packet error: %v\n", err)
+		Log(fmt.Sprintf("build arp packet error: %v\n", err))
 		return
 	}
 	i.TxEthernet(arpPkt, BROADCAST_MAC_ADDR, protocol.ETH_PROTO_ARP)
@@ -50,7 +50,7 @@ func (i *NetIf) GetArpCache(ipAddr []byte) (macAddr []byte) {
 		// 不存在则发起ARP询问并返回空
 		arpPkt, err := protocol.BuildArpPkt(protocol.ARP_REQUEST, i.MacAddr, i.IpAddr, BROADCAST_MAC_ADDR, ipAddr)
 		if err != nil {
-			fmt.Printf("build arp packet error: %v\n", err)
+			Log(fmt.Sprintf("build arp packet error: %v\n", err))
 			return nil
 		}
 		i.TxEthernet(arpPkt, BROADCAST_MAC_ADDR, protocol.ETH_PROTO_ARP)
@@ -71,15 +71,15 @@ func (i *NetIf) SetArpCache(ipAddr []byte, macAddr []byte) {
 func (i *NetIf) HandleArp(ethPayload []byte, ethSrcMac []byte) {
 	arpOption, arpSrcMac, arpSrcAddr, _, arpDstAddr, err := protocol.ParseArpPkt(ethPayload)
 	if err != nil {
-		fmt.Printf("parse arp packet error: %v\n", err)
+		Log(fmt.Sprintf("parse arp packet error: %v\n", err))
 		return
 	}
 	if !bytes.Equal(arpSrcMac, ethSrcMac) {
-		fmt.Printf("arp packet src mac addr not match\n")
+		Log(fmt.Sprintf("arp packet src mac addr not match\n"))
 		return
 	}
 	if bytes.Equal(arpSrcAddr, i.IpAddr) {
-		fmt.Printf("arp find ip addr conflect\n")
+		Log(fmt.Sprintf("arp find ip addr conflect\n"))
 		return
 	}
 	i.SetArpCache(arpSrcAddr, arpSrcMac)
@@ -87,7 +87,7 @@ func (i *NetIf) HandleArp(ethPayload []byte, ethSrcMac []byte) {
 	if arpOption == protocol.ARP_REQUEST && bytes.Equal(arpDstAddr, i.IpAddr) {
 		arpPkt, err := protocol.BuildArpPkt(protocol.ARP_REPLY, i.MacAddr, i.IpAddr, arpSrcMac, arpSrcAddr)
 		if err != nil {
-			fmt.Printf("build arp packet error: %v\n", err)
+			Log(fmt.Sprintf("build arp packet error: %v\n", err))
 			return
 		}
 		i.TxEthernet(arpPkt, arpSrcMac, protocol.ETH_PROTO_ARP)

@@ -2,6 +2,7 @@ package dpdk
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"reflect"
 	"runtime"
@@ -14,6 +15,16 @@ import (
 // #cgo LDFLAGS: -Wl,--whole-archive -ldpdk -Wl,--no-whole-archive -ldl -pthread -lnuma -lm
 // #include "./cgo/dpdk.c"
 import "C"
+
+var (
+	DefaultLogWriter io.Writer = nil
+)
+
+func Log(msg string) {
+	if DefaultLogWriter != nil {
+		_, _ = DefaultLogWriter.Write([]byte(msg))
+	}
+}
 
 type Config struct {
 	GolangCpuCoreList []int  // golang侧使用的核心编号列表 每个网口两个核心
@@ -129,7 +140,7 @@ func Tx(port_index int) chan []byte {
 func BindCpuCore(core int) {
 	runtime.LockOSThread()
 	ret := C.bind_cpu_core(C.int(core))
-	fmt.Printf("goroutine bind cpu core: %v, ret: %v\n", core, ret)
+	Log(fmt.Sprintf("goroutine bind cpu core: %v, ret: %v\n", core, ret))
 }
 
 // 收包
@@ -142,7 +153,7 @@ func rx_pkt(port_index int) {
 		core = conf.GolangCpuCoreList[port_index*2+0]
 	}
 	ret := C.bind_cpu_core(C.int(core))
-	fmt.Printf("rx goroutine bind cpu core ret: %v, core: %v, port: %v\n", ret, core, conf.PortIdList[port_index])
+	Log(fmt.Sprintf("rx goroutine bind cpu core ret: %v, core: %v, port: %v\n", ret, core, conf.PortIdList[port_index]))
 	pkt_rx_buf := make([]uint8, 1514)
 	pkt_len := uint16(0)
 	for {
@@ -161,7 +172,7 @@ func rx_pkt(port_index int) {
 		copy(pkt, pkt_rx_buf)
 		port_dpdk_rx_chan[port_index] <- pkt
 		if conf.DebugLog {
-			fmt.Printf("[rx pkt] port_index: %v, len: %v, data: %02x\n", port_index, pkt_len, pkt)
+			Log(fmt.Sprintf("[rx pkt] port_index: %v, len: %v, data: %02x\n", port_index, pkt_len, pkt))
 		}
 	}
 }
@@ -176,7 +187,7 @@ func tx_pkt(port_index int) {
 		core = conf.GolangCpuCoreList[port_index*2+1]
 	}
 	ret := C.bind_cpu_core(C.int(core))
-	fmt.Printf("tx goroutine bind cpu core ret: %v, core: %v, port: %v\n", ret, core, conf.PortIdList[port_index])
+	Log(fmt.Sprintf("tx goroutine bind cpu core ret: %v, core: %v, port: %v\n", ret, core, conf.PortIdList[port_index]))
 	for {
 		if force_quit {
 			break
@@ -187,7 +198,7 @@ func tx_pkt(port_index int) {
 		}
 		pkt_len := len(pkt)
 		if conf.DebugLog {
-			fmt.Printf("[tx pkt] port_index: %v, len: %v, data: %02x\n", port_index, pkt_len, pkt)
+			Log(fmt.Sprintf("[tx pkt] port_index: %v, len: %v, data: %02x\n", port_index, pkt_len, pkt))
 		}
 		write_send_mem(port_index, pkt, uint16(pkt_len))
 	}
@@ -203,12 +214,12 @@ func print_ring_buffer(port_index int) {
 				break
 			}
 			<-ticker.C
-			fmt.Printf("\n++++++++++ mem recv ++++++++++\n")
+			Log(fmt.Sprintf("\n++++++++++ mem recv ++++++++++\n"))
 			for offset := uintptr(0); offset < uintptr(conf.RingBufferSize); offset++ {
 				byte_data := (*uint8)(unsafe.Pointer(uintptr(port_ring_buffer[port_index].mem_recv_head) + offset))
-				fmt.Printf("%02x ", *byte_data)
+				Log(fmt.Sprintf("%02x ", *byte_data))
 			}
-			fmt.Printf("\n++++++++++ mem recv ++++++++++\n")
+			Log(fmt.Sprintf("\n++++++++++ mem recv ++++++++++\n"))
 		}
 	}()
 	go func() {
@@ -219,12 +230,12 @@ func print_ring_buffer(port_index int) {
 				break
 			}
 			<-ticker.C
-			fmt.Printf("\n++++++++++ mem send ++++++++++\n")
+			Log(fmt.Sprintf("\n++++++++++ mem send ++++++++++\n"))
 			for offset := uintptr(0); offset < uintptr(conf.RingBufferSize); offset++ {
 				byte_data := (*uint8)(unsafe.Pointer(uintptr(port_ring_buffer[port_index].mem_send_head) + offset))
-				fmt.Printf("%02x ", *byte_data)
+				Log(fmt.Sprintf("%02x ", *byte_data))
 			}
-			fmt.Printf("\n++++++++++ mem send ++++++++++\n")
+			Log(fmt.Sprintf("\n++++++++++ mem send ++++++++++\n"))
 		}
 	}()
 }
@@ -316,8 +327,8 @@ func write_send_mem_core(port_index int, data [1520]uint8, len uint16) uint8 {
 	overflow := int32((uintptr(port_ring_buffer[port_index].mem_send_cur) + uintptr(len)) -
 		(uintptr(port_ring_buffer[port_index].mem_send_head) + uintptr(conf.RingBufferSize)))
 	if conf.DebugLog {
-		fmt.Printf("[write_send_mem_core] overflow: %d, len: %d, mem_send_cur: %p, mem_send_head: %p, send_pos_pointer: %p\n", overflow, len,
-			port_ring_buffer[port_index].mem_send_cur, port_ring_buffer[port_index].mem_send_head, *port_ring_buffer[port_index].send_pos_pointer_addr)
+		Log(fmt.Sprintf("[write_send_mem_core] overflow: %d, len: %d, mem_send_cur: %p, mem_send_head: %p, send_pos_pointer: %p\n", overflow, len,
+			port_ring_buffer[port_index].mem_send_cur, port_ring_buffer[port_index].mem_send_head, *port_ring_buffer[port_index].send_pos_pointer_addr))
 	}
 	if overflow >= 0 {
 		// 有溢出
@@ -444,8 +455,8 @@ func read_recv_mem(port_index int, data []uint8, len *uint16) {
 	overflow := int32((uintptr(port_ring_buffer[port_index].mem_recv_cur) + uintptr(*len)) -
 		(uintptr(port_ring_buffer[port_index].mem_recv_head) + uintptr(conf.RingBufferSize)))
 	if conf.DebugLog {
-		fmt.Printf("[read_recv_mem] overflow: %d, len: %d, mem_recv_cur: %p, mem_recv_head: %p, recv_pos_pointer: %p\n", overflow, *len,
-			port_ring_buffer[port_index].mem_recv_cur, port_ring_buffer[port_index].mem_recv_head, *port_ring_buffer[port_index].recv_pos_pointer_addr)
+		Log(fmt.Sprintf("[read_recv_mem] overflow: %d, len: %d, mem_recv_cur: %p, mem_recv_head: %p, recv_pos_pointer: %p\n", overflow, *len,
+			port_ring_buffer[port_index].mem_recv_cur, port_ring_buffer[port_index].mem_recv_head, *port_ring_buffer[port_index].recv_pos_pointer_addr))
 	}
 	if overflow >= 0 {
 		// 拷贝前半段数据

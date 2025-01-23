@@ -29,7 +29,7 @@ func MallocType[T any](heap Heap, size uint64) *T {
 		panic("malloc fail")
 	}
 	if DefaultLogWriter != nil {
-		_, _ = DefaultLogWriter.Write([]byte(fmt.Sprintf("[Malloc] heap:%T size:%d ptr:%p", heap, size*SizeOf[T](), p)))
+		_, _ = DefaultLogWriter.Write([]byte(fmt.Sprintf("[Malloc] heap:%T size:%d ptr:%p\n", heap, size*SizeOf[T](), p)))
 	}
 	return p
 }
@@ -40,7 +40,7 @@ func FreeType[T any](heap Heap, t *T) bool {
 		panic("free fail")
 	}
 	if DefaultLogWriter != nil {
-		_, _ = DefaultLogWriter.Write([]byte(fmt.Sprintf("[Free] heap:%T ptr:%p", heap, unsafe.Pointer(t))))
+		_, _ = DefaultLogWriter.Write([]byte(fmt.Sprintf("[Free] heap:%T ptr:%p\n", heap, unsafe.Pointer(t))))
 	}
 	return ok
 }

@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -12,6 +13,16 @@ import (
 	"github.com/flswld/halo/protocol"
 )
 
+var (
+	DefaultLogWriter io.Writer = nil
+)
+
+func Log(msg string) {
+	if DefaultLogWriter != nil {
+		_, _ = DefaultLogWriter.Write([]byte(msg))
+	}
+}
+
 type Config struct {
 	DebugLog     bool                  // 调试日志
 	NetIfList    []*NetIfConfig        // 网卡列表
@@ -19,17 +30,39 @@ type Config struct {
 }
 
 type NetIfConfig struct {
-	Name        string      // 网卡名
-	MacAddr     string      // mac地址
-	IpAddr      string      // ip地址
-	NetworkMask string      // 子网掩码
-	NatEnable   bool        // 网络地址转换
-	NatType     int         // 网络地址转换类型
-	EthRxChan   chan []byte // 物理层接收管道
-	EthTxChan   chan []byte // 物理层发送管道
+	Name                string                       // 网卡名
+	MacAddr             string                       // mac地址
+	IpAddr              string                       // ip地址
+	NetworkMask         string                       // 子网掩码
+	NatEnable           bool                         // 网络地址转换
+	NatType             int                          // 网络地址转换类型
+	NatPortMappingTable []*NatPortMappingEntryConfig // 网络地址转换端口映射表
+	EthRxChan           chan []byte                  // 物理层接收管道
+	EthTxChan           chan []byte                  // 物理层发送管道
 }
 
-type NatWan struct {
+type NatPortMappingEntryConfig struct {
+	WanIpAddr     string // wan口ip地址
+	WanPort       uint16 // wan口端口
+	LanHostIpAddr string // lan口主机ip地址
+	LanHostPort   uint16 // lan口主机端口
+}
+
+type RoutingEntryConfig struct {
+	DstIpAddr   string // 目的ip地址
+	NetworkMask string // 网络掩码
+	NextHop     string // 下一跳
+	NetIf       string // 出接口
+}
+
+type NatPortMappingEntry struct {
+	WanIpAddr     uint32 // wan口ip地址
+	WanPort       uint16 // wan口端口
+	LanHostIpAddr uint32 // lan口主机ip地址
+	LanHostPort   uint16 // lan口主机端口
+}
+
+type NatWanFlowHash struct {
 	RemoteIpAddr uint32 // 远程ip地址
 	RemotePort   uint16 // 远程端口
 	WanIpAddr    uint32 // wan口ip地址
@@ -60,24 +93,24 @@ const (
 )
 
 type NetIf struct {
-	Name              string                   // 接口名
-	MacAddr           []byte                   // mac地址
-	IpAddr            []byte                   // ip地址
-	NetworkMask       []byte                   // 子网掩码
-	EthRxChan         chan []byte              // 物理层接收管道
-	EthTxChan         chan []byte              // 物理层发送管道
-	LoChan            chan []byte              // 本地回环管道
-	Engine            *Engine                  // 归属Engine指针
-	ArpCacheTable     map[uint32]uint64        // arp缓存表 key:ip value:mac
-	ArpCacheTableLock sync.RWMutex             // arp缓存表锁
-	NatEnable         bool                     // 是否开启nat
-	NatType           int                      // nat类型
-	NatFlowWanTable   map[NatWan]*NatFlow      // wan口回程包nat流映射表
-	NatFlowTable      map[NatFlowHash]*NatFlow // nat流表
-	NatTableLock      sync.RWMutex             // nat表锁
-	NatPortAlloc      map[uint32]*PortAlloc    // nat端口分配表 key:目的ip value:端口分配信息
-	NatPortAllocLock  sync.RWMutex             // nat端口分配表锁
-	HandleUdp         func(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, ipv4SrcAddr []byte)
+	Name                string                      // 接口名
+	MacAddr             []byte                      // mac地址
+	IpAddr              []byte                      // ip地址
+	NetworkMask         []byte                      // 子网掩码
+	EthRxChan           chan []byte                 // 物理层接收管道
+	EthTxChan           chan []byte                 // 物理层发送管道
+	LoChan              chan []byte                 // 本地回环管道
+	Engine              *Engine                     // 归属Engine指针
+	ArpCacheTable       map[uint32]uint64           // arp缓存表 key:ip value:mac
+	ArpCacheTableLock   sync.RWMutex                // arp缓存表锁
+	NatEnable           bool                        // 是否开启nat
+	NatType             int                         // nat类型
+	NatWanFlowTable     map[NatWanFlowHash]*NatFlow // wan口回程包nat流映射表
+	NatFlowTable        map[NatFlowHash]*NatFlow    // nat流表
+	NatPortAlloc        map[uint32]*PortAlloc       // nat端口分配表 key:目的ip value:端口分配信息
+	NatPortMappingTable []*NatPortMappingEntry      // 网络地址转换端口映射表
+	NatTableLock        sync.RWMutex                // nat表锁
+	HandleUdp           func(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, ipv4SrcAddr []byte)
 }
 
 type PortAlloc struct {
@@ -89,13 +122,6 @@ type PortAlloc struct {
 type SrcAddr struct {
 	IpAddr uint32 // ip地址
 	Port   uint16 // 端口
-}
-
-type RoutingEntryConfig struct {
-	DstIpAddr   string // 目的ip地址
-	NetworkMask string // 网络掩码
-	NextHop     string // 下一跳
-	NetIf       string // 出接口
 }
 
 type RoutingEntry struct {
@@ -165,24 +191,40 @@ func InitEngine(config *Config) (*Engine, error) {
 			return nil, err
 		}
 		netIf := &NetIf{
-			Name:              netIfConfig.Name,
-			MacAddr:           macAddr,
-			IpAddr:            ipAddr,
-			NetworkMask:       networkMask,
-			EthRxChan:         netIfConfig.EthRxChan,
-			EthTxChan:         netIfConfig.EthTxChan,
-			LoChan:            make(chan []byte, 1024),
-			Engine:            r,
-			ArpCacheTable:     make(map[uint32]uint64),
-			ArpCacheTableLock: sync.RWMutex{},
-			NatEnable:         netIfConfig.NatEnable,
-			NatType:           netIfConfig.NatType,
-			NatFlowWanTable:   make(map[NatWan]*NatFlow),
-			NatFlowTable:      make(map[NatFlowHash]*NatFlow),
-			NatTableLock:      sync.RWMutex{},
-			NatPortAlloc:      make(map[uint32]*PortAlloc),
-			NatPortAllocLock:  sync.RWMutex{},
-			HandleUdp:         nil,
+			Name:                netIfConfig.Name,
+			MacAddr:             macAddr,
+			IpAddr:              ipAddr,
+			NetworkMask:         networkMask,
+			EthRxChan:           netIfConfig.EthRxChan,
+			EthTxChan:           netIfConfig.EthTxChan,
+			LoChan:              make(chan []byte, 1024),
+			Engine:              r,
+			ArpCacheTable:       make(map[uint32]uint64),
+			ArpCacheTableLock:   sync.RWMutex{},
+			NatEnable:           netIfConfig.NatEnable,
+			NatType:             netIfConfig.NatType,
+			NatWanFlowTable:     make(map[NatWanFlowHash]*NatFlow),
+			NatFlowTable:        make(map[NatFlowHash]*NatFlow),
+			NatPortAlloc:        make(map[uint32]*PortAlloc),
+			NatPortMappingTable: make([]*NatPortMappingEntry, 0),
+			NatTableLock:        sync.RWMutex{},
+			HandleUdp:           nil,
+		}
+		for _, natPortMappingEntryConfig := range netIfConfig.NatPortMappingTable {
+			wanIpAddr, err := ParseIpAddr(natPortMappingEntryConfig.WanIpAddr)
+			if err != nil {
+				return nil, err
+			}
+			lanHostIpAddr, err := ParseIpAddr(natPortMappingEntryConfig.LanHostIpAddr)
+			if err != nil {
+				return nil, err
+			}
+			netIf.NatPortMappingTable = append(netIf.NatPortMappingTable, &NatPortMappingEntry{
+				WanIpAddr:     protocol.IpAddrToU(wanIpAddr),
+				WanPort:       natPortMappingEntryConfig.WanPort,
+				LanHostIpAddr: protocol.IpAddrToU(lanHostIpAddr),
+				LanHostPort:   natPortMappingEntryConfig.LanHostPort,
+			})
 		}
 		r.NetIfMap[netIf.Name] = netIf
 	}
@@ -258,7 +300,7 @@ func (i *NetIf) PacketHandle() {
 		case ipv4Pkt := <-i.LoChan:
 			ipv4Payload, ipv4HeadProto, ipv4SrcAddr, ipv4DstAddr, err := protocol.ParseIpv4Pkt(ipv4Pkt)
 			if err != nil {
-				fmt.Printf("parse ip packet error: %v\n", err)
+				Log(fmt.Sprintf("parse ip packet error: %v\n", err))
 				continue
 			}
 			if !bytes.Equal(ipv4DstAddr, i.IpAddr) {
@@ -316,7 +358,7 @@ func (i *NetIf) NatGetFlowByWan(remoteIpAddr []byte, remotePort uint16, wanIpAdd
 		_remotePort = 0
 	}
 	i.NatTableLock.RLock()
-	natFlow, exist := i.NatFlowWanTable[NatWan{
+	natFlow, exist := i.NatWanFlowTable[NatWanFlowHash{
 		RemoteIpAddr: _remoteAddrU,
 		RemotePort:   _remotePort,
 		WanIpAddr:    protocol.IpAddrToU(wanIpAddr),
@@ -330,6 +372,8 @@ func (i *NetIf) NatGetFlowByWan(remoteIpAddr []byte, remotePort uint16, wanIpAdd
 }
 
 func (i *NetIf) NatAddFlow(lanHostAddr []byte, remoteAddr []byte, lanHostPort uint16, remotePort uint16) *NatFlow {
+	i.NatTableLock.Lock()
+	defer i.NatTableLock.Unlock()
 	_remoteAddrU := uint32(0)
 	_remotePort := uint16(0)
 	if i.NatType == NatTypeSymmetric {
@@ -342,9 +386,7 @@ func (i *NetIf) NatAddFlow(lanHostAddr []byte, remoteAddr []byte, lanHostPort ui
 	wanPort := uint16(0)
 	if lanHostPort != 0 {
 		// nat端口分配
-		i.NatPortAllocLock.RLock()
 		portAlloc, exist := i.NatPortAlloc[_remoteAddrU]
-		i.NatPortAllocLock.RUnlock()
 		if !exist {
 			portAlloc = &PortAlloc{
 				Lock:          sync.RWMutex{},
@@ -359,9 +401,7 @@ func (i *NetIf) NatAddFlow(lanHostAddr []byte, remoteAddr []byte, lanHostPort ui
 					break
 				}
 			}
-			i.NatPortAllocLock.Lock()
 			i.NatPortAlloc[_remoteAddrU] = portAlloc
-			i.NatPortAllocLock.Unlock()
 		}
 		portAlloc.Lock.RLock()
 		wanPort, exist = portAlloc.AllocPortMap[SrcAddr{IpAddr: protocol.IpAddrToU(lanHostAddr), Port: lanHostPort}]
@@ -382,7 +422,6 @@ func (i *NetIf) NatAddFlow(lanHostAddr []byte, remoteAddr []byte, lanHostPort ui
 			return nil
 		}
 	}
-	i.NatTableLock.Lock()
 	natFlowHash := NatFlowHash{
 		RemoteIpAddr:  _remoteAddrU,
 		RemotePort:    _remotePort,
@@ -400,13 +439,12 @@ func (i *NetIf) NatAddFlow(lanHostAddr []byte, remoteAddr []byte, lanHostPort ui
 		LastAliveTime: uint32(time.Now().Unix()),
 	}
 	i.NatFlowTable[natFlowHash] = natFlow
-	i.NatFlowWanTable[NatWan{
+	i.NatWanFlowTable[NatWanFlowHash{
 		RemoteIpAddr: _remoteAddrU,
 		RemotePort:   _remotePort,
 		WanIpAddr:    protocol.IpAddrToU(i.IpAddr),
 		WanPort:      wanPort,
 	}] = natFlow
-	i.NatTableLock.Unlock()
 	return natFlow
 }
 
@@ -422,7 +460,7 @@ func (i *NetIf) NatTableClear() {
 		for natFlowHash, natFlow := range i.NatFlowTable {
 			if now-natFlow.LastAliveTime > 60 {
 				delete(i.NatFlowTable, natFlowHash)
-				delete(i.NatFlowWanTable, NatWan{
+				delete(i.NatWanFlowTable, NatWanFlowHash{
 					RemoteIpAddr: natFlow.RemoteIpAddr,
 					RemotePort:   natFlow.RemotePort,
 					WanIpAddr:    natFlow.WanIpAddr,

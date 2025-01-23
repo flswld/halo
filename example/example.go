@@ -1,11 +1,12 @@
 package example
 
 import (
-	"fmt"
+	"log"
 	"time"
 
 	"github.com/flswld/halo/dpdk"
 	"github.com/flswld/halo/engine"
+	"github.com/flswld/halo/logger"
 	"github.com/flswld/halo/protocol"
 	"github.com/flswld/halo/protocol/kcp"
 )
@@ -170,7 +171,11 @@ func EthernetHub() {
 
 // EthernetRouter 以太网路由器
 func EthernetRouter() {
+	logger.InitLogger(nil)
+	defer logger.CloseLogger()
+
 	// 启动dpdk
+	dpdk.DefaultLogWriter = new(logger.LogWriter)
 	dpdk.Run(&dpdk.Config{
 		GolangCpuCoreList: []int{9, 10, 11, 12, 13, 14},
 		StatsLog:          true,
@@ -181,6 +186,7 @@ func EthernetRouter() {
 	})
 
 	// 初始化协议栈
+	engine.DefaultLogWriter = new(logger.LogWriter)
 	e, err := engine.InitEngine(&engine.Config{
 		DebugLog: false,
 		NetIfList: []*engine.NetIfConfig{
@@ -191,8 +197,16 @@ func EthernetRouter() {
 				NetworkMask: "255.255.255.0",
 				NatEnable:   true,
 				NatType:     engine.NatTypeFullCone,
-				EthRxChan:   dpdk.Rx(0),
-				EthTxChan:   dpdk.Tx(0),
+				NatPortMappingTable: []*engine.NatPortMappingEntryConfig{
+					{
+						WanIpAddr:     "192.168.100.100",
+						WanPort:       22,
+						LanHostIpAddr: "192.168.111.222",
+						LanHostPort:   22,
+					},
+				},
+				EthRxChan: dpdk.Rx(0),
+				EthTxChan: dpdk.Tx(0),
 			},
 			{
 				Name:        "wan1",
@@ -238,7 +252,7 @@ func EthernetRouter() {
 	e.Ipv4PktFwdHook = func(raw []byte, dir int) (drop bool, mod []byte) {
 		payload, _, srcAddr, dstAddr, err := protocol.ParseIpv4Pkt(raw)
 		if err == nil {
-			fmt.Printf("[IPV4 ROUTE FWD] src: %v -> dst: %v, len: %v\n", srcAddr, dstAddr, len(payload))
+			logger.Debug("[IPV4 ROUTE FWD] src: %v -> dst: %v, len: %v\n", srcAddr, dstAddr, len(payload))
 		}
 		return false, raw
 	}
@@ -477,7 +491,7 @@ func kcpServer(netIf *engine.NetIf) {
 			break
 		}
 		buf = buf[:size]
-		fmt.Printf("kcp server recv data: %02x\n", buf)
+		log.Printf("kcp server recv data: %02x\n", buf)
 		_, err = conn.Write([]byte{0x01, 0x23, 0xcd, 0xef})
 		if err != nil {
 			break
@@ -535,7 +549,7 @@ func kcpClient(netIf *engine.NetIf) {
 			break
 		}
 		buf = buf[:size]
-		fmt.Printf("kcp client recv data: %02x\n", buf)
+		log.Printf("kcp client recv data: %02x\n", buf)
 	}
 	netIf.HandleUdp = nil
 	_ = conn.Close()

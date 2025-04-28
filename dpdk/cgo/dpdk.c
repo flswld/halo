@@ -1,20 +1,5 @@
 const char *VERSION = "1.0.0";
 
-#define _GNU_SOURCE
-
-#include <sched.h>
-#include <pthread.h>
-
-int bind_cpu_core(int core) {
-    cpu_set_t mask;
-    CPU_ZERO(&mask);
-    CPU_SET(core, &mask);
-    int ret = pthread_setaffinity_np(pthread_self(), sizeof(mask), &mask);
-    return ret;
-}
-
-#undef _GNU_SOURCE
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -23,7 +8,6 @@ int bind_cpu_core(int core) {
 
 #include <unistd.h>
 #include <sys/time.h>
-#include <arpa/inet.h>
 
 #include <rte_eal.h>
 #include <rte_common.h>
@@ -51,12 +35,12 @@ int bind_cpu_core(int core) {
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
 #define RTE_DEV_NAME_MAX_LEN 512
 
+volatile bool dpdk_start = false;
+
 int ring_buffer_size = 0;
 bool debug = false;
 bool idle_sleep = false;
 bool single_core = false;
-bool kni_bypass = false;
-uint32_t kni_bypass_target_ip = 0;
 
 struct ring_buffer {
     uint8_t *mem_send_head;
@@ -70,9 +54,10 @@ struct ring_buffer {
 int port_count = 0;
 uint16_t *port_id_list = NULL;
 struct ring_buffer *port_ring_buffer = NULL;
+struct ring_buffer kni_ring_buffer = {0};
 struct rte_eth_stats *port_old_stats = NULL;
 
-static struct rte_eth_conf port_conf_default;
+static struct rte_eth_conf port_conf_default = {0};
 static struct rte_kni *kni;
 struct rte_mempool *mbuf_pool = NULL;
 volatile bool force_quit = false;
@@ -85,27 +70,47 @@ volatile bool force_quit = false;
 */
 
 // 发送缓冲区头部指针位置
-void *mem_send_head_pointer(int port_index) {
-    return (void *) (port_ring_buffer[port_index].mem_send_head);
+void *cgo_mem_send_head_pointer(const int port_index) {
+    return port_ring_buffer[port_index].mem_send_head;
 }
 
 // 接收缓冲区头部指针位置
-void *mem_recv_head_pointer(int port_index) {
-    return (void *) (port_ring_buffer[port_index].mem_recv_head);
+void *cgo_mem_recv_head_pointer(const int port_index) {
+    return port_ring_buffer[port_index].mem_recv_head;
 }
 
 // 发送缓冲区当前已读指针位置
-void **send_pos_pointer_addr(int port_index) {
-    return (void **) (&(port_ring_buffer[port_index].send_pos_pointer));
+void **cgo_send_pos_pointer_addr(const int port_index) {
+    return (void **) &port_ring_buffer[port_index].send_pos_pointer;
 }
 
 // 接收缓冲区当前已读指针位置
-void **recv_pos_pointer_addr(int port_index) {
-    return (void **) (&(port_ring_buffer[port_index].recv_pos_pointer));
+void **cgo_recv_pos_pointer_addr(const int port_index) {
+    return (void **) &port_ring_buffer[port_index].recv_pos_pointer;
+}
+
+// kni发送缓冲区头部指针位置
+void *cgo_kni_mem_send_head_pointer() {
+    return kni_ring_buffer.mem_send_head;
+}
+
+// kni接收缓冲区头部指针位置
+void *cgo_kni_mem_recv_head_pointer() {
+    return kni_ring_buffer.mem_recv_head;
+}
+
+// kni发送缓冲区当前已读指针位置
+void **cgo_kni_send_pos_pointer_addr() {
+    return (void **) &kni_ring_buffer.send_pos_pointer;
+}
+
+// kni接收缓冲区当前已读指针位置
+void **cgo_kni_recv_pos_pointer_addr() {
+    return (void **) &kni_ring_buffer.recv_pos_pointer;
 }
 
 // 环状缓冲区写入
-uint8_t write_recv_mem_core(int port_index, uint8_t *data, uint16_t len) {
+uint8_t write_recv_mem_core(struct ring_buffer *buffer, const uint8_t *data, uint16_t len) {
     // 内存对齐
     uint8_t aling_size = len % 4;
     if (aling_size != 0) {
@@ -113,152 +118,149 @@ uint8_t write_recv_mem_core(int port_index, uint8_t *data, uint16_t len) {
     }
     len += aling_size;
     uint32_t head_u32 = 0;
-    head_u32 = (((uint32_t) data[0]) << 0) +
-               (((uint32_t) data[1]) << 8) +
-               (((uint32_t) data[2]) << 16) +
-               (((uint32_t) data[3]) << 24);
-    int32_t overflow = (port_ring_buffer[port_index].mem_recv_cur + len) - (port_ring_buffer[port_index].mem_recv_head + ring_buffer_size);
+    head_u32 = ((uint32_t) data[0] << 0) +
+               ((uint32_t) data[1] << 8) +
+               ((uint32_t) data[2] << 16) +
+               ((uint32_t) data[3] << 24);
+    const int32_t overflow = (int32_t) buffer->mem_recv_cur + (int32_t) len - ((int32_t) buffer->mem_recv_head + ring_buffer_size);
     if (debug) {
-        printf("[write_recv_mem_core] port_index: %d, overflow: %d, len: %d, mem_recv_cur: %p, mem_recv_head: %p, recv_pos_pointer: %p\n", port_index, overflow, len,
-               port_ring_buffer[port_index].mem_recv_cur, port_ring_buffer[port_index].mem_recv_head, port_ring_buffer[port_index].recv_pos_pointer);
+        printf("[write_recv_mem_core] buffer: %p, overflow: %d, len: %d, mem_recv_cur: %p, mem_recv_head: %p, recv_pos_pointer: %p\n", buffer, overflow, len,
+               buffer->mem_recv_cur, buffer->mem_recv_head, buffer->recv_pos_pointer);
     }
     if (overflow >= 0) {
         // 有溢出
-        if (port_ring_buffer[port_index].mem_recv_cur < port_ring_buffer[port_index].recv_pos_pointer) {
+        if (buffer->mem_recv_cur < buffer->recv_pos_pointer) {
             // 已经处于读写指针交叉状态 丢弃数据
             return 1;
         }
-        if (overflow >= (port_ring_buffer[port_index].recv_pos_pointer - port_ring_buffer[port_index].mem_recv_head)) {
+        if (overflow >= buffer->recv_pos_pointer - buffer->mem_recv_head) {
             // 即使进入读写指针交叉状态 剩余内存依然不足 丢弃数据
             return 1;
         }
-        uint32_t *head_ptr = (uint32_t *) port_ring_buffer[port_index].mem_recv_cur;
+        uint32_t *head_ptr = (uint32_t *) buffer->mem_recv_cur;
         // 写入头部 原子操作
         *head_ptr = head_u32;
-        if ((len - overflow) > 4) {
+        if (len - overflow > 4) {
             // 拷贝前半段数据
-            memcpy(port_ring_buffer[port_index].mem_recv_cur + 4, data + 4, (len - overflow) - 4);
+            memcpy(buffer->mem_recv_cur + 4, data + 4, len - overflow - 4);
         }
-        port_ring_buffer[port_index].mem_recv_cur = port_ring_buffer[port_index].mem_recv_head;
+        buffer->mem_recv_cur = buffer->mem_recv_head;
         // 拷贝后半段数据
-        memcpy(port_ring_buffer[port_index].mem_recv_cur, data + 4 + ((len - overflow) - 4), overflow);
-        port_ring_buffer[port_index].mem_recv_cur += overflow;
-        if (port_ring_buffer[port_index].mem_recv_cur >= port_ring_buffer[port_index].mem_recv_head + ring_buffer_size) {
-            port_ring_buffer[port_index].mem_recv_cur = port_ring_buffer[port_index].mem_recv_head;
+        memcpy(buffer->mem_recv_cur, data + 4 + (len - overflow - 4), overflow);
+        buffer->mem_recv_cur += overflow;
+        if (buffer->mem_recv_cur >= buffer->mem_recv_head + ring_buffer_size) {
+            buffer->mem_recv_cur = buffer->mem_recv_head;
         }
     } else {
         // 无溢出
-        if ((port_ring_buffer[port_index].mem_recv_cur < port_ring_buffer[port_index].recv_pos_pointer) &&
-            ((port_ring_buffer[port_index].mem_recv_cur + len) >= port_ring_buffer[port_index].recv_pos_pointer)) {
+        if (buffer->mem_recv_cur < buffer->recv_pos_pointer &&
+            buffer->mem_recv_cur + len >= buffer->recv_pos_pointer) {
             // 状态下剩余内存不足 丢弃数据
             return 1;
         }
-        uint32_t *head_ptr = (uint32_t *) port_ring_buffer[port_index].mem_recv_cur;
+        uint32_t *head_ptr = (uint32_t *) buffer->mem_recv_cur;
         // 写入头部 原子操作
         *head_ptr = head_u32;
-        memcpy(port_ring_buffer[port_index].mem_recv_cur + 4, data + 4, len - 4);
-        port_ring_buffer[port_index].mem_recv_cur += len;
-        if (port_ring_buffer[port_index].mem_recv_cur >= port_ring_buffer[port_index].mem_recv_head + ring_buffer_size) {
-            port_ring_buffer[port_index].mem_recv_cur = port_ring_buffer[port_index].mem_recv_head;
+        memcpy(buffer->mem_recv_cur + 4, data + 4, len - 4);
+        buffer->mem_recv_cur += len;
+        if (buffer->mem_recv_cur >= buffer->mem_recv_head + ring_buffer_size) {
+            buffer->mem_recv_cur = buffer->mem_recv_head;
         }
     }
     return 0;
 }
 
 // 写入接收缓冲区
-void write_recv_mem(int port_index, uint8_t *data, uint16_t len) {
-    if (port_ring_buffer[port_index].mem_recv_cur == NULL) {
-        port_ring_buffer[port_index].mem_recv_cur = port_ring_buffer[port_index].mem_recv_head;
+void write_recv_mem(struct ring_buffer *buffer, const uint8_t *data, const uint16_t len) {
+    if (buffer->mem_recv_cur == NULL) {
+        buffer->mem_recv_cur = buffer->mem_recv_head;
     }
     if (len > 1514) {
         return;
     }
     // 4字节头部 + 最大1514字节数据 + 2字节内存对齐
-    uint8_t data_pkg[4 + 1514 + 2];
-    memset(data_pkg, 0x00, 1520);
+    uint8_t data_pkt[4 + 1514 + 2] = {0};
     // 数据长度标识
-    data_pkg[0] = (uint8_t)(len);
-    data_pkg[1] = (uint8_t)(len >> 8);
+    data_pkt[0] = (uint8_t) len;
+    data_pkt[1] = (uint8_t) (len >> 8);
     // 写入完成标识
-    uint8_t *finish_flag_pointer = port_ring_buffer[port_index].mem_recv_cur + 2;
-    data_pkg[2] = 0x00;
+    uint8_t *finish_flag_pointer = buffer->mem_recv_cur + 2;
+    data_pkt[2] = 0x00;
     // 内存对齐
-    data_pkg[3] = 0x00;
+    data_pkt[3] = 0x00;
     // 写入数据
-    memcpy(data_pkg + 4, data, len);
-    uint8_t ret = write_recv_mem_core(port_index, data_pkg, len + 4);
+    memcpy(data_pkt + 4, data, len);
+    const uint8_t ret = write_recv_mem_core(buffer, data_pkt, len + 4);
     if (ret == 1) {
         return;
     }
     // 将后4个字节即长度标识与写入完成标识的内存置为0x00
-    port_ring_buffer[port_index].mem_recv_cur[0] = 0x00;
-    port_ring_buffer[port_index].mem_recv_cur[1] = 0x00;
-    port_ring_buffer[port_index].mem_recv_cur[2] = 0x00;
-    port_ring_buffer[port_index].mem_recv_cur[3] = 0x00;
+    buffer->mem_recv_cur[0] = 0x00;
+    buffer->mem_recv_cur[1] = 0x00;
+    buffer->mem_recv_cur[2] = 0x00;
+    buffer->mem_recv_cur[3] = 0x00;
     // 修改写入完成标识 原子操作
     *finish_flag_pointer = 0x01;
-    return;
 }
 
 // 读取发送缓冲区
-void read_send_mem(int port_index, uint8_t *data, uint16_t *len) {
-    if (port_ring_buffer[port_index].mem_send_cur == NULL) {
-        port_ring_buffer[port_index].mem_send_cur = port_ring_buffer[port_index].mem_send_head;
+void read_send_mem(struct ring_buffer *buffer, uint8_t *data, uint16_t *len) {
+    if (buffer->mem_send_cur == NULL) {
+        buffer->mem_send_cur = buffer->mem_send_head;
     }
     *len = 0;
     // 读取头部 原子操作
-    uint32_t *head_ptr = (uint32_t *) port_ring_buffer[port_index].mem_send_cur;
-    uint32_t head_u32 = *head_ptr;
+    const uint32_t *head_ptr = (uint32_t *) buffer->mem_send_cur;
+    const uint32_t head_u32 = *head_ptr;
     *len = (uint16_t) head_u32;
     if (*len == 0) {
         // 没有新数据
         return;
     }
-    uint8_t finish_flag = (uint8_t)(head_u32 >> 16);
+    const uint8_t finish_flag = head_u32 >> 16;
     if (finish_flag == 0x00) {
         // 数据尚未写入完成
         *len = 0;
         return;
     }
-    port_ring_buffer[port_index].mem_send_cur += 4;
-    if (port_ring_buffer[port_index].mem_send_cur >= port_ring_buffer[port_index].mem_send_head + ring_buffer_size) {
-        port_ring_buffer[port_index].mem_send_cur = port_ring_buffer[port_index].mem_send_head;
+    buffer->mem_send_cur += 4;
+    if (buffer->mem_send_cur >= buffer->mem_send_head + ring_buffer_size) {
+        buffer->mem_send_cur = buffer->mem_send_head;
     }
-    int32_t overflow = (port_ring_buffer[port_index].mem_send_cur + *len) - (port_ring_buffer[port_index].mem_send_head + ring_buffer_size);
+    const int32_t overflow = (int32_t) buffer->mem_send_cur + (int32_t) *len - ((int32_t) buffer->mem_send_head + ring_buffer_size);
     if (debug) {
-        printf("[read_send_mem] port_index: %d, overflow: %d, len: %d, mem_send_cur: %p, mem_send_head: %p, send_pos_pointer: %p\n", port_index, overflow, *len,
-               port_ring_buffer[port_index].mem_send_cur, port_ring_buffer[port_index].mem_send_head, port_ring_buffer[port_index].send_pos_pointer);
+        printf("[read_send_mem] buffer: %p, overflow: %d, len: %d, mem_send_cur: %p, mem_send_head: %p, send_pos_pointer: %p\n", buffer, overflow, *len,
+               buffer->mem_send_cur, buffer->mem_send_head, buffer->send_pos_pointer);
     }
     if (overflow >= 0) {
         // 拷贝前半段数据
-        memcpy(data, port_ring_buffer[port_index].mem_send_cur, *len - overflow);
-        port_ring_buffer[port_index].mem_send_cur = port_ring_buffer[port_index].mem_send_head;
+        memcpy(data, buffer->mem_send_cur, *len - overflow);
+        buffer->mem_send_cur = buffer->mem_send_head;
         // 拷贝后半段数据
-        memcpy(data + (*len - overflow), port_ring_buffer[port_index].mem_send_cur, *len - (*len - overflow));
+        memcpy(data + (*len - overflow), buffer->mem_send_cur, *len - (*len - overflow));
         // 内存对齐
         uint8_t aling_size = overflow % 4;
         if (aling_size != 0) {
             aling_size = 4 - aling_size;
         }
-        port_ring_buffer[port_index].mem_send_cur += overflow + aling_size;
-        if (port_ring_buffer[port_index].mem_send_cur >= port_ring_buffer[port_index].mem_send_head + ring_buffer_size) {
-            port_ring_buffer[port_index].mem_send_cur = port_ring_buffer[port_index].mem_send_head;
+        buffer->mem_send_cur += overflow + aling_size;
+        if (buffer->mem_send_cur >= buffer->mem_send_head + ring_buffer_size) {
+            buffer->mem_send_cur = buffer->mem_send_head;
         }
-        port_ring_buffer[port_index].send_pos_pointer = port_ring_buffer[port_index].mem_send_cur;
+        buffer->send_pos_pointer = buffer->mem_send_cur;
     } else {
-        memcpy(data, port_ring_buffer[port_index].mem_send_cur, *len);
+        memcpy(data, buffer->mem_send_cur, *len);
         // 内存对齐
         uint8_t aling_size = *len % 4;
         if (aling_size != 0) {
             aling_size = 4 - aling_size;
         }
-        port_ring_buffer[port_index].mem_send_cur += *len + aling_size;
-        if (port_ring_buffer[port_index].mem_send_cur >= port_ring_buffer[port_index].mem_send_head + ring_buffer_size) {
-            port_ring_buffer[port_index].mem_send_cur = port_ring_buffer[port_index].mem_send_head;
+        buffer->mem_send_cur += *len + aling_size;
+        if (buffer->mem_send_cur >= buffer->mem_send_head + ring_buffer_size) {
+            buffer->mem_send_cur = buffer->mem_send_head;
         }
-        port_ring_buffer[port_index].send_pos_pointer = port_ring_buffer[port_index].mem_send_cur;
+        buffer->send_pos_pointer = buffer->mem_send_cur;
     }
-    return;
 }
 
 static int kni_change_mtu(uint16_t port_id, unsigned int new_mtu) {
@@ -266,94 +268,41 @@ static int kni_change_mtu(uint16_t port_id, unsigned int new_mtu) {
         RTE_LOG(ERR, APP, "invalid port id: %u\n", port_id);
         return -EINVAL;
     }
-
-    RTE_LOG(INFO, APP, "change mtu of port: %u, mtu: %u\n", port_id, new_mtu);
-
-    rte_eth_dev_stop(port_id);
-
-    struct rte_eth_conf port_conf = port_conf_default;
-    port_conf.txmode.mq_mode = ETH_MQ_TX_NONE;
-    if (new_mtu > ETHER_MAX_LEN) {
-        port_conf.rxmode.offloads |= DEV_RX_OFFLOAD_JUMBO_FRAME;
-    } else {
-        port_conf.rxmode.offloads &= ~DEV_RX_OFFLOAD_JUMBO_FRAME;
-    }
-    port_conf.rxmode.max_rx_pkt_len = new_mtu + KNI_ENET_HEADER_SIZE + KNI_ENET_FCS_SIZE;
-
-    int ret = rte_eth_dev_configure(port_id, 1, 1, &port_conf);
-    if (ret < 0) {
-        RTE_LOG(ERR, APP, "fail to reconfigure port: %u\n", port_id);
-        return ret;
-    }
-
-    uint16_t nb_rxd = KNI_RX_RING_SIZE;
-    ret = rte_eth_dev_adjust_nb_rx_tx_desc(port_id, &nb_rxd, NULL);
-    if (ret < 0) {
-        rte_exit(EXIT_FAILURE, "could not adjust number of descriptors for port: %u\n", port_id, ret);
-    }
-
-    struct rte_eth_dev_info dev_info;
-    rte_eth_dev_info_get(port_id, &dev_info);
-
-    struct rte_eth_rxconf rxq_conf;
-    rxq_conf = dev_info.default_rxconf;
-    rxq_conf.offloads = port_conf.rxmode.offloads;
-
-    ret = rte_eth_rx_queue_setup(port_id, 0, nb_rxd, rte_eth_dev_socket_id(port_id), &rxq_conf, mbuf_pool);
-    if (ret < 0) {
-        RTE_LOG(ERR, APP, "fail to setup rx queue of port: %u\n", port_id);
-        return ret;
-    }
-
-    ret = rte_eth_dev_start(port_id);
-    if (ret < 0) {
-        RTE_LOG(ERR, APP, "fail to restart port: %u\n", port_id);
-        return ret;
-    }
-
+    RTE_LOG(INFO, APP, "kni change mtu of port: %u, mtu: %u\n", port_id, new_mtu);
     return 0;
 }
 
-static int kni_config_network_interface(uint16_t port_id, uint8_t if_up) {
+static int kni_config_network_if(const uint16_t port_id, const uint8_t if_up) {
     if (!rte_eth_dev_is_valid_port(port_id)) {
         RTE_LOG(ERR, APP, "invalid port id: %u\n", port_id);
         return -EINVAL;
     }
-
-    RTE_LOG(INFO, APP, "kni config network interface of %u %s\n", port_id, if_up ? "up" : "down");
-
+    RTE_LOG(INFO, APP, "kni config network if of port: %u if_up: %d\n", port_id, if_up);
     return 0;
 }
 
-static int kni_config_mac_address(uint16_t port_id, uint8_t mac_addr[]) {
+static int kni_config_mac_address(const uint16_t port_id, uint8_t mac_addr[]) {
     if (!rte_eth_dev_is_valid_port(port_id)) {
         RTE_LOG(ERR, APP, "invalid port id: %u\n", port_id);
         return -EINVAL;
     }
-
-    RTE_LOG(INFO, APP, "configure mac address of port: %u\n", port_id);
-
-    int ret = rte_eth_dev_default_mac_addr_set(port_id, (struct ether_addr *) mac_addr);
-    if (ret < 0) {
-        RTE_LOG(ERR, APP, "failed to config mac_addr for port: %u\n", port_id);
-    }
-
-    return ret;
+    char mac[64];
+    sprintf(mac, "%02X:%02X:%02X:%02X:%02X:%02X", mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+    RTE_LOG(INFO, APP, "kni config mac address of port: %u, mac: %s\n", port_id, mac);
+    return 0;
 }
 
 int kni_alloc(uint16_t port_id) {
-    struct rte_kni_conf conf;
-    memset(&conf, 0, sizeof(conf));
+    struct rte_kni_conf conf = {0};
 
     // conf.core_id: lcore_kthread
     conf.core_id = 0;
     conf.force_bind = 1;
-    snprintf(conf.name, RTE_KNI_NAMESIZE, "veth%u", port_id);
+    sprintf(conf.name, "ethkni");
     conf.group_id = port_id;
     conf.mbuf_size = KNI_MAX_PACKET_SIZE;
 
-    struct rte_eth_dev_info dev_info;
-    memset(&dev_info, 0, sizeof(dev_info));
+    struct rte_eth_dev_info dev_info = {0};
     rte_eth_dev_info_get(port_id, &dev_info);
     if (dev_info.device) {
         struct rte_bus *bus = rte_bus_find_by_device(dev_info.device);
@@ -364,14 +313,19 @@ int kni_alloc(uint16_t port_id) {
         }
     }
 
-    rte_eth_macaddr_get(port_id, (struct ether_addr *) &conf.mac_addr);
+    conf.mac_addr[0] = 0x65;
+    conf.mac_addr[1] = 0x74;
+    conf.mac_addr[2] = 0x68;
+    conf.mac_addr[3] = 0x6b;
+    conf.mac_addr[4] = 0x6e;
+    conf.mac_addr[5] = 0x69;
+
     rte_eth_dev_get_mtu(port_id, &conf.mtu);
 
-    struct rte_kni_ops ops;
-    memset(&ops, 0, sizeof(ops));
+    struct rte_kni_ops ops = {0};
     ops.port_id = port_id;
     ops.change_mtu = kni_change_mtu;
-    ops.config_network_if = kni_config_network_interface;
+    ops.config_network_if = kni_config_network_if;
     ops.config_mac_address = kni_config_mac_address;
 
     kni = rte_kni_alloc(mbuf_pool, &conf, &ops);
@@ -382,36 +336,36 @@ int kni_alloc(uint16_t port_id) {
     return 0;
 }
 
-double cost_time_ms(struct timeval time_begin, struct timeval time_end) {
-    double time_begin_us = time_begin.tv_sec * 1000000 + time_begin.tv_usec;
-    double time_end_us = time_end.tv_sec * 1000000 + time_end.tv_usec;
+double cost_time_ms(const struct timeval time_begin, const struct timeval time_end) {
+    const double time_begin_us = time_begin.tv_sec * 1000000 + time_begin.tv_usec;
+    const double time_end_us = time_end.tv_sec * 1000000 + time_end.tv_usec;
     return (time_end_us - time_begin_us) / 1000;
 }
 
 // 打印收发包统计信息
-void print_stats(int port_index) {
-    uint16_t port_id = port_id_list[port_index];
-    struct rte_eth_stats old_stats = port_old_stats[port_index];
-    struct rte_eth_stats new_stats;
+void cgo_print_stats(const int port_index, char *msg) {
+    const uint16_t port_id = port_id_list[port_index];
+    const struct rte_eth_stats old_stats = port_old_stats[port_index];
+    struct rte_eth_stats new_stats = {0};
     rte_eth_stats_get(port_id, &new_stats);
-    printf("[rte_eth_stats]\tport:%2u | "
-           "rx:%10lu (pps) | "
-           "tx:%10lu (pps) | "
-           "drop:%10lu (pps) | "
-           "rx:%20lu (byte/s) | "
-           "tx:%20lu (byte/s)\n",
-           port_id,
-           new_stats.ipackets - old_stats.ipackets,
-           new_stats.opackets - old_stats.opackets,
-           new_stats.imissed - old_stats.imissed,
-           new_stats.ibytes - old_stats.ibytes,
-           new_stats.obytes - old_stats.obytes);
+    sprintf(msg, "[rte_eth_stats]\tport:%2u | "
+            "rx:%10llu (pps) | "
+            "tx:%10llu (pps) | "
+            "drop:%10llu (pps) | "
+            "rx:%20llu (byte/s) | "
+            "tx:%20llu (byte/s)\n",
+            port_id,
+            new_stats.ipackets - old_stats.ipackets,
+            new_stats.opackets - old_stats.opackets,
+            new_stats.imissed - old_stats.imissed,
+            new_stats.ibytes - old_stats.ibytes,
+            new_stats.obytes - old_stats.obytes);
     port_old_stats[port_index] = new_stats;
 }
 
 // 处理退出信号并终止程序
-void exit_signal_handler(void) {
-    printf("exit signal received, exit...\n");
+void cgo_exit_signal_handler(void) {
+    RTE_LOG(INFO, APP, "exit signal received, exit...\n");
     force_quit = true;
 }
 
@@ -419,14 +373,14 @@ void exit_signal_handler(void) {
 int port_init(uint16_t port_id) {
     uint8_t nb_ports = rte_eth_dev_count();
     if (port_id < 0 || port_id >= nb_ports) {
-        printf("port is not right\n");
+        RTE_LOG(ERR, APP, "port is not right\n");
         return -1;
     }
 
     struct rte_eth_conf port_conf = port_conf_default;
     port_conf.rxmode.max_rx_pkt_len = ETHER_MAX_LEN;
 
-    struct rte_eth_dev_info dev_info;
+    struct rte_eth_dev_info dev_info = {0};
     rte_eth_dev_info_get(port_id, &dev_info);
     if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE) {
         port_conf.txmode.offloads |= DEV_TX_OFFLOAD_MBUF_FAST_FREE;
@@ -440,7 +394,7 @@ int port_init(uint16_t port_id) {
     // 配置设备
     ret = rte_eth_dev_configure(port_id, nb_rx_queues, nb_tx_queues, &port_conf);
     if (ret != 0) {
-        printf("rte_eth_dev_configure failed\n");
+        RTE_LOG(ERR, APP, "rte_eth_dev_configure failed\n");
         return ret;
     }
 
@@ -452,7 +406,7 @@ int port_init(uint16_t port_id) {
     for (q = 0; q < nb_rx_queues; q++) {
         ret = rte_eth_rx_queue_setup(port_id, q, nb_rxd, rte_eth_dev_socket_id(port_id), NULL, mbuf_pool);
         if (ret < 0) {
-            printf("rte_eth_rx_queue_setup failed\n");
+            RTE_LOG(ERR, APP, "rte_eth_rx_queue_setup failed\n");
             return ret;
         }
     }
@@ -461,7 +415,7 @@ int port_init(uint16_t port_id) {
     for (q = 0; q < nb_tx_queues; q++) {
         ret = rte_eth_tx_queue_setup(port_id, q, nb_txd, rte_eth_dev_socket_id(port_id), NULL);
         if (ret < 0) {
-            printf("rte_eth_tx_queue_setup failed\n");
+            RTE_LOG(ERR, APP, "rte_eth_tx_queue_setup failed\n");
             return ret;
         }
     }
@@ -469,7 +423,7 @@ int port_init(uint16_t port_id) {
     // 启动设备
     ret = rte_eth_dev_start(port_id);
     if (ret < 0) {
-        printf("rte_eth_dev_start failed\n");
+        RTE_LOG(ERR, APP, "rte_eth_dev_start failed\n");
         return ret;
     }
 
@@ -479,25 +433,25 @@ int port_init(uint16_t port_id) {
     return 0;
 }
 
-void lcore_misc_loop(void) {
+void misc(void) {
     // KNI回调处理
     rte_kni_handle_request(kni);
 }
 
 int lcore_misc(void *arg) {
-    unsigned int lcore_id = rte_lcore_id();
+    const unsigned int lcore_id = rte_lcore_id();
     RTE_LOG(INFO, APP, "lcore_misc run in lcore: %u\n", lcore_id);
     while (!force_quit) {
-        lcore_misc_loop();
+        misc();
     }
     RTE_LOG(INFO, APP, "lcore_misc exit in lcore: %u\n", lcore_id);
     return 0;
 }
 
-bool lcore_rx_loop(int port_index, uint16_t port_id) {
+bool eth_rx(const int port_index, const uint16_t port_id) {
     // 接收多个网卡数据帧
     struct rte_mbuf *bufs_recv[BURST_SIZE];
-    uint16_t nb_rx = rte_eth_rx_burst(port_id, 0, bufs_recv, BURST_SIZE);
+    const uint16_t nb_rx = rte_eth_rx_burst(port_id, 0, bufs_recv, BURST_SIZE);
 
     if (idle_sleep) {
         // 无包时短暂睡眠节省CPU资源
@@ -508,79 +462,67 @@ bool lcore_rx_loop(int port_index, uint16_t port_id) {
 
     // 有网卡接收数据
     if (likely(nb_rx != 0)) {
-        struct rte_mbuf *bufs_recv_to_kni[BURST_SIZE];
-        uint16_t nb_rx_to_kni = 0;
         for (int i = 0; i < nb_rx; i++) {
-            uint8_t *pktbuf = rte_pktmbuf_mtod(bufs_recv[i], uint8_t * );
+            const uint8_t *pktbuf = rte_pktmbuf_mtod(bufs_recv[i], uint8_t *);
             if (debug) {
                 // 打印网卡接收到的原始数据
                 printf("[nic recv], port_index: %d, len: %d, data: ", port_index, bufs_recv[i]->data_len);
                 for (int j = 0; j < bufs_recv[i]->data_len; j++) {
-                    printf("%02x ", pktbuf[j]);
+                    printf("%02x", pktbuf[j]);
                 }
                 printf("\n\n");
             }
-            if (kni_bypass) {
-                bool is_kni_data = false;
-                if (unlikely(bufs_recv[i]->data_len < 14)) {
-                    printf("error ethernet frm, len < 14\n");
-                    continue;
-                }
-                if (likely(pktbuf[12] == 0x08) && likely(pktbuf[13] == 0x00)) {
-                    // IP报文
-                    if (unlikely(bufs_recv[i]->data_len < 34)) {
-                        printf("error ip pkt, len < 34\n");
-                        continue;
-                    }
-                    uint32_t src_addr = 0;
-                    src_addr += ((uint32_t)(pktbuf[29]) << 24);
-                    src_addr += ((uint32_t)(pktbuf[28]) << 16);
-                    src_addr += ((uint32_t)(pktbuf[27]) << 8);
-                    src_addr += ((uint32_t)(pktbuf[26]) << 0);
-                    if (likely(src_addr == kni_bypass_target_ip)) {
-                        // 环状缓冲区数据发送
-                        uint16_t ring_send_len = bufs_recv[i]->data_len;
-                        write_recv_mem(port_index, pktbuf, ring_send_len);
-                        rte_pktmbuf_free(bufs_recv[i]);
-                    } else {
-                        is_kni_data = true;
-                    }
-                } else {
-                    // 非IP报文
-                    is_kni_data = true;
-                }
-                if (unlikely(is_kni_data)) {
-                    // KNI数据
-                    bufs_recv_to_kni[nb_rx_to_kni] = bufs_recv[i];
-                    nb_rx_to_kni++;
-                }
-            } else {
-                // 环状缓冲区数据发送
-                uint16_t ring_send_len = bufs_recv[i]->data_len;
-                write_recv_mem(port_index, pktbuf, ring_send_len);
-                rte_pktmbuf_free(bufs_recv[i]);
-            }
+            // 环状缓冲区数据发送
+            const uint16_t ring_send_len = bufs_recv[i]->data_len;
+            write_recv_mem(&port_ring_buffer[port_index], pktbuf, ring_send_len);
+            rte_pktmbuf_free(bufs_recv[i]);
         }
-        // KNI数据发送
-        uint16_t nb_kni_tx = rte_kni_tx_burst(kni, bufs_recv_to_kni, nb_rx_to_kni);
-        if (unlikely(nb_kni_tx < nb_rx_to_kni)) {
-            // 把没发送成功的mbuf释放掉
-            for (int i = nb_kni_tx; i < nb_rx_to_kni; i++) {
-                rte_pktmbuf_free(bufs_recv_to_kni[i]);
+    }
+    return true;
+}
+
+bool kni_rx() {
+    // KNI数据接收
+    struct rte_mbuf *bufs_kni_recv[BURST_SIZE];
+    const uint16_t nb_kni_rx = rte_kni_rx_burst(kni, bufs_kni_recv, BURST_SIZE);
+
+    if (idle_sleep) {
+        // 无包时短暂睡眠节省CPU资源
+        if (unlikely(nb_kni_rx == 0)) {
+            return false;
+        }
+    }
+
+    // 有KNI接收数据
+    if (likely(nb_kni_rx != 0)) {
+        for (int i = 0; i < nb_kni_rx; i++) {
+            const uint8_t *pktbuf = rte_pktmbuf_mtod(bufs_kni_recv[i], uint8_t *);
+            if (debug) {
+                // 打印KNI接收到的原始数据
+                printf("[kni recv], len: %d, data: ", bufs_kni_recv[i]->data_len);
+                for (int j = 0; j < bufs_kni_recv[i]->data_len; j++) {
+                    printf("%02x", pktbuf[j]);
+                }
+                printf("\n\n");
             }
+            // KNI环状缓冲区数据发送
+            const uint16_t ring_send_len = bufs_kni_recv[i]->data_len;
+            write_recv_mem(&kni_ring_buffer, pktbuf, ring_send_len);
+            rte_pktmbuf_free(bufs_kni_recv[i]);
         }
     }
     return true;
 }
 
 int lcore_rx(void *arg) {
-    unsigned int lcore_id = rte_lcore_id();
-    int port_index = *((int *) arg);
-    uint16_t port_id = port_id_list[port_index];
+    const unsigned int lcore_id = rte_lcore_id();
+    const int port_index = *(int *) arg;
+    const uint16_t port_id = port_id_list[port_index];
     RTE_LOG(INFO, APP, "lcore_rx run in lcore: %u, port: %u\n", lcore_id, port_id);
 
     uint64_t loop_times = 0;
-    struct timeval time_begin, time_end;
+    struct timeval time_begin = {0};
+    struct timeval time_end = {0};
     while (!force_quit) {
         if (debug) {
             loop_times++;
@@ -588,14 +530,15 @@ int lcore_rx(void *arg) {
                 gettimeofday(&time_begin, NULL);
             }
         }
-        bool have_rx_data = lcore_rx_loop(port_index, port_id);
-        if (!have_rx_data) {
+        const bool have_rx_data = eth_rx(port_index, port_id);
+        const bool have_kni_rx_data = kni_rx();
+        if (!have_rx_data && !have_kni_rx_data) {
             usleep(1000 * 1);
         }
         if (debug) {
             if (loop_times % (1000 * 1000 * 10) == 0) {
                 gettimeofday(&time_end, NULL);
-                double cost_time = cost_time_ms(time_begin, time_end);
+                const double cost_time = cost_time_ms(time_begin, time_end);
                 printf("lcore_rx_loop total cost: %f ms, lcore: %u, port_index: %d\n", cost_time, lcore_id, port_index);
             }
         }
@@ -605,26 +548,22 @@ int lcore_rx(void *arg) {
     return 0;
 }
 
-bool lcore_tx_loop(int port_index, uint16_t port_id) {
+bool eth_tx(const int port_index, const uint16_t port_id) {
     // 环状缓冲区数据接收
     uint8_t ring_recv_buf[BURST_SIZE][1514];
     uint16_t ring_recv_buf_len[BURST_SIZE];
     int ring_recv_size = 0;
     for (int i = 0; i < BURST_SIZE; i++) {
-        read_send_mem(port_index, ring_recv_buf[i], &ring_recv_buf_len[i]);
+        read_send_mem(&port_ring_buffer[port_index], ring_recv_buf[i], &ring_recv_buf_len[i]);
         if (unlikely(ring_recv_buf_len[i] == 0)) {
             break;
         }
         ring_recv_size++;
     }
 
-    // KNI数据接收
-    struct rte_mbuf *bufs_kni_recv[BURST_SIZE];
-    uint16_t nb_kni_rx = rte_kni_rx_burst(kni, bufs_kni_recv, BURST_SIZE);
-
     if (idle_sleep) {
         // 无包时短暂睡眠节省CPU资源
-        if (unlikely(ring_recv_size == 0) && unlikely(nb_kni_rx == 0)) {
+        if (unlikely(ring_recv_size == 0)) {
             return false;
         }
     }
@@ -636,7 +575,7 @@ bool lcore_tx_loop(int port_index, uint16_t port_id) {
             for (int i = 0; i < ring_recv_size; i++) {
                 printf("[ring recv], port_index: %d, len: %d, data: ", port_index, ring_recv_buf_len[i]);
                 for (int j = 0; j < ring_recv_buf_len[i]; j++) {
-                    printf("%02x ", ring_recv_buf[i][j]);
+                    printf("%02x", ring_recv_buf[i][j]);
                 }
                 printf("\n\n");
             }
@@ -652,7 +591,7 @@ bool lcore_tx_loop(int port_index, uint16_t port_id) {
         }
 
         // 发送多个网卡数据帧
-        uint16_t nb_tx = rte_eth_tx_burst(port_id, 0, bufs_send, ring_recv_size);
+        const uint16_t nb_tx = rte_eth_tx_burst(port_id, 0, bufs_send, ring_recv_size);
 
         if (unlikely(nb_tx < ring_recv_size)) {
             // 把没发送成功的mbuf释放掉
@@ -662,39 +601,74 @@ bool lcore_tx_loop(int port_index, uint16_t port_id) {
         }
     }
 
-    // 有KNI数据
-    if (likely(nb_kni_rx > 0)) {
+    return true;
+}
+
+bool kni_tx() {
+    // KNI环状缓冲区数据接收
+    uint8_t kni_ring_recv_buf[BURST_SIZE][1514];
+    uint16_t kni_ring_recv_buf_len[BURST_SIZE];
+    int kni_ring_recv_size = 0;
+    for (int i = 0; i < BURST_SIZE; i++) {
+        read_send_mem(&kni_ring_buffer, kni_ring_recv_buf[i], &kni_ring_recv_buf_len[i]);
+        if (unlikely(kni_ring_recv_buf_len[i] == 0)) {
+            break;
+        }
+        kni_ring_recv_size++;
+    }
+
+    if (idle_sleep) {
+        // 无包时短暂睡眠节省CPU资源
+        if (unlikely(kni_ring_recv_size == 0)) {
+            return false;
+        }
+    }
+
+    // 有KNI环状缓冲区数据
+    if (likely(kni_ring_recv_size > 0)) {
         if (debug) {
-            // 打印KNI数据
-            for (int i = 0; i < nb_kni_rx; i++) {
-                printf("[kni recv], port_index: %d, len: %d, data: ", port_index, bufs_kni_recv[i]->data_len);
-                for (int j = 0; j < bufs_kni_recv[i]->data_len; j++) {
-                    uint8_t *pktbuf = rte_pktmbuf_mtod(bufs_kni_recv[i], uint8_t * );
-                    printf("%02x ", pktbuf[j]);
+            // 打印KNI环状缓冲区数据
+            for (int i = 0; i < kni_ring_recv_size; i++) {
+                printf("[kni ring recv], len: %d, data: ", kni_ring_recv_buf_len[i]);
+                for (int j = 0; j < kni_ring_recv_buf_len[i]; j++) {
+                    printf("%02x", kni_ring_recv_buf[i][j]);
                 }
                 printf("\n\n");
             }
         }
-        // 发送多个网卡数据帧
-        uint16_t nb_tx = rte_eth_tx_burst(port_id, 0, bufs_kni_recv, nb_kni_rx);
-        if (unlikely(nb_tx < nb_kni_rx)) {
+
+        struct rte_mbuf *bufs_send[BURST_SIZE];
+
+        // 数据拷贝
+        for (int i = 0; i < kni_ring_recv_size; i++) {
+            bufs_send[i] = rte_pktmbuf_alloc(mbuf_pool);
+            uint8_t *send_data = (uint8_t *) rte_pktmbuf_append(bufs_send[i], kni_ring_recv_buf_len[i] * sizeof(uint8_t));
+            memcpy(send_data, kni_ring_recv_buf[i], kni_ring_recv_buf_len[i]);
+        }
+
+        // KNI数据发送
+        uint16_t nb_kni_tx = rte_kni_tx_burst(kni, bufs_send, kni_ring_recv_size);
+
+        if (unlikely(nb_kni_tx < kni_ring_recv_size)) {
             // 把没发送成功的mbuf释放掉
-            for (int i = nb_tx; i < nb_kni_rx; i++) {
-                rte_pktmbuf_free(bufs_kni_recv[i]);
+            for (int i = nb_kni_tx; i < kni_ring_recv_size; i++) {
+                rte_pktmbuf_free(bufs_send[i]);
             }
         }
     }
+
     return true;
 }
 
 int lcore_tx(void *arg) {
-    unsigned int lcore_id = rte_lcore_id();
-    int port_index = *((int *) arg);
-    uint16_t port_id = port_id_list[port_index];
+    const unsigned int lcore_id = rte_lcore_id();
+    const int port_index = *(int *) arg;
+    const uint16_t port_id = port_id_list[port_index];
     RTE_LOG(INFO, APP, "lcore_tx run in lcore: %u, port: %u\n", lcore_id, port_id);
 
     uint64_t loop_times = 0;
-    struct timeval time_begin, time_end;
+    struct timeval time_begin = {0};
+    struct timeval time_end = {0};
     while (!force_quit) {
         if (debug) {
             loop_times++;
@@ -702,14 +676,14 @@ int lcore_tx(void *arg) {
                 gettimeofday(&time_begin, NULL);
             }
         }
-        bool have_tx_data = lcore_tx_loop(port_index, port_id);
+        const bool have_tx_data = eth_tx(port_index, port_id);
         if (!have_tx_data) {
             usleep(1000 * 1);
         }
         if (debug) {
             if (loop_times % (1000 * 1000 * 10) == 0) {
                 gettimeofday(&time_end, NULL);
-                double cost_time = cost_time_ms(time_begin, time_end);
+                const double cost_time = cost_time_ms(time_begin, time_end);
                 printf("lcore_tx_loop total cost: %f ms, lcore: %u, port_index: %d\n", cost_time, lcore_id, port_index);
             }
         }
@@ -720,16 +694,18 @@ int lcore_tx(void *arg) {
 }
 
 int lcore_misc_rx_tx() {
-    unsigned int lcore_id = rte_lcore_id();
+    const unsigned int lcore_id = rte_lcore_id();
     RTE_LOG(INFO, APP, "lcore_misc_rx_tx run in lcore: %u\n", lcore_id);
 
     while (!force_quit) {
-        lcore_misc_loop();
+        misc();
         bool all_port_idle = true;
         for (int i = 0; i < port_count; i++) {
-            bool have_rx_data = lcore_rx_loop(i, port_id_list[i]);
-            bool have_tx_data = lcore_tx_loop(i, port_id_list[i]);
-            if (have_rx_data || have_tx_data) {
+            const bool have_rx_data = eth_rx(i, port_id_list[i]);
+            const bool have_tx_data = eth_tx(i, port_id_list[i]);
+            const bool have_kni_rx_data = kni_rx();
+            const bool have_kni_tx_data = kni_tx();
+            if (have_rx_data || have_tx_data || have_kni_rx_data || have_kni_tx_data) {
                 all_port_idle = false;
             }
         }
@@ -742,27 +718,27 @@ int lcore_misc_rx_tx() {
     return 0;
 }
 
-void parse_args(char *args_raw, int *argc, char ***argv) {
-    int args_raw_len = strlen(args_raw);
-    char *args = (char *) malloc(args_raw_len + 2);
+void parse_args(const char *args_raw, int *argc, char ***argv) {
+    const size_t args_raw_len = strlen(args_raw);
+    char *args = malloc(args_raw_len + 2);
     memset(args, 0x00, args_raw_len + 2);
     memcpy(args, args_raw, args_raw_len);
     args[args_raw_len] = ' ';
     args[args_raw_len + 1] = 0x00;
-    (*argc) = 0;
-    int args_len = strlen(args);
+    *argc = 0;
+    const size_t args_len = strlen(args);
     for (int i = 0; i < args_len; i++) {
         if (args[i] == ' ') {
             (*argc)++;
         }
     }
-    (*argv) = (char **) malloc(sizeof(char *) * (*argc));
-    memset((*argv), 0x00, sizeof(char *) * (*argc));
-    char **argv_copy = (*argv);
+    *argv = (char **) malloc(sizeof(char *) * *argc);
+    memset(*argv, 0x00, sizeof(char *) * *argc);
+    char **argv_copy = *argv;
     int head = 0;
     for (int i = 0; i < args_len; i++) {
         if (args[i] == ' ') {
-            int arg_len = i - head;
+            const int arg_len = i - head;
             *argv_copy = (char *) malloc(arg_len + 1);
             memset(*argv_copy, 0x00, arg_len + 1);
             memcpy(*argv_copy, args + head, arg_len);
@@ -781,32 +757,32 @@ struct dpdk_config {
     bool debug_log;
     bool idle_sleep;
     bool single_core;
-    bool kni_bypass;
-    char *kni_bypass_target_ip;
 };
 
-int dpdk_main(struct dpdk_config *config) {
+int cgo_dpdk_main(const struct dpdk_config *config) {
     printf("dpdk start, version: %s\n", VERSION);
     printf("eal_args: %s\n", config->eal_args);
     printf("\n");
 
     // 初始化DPDK
+    dpdk_start = false;
     int argc = 0;
     char **argv = NULL;
     parse_args(config->eal_args, &argc, &argv);
-    int ret = rte_eal_init(argc, argv);
+    const int ret = rte_eal_init(argc, argv);
     free(argv);
     if (ret < 0) {
         rte_exit(EXIT_FAILURE, "eal init failed\n");
     }
     printf("\n");
+    dpdk_start = true;
 
     int cpu_core_count = 0;
     char **cpu_core_value = NULL;
     int cpu_core_list[1024];
     parse_args(config->cpu_core_list, &cpu_core_count, &cpu_core_value);
     for (int i = 0; i < cpu_core_count; i++) {
-        cpu_core_list[i] = atoi(cpu_core_value[i]);
+        cpu_core_list[i] = strtol(cpu_core_value[i], NULL, 10);
         free(cpu_core_value[i]);
     }
     free(cpu_core_value);
@@ -823,20 +799,14 @@ int dpdk_main(struct dpdk_config *config) {
     single_core = config->single_core;
     printf("single core mode: %d\n", single_core);
 
-    kni_bypass = config->kni_bypass;
-    printf("kni bypass mode: %d\n", kni_bypass);
-
-    kni_bypass_target_ip = inet_addr(config->kni_bypass_target_ip);
-    printf("kni bypass target ip: %s, inet addr: %x\n", config->kni_bypass_target_ip, kni_bypass_target_ip);
-
     force_quit = false;
 
-    uint8_t nb_ports = rte_eth_dev_count();
+    const uint8_t nb_ports = rte_eth_dev_count();
     for (int i = 0; i < nb_ports; i++) {
         char dev_name[RTE_DEV_NAME_MAX_LEN];
         rte_eth_dev_get_name_by_port(i, dev_name);
         printf("port number: %d, port pci: %s, ", i, dev_name);
-        struct ether_addr dev_eth_addr;
+        struct ether_addr dev_eth_addr = {0};
         rte_eth_macaddr_get(i, &dev_eth_addr);
         printf("mac address: %02X:%02X:%02X:%02X:%02X:%02X\n",
                dev_eth_addr.addr_bytes[0],
@@ -858,7 +828,7 @@ int dpdk_main(struct dpdk_config *config) {
     port_id_list = (uint16_t *) malloc(sizeof(uint16_t) * port_count);
     memset(port_id_list, 0x00, sizeof(uint16_t) * port_count);
     for (int i = 0; i < port_count; i++) {
-        port_id_list[i] = atoi(port_id_value[i]);
+        port_id_list[i] = strtol(port_id_value[i], NULL, 10);
         free(port_id_value[i]);
     }
     free(port_id_value);
@@ -886,6 +856,19 @@ int dpdk_main(struct dpdk_config *config) {
         port_ring_buffer[i].send_pos_pointer = port_ring_buffer[i].mem_send_head;
         port_ring_buffer[i].recv_pos_pointer = port_ring_buffer[i].mem_recv_head;
     }
+    // kni分配环状缓冲区内存
+    kni_ring_buffer.mem_send_head = rte_malloc("send_ring_buffer", ring_buffer_size, 0);
+    if (kni_ring_buffer.mem_send_head == NULL) {
+        rte_exit(EXIT_FAILURE, "send ring buffer create failed\n");
+    }
+    kni_ring_buffer.mem_send_cur = NULL;
+    kni_ring_buffer.mem_recv_head = rte_malloc("recv_ring_buffer", ring_buffer_size, 0);
+    if (kni_ring_buffer.mem_recv_head == NULL) {
+        rte_exit(EXIT_FAILURE, "recv ring buffer create failed\n");
+    }
+    kni_ring_buffer.mem_recv_cur = NULL;
+    kni_ring_buffer.send_pos_pointer = kni_ring_buffer.mem_send_head;
+    kni_ring_buffer.recv_pos_pointer = kni_ring_buffer.mem_recv_head;
     printf("\n");
 
     rte_kni_init(1);
@@ -910,7 +893,7 @@ int dpdk_main(struct dpdk_config *config) {
     }
 
     if (rte_kni_release(kni)) {
-        printf("fail to release kni\n");
+        RTE_LOG(ERR, APP, "fail to release kni\n");
     }
     for (int i = 0; i < port_count; i++) {
         rte_eth_dev_stop(port_id_list[i]);

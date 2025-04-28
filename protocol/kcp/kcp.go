@@ -2,6 +2,8 @@ package kcp
 
 import (
 	"encoding/binary"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,14 +23,31 @@ const (
 	IKCP_MTU_DEF     = 1400
 	IKCP_ACK_FAST    = 3
 	IKCP_INTERVAL    = 100
-	IKCP_OVERHEAD    = 24 + 4 + 4 // KCP组合会话id是8个字节
 	IKCP_DEADLINK    = 20
 	IKCP_THRESH_INIT = 2
 	IKCP_THRESH_MIN  = 2
 	IKCP_PROBE_INIT  = 7000   // 7 secs to probe window size
 	IKCP_PROBE_LIMIT = 120000 // up to 120 secs to probe window
-	IKCP_SN_OFFSET   = 12 + 4 // KCP组合会话id是8个字节
+	IKCP_SN_OFFSET   = 16
 )
+
+var IKCP_OVERHEAD = 28
+
+var (
+	byteCheckModeEnable bool
+	byteCheckMode       int
+	byteCheckModeOnce   sync.Once
+)
+
+func SetByteCheckMode(mode int) {
+	byteCheckModeOnce.Do(func() {
+		byteCheckMode = mode
+		if mode != -1 {
+			byteCheckModeEnable = true
+			IKCP_OVERHEAD += 4
+		}
+	})
+}
 
 // monotonic reference time point
 var refTime = time.Now()
@@ -136,7 +155,14 @@ func (seg *segment) encode(ptr []byte) []byte {
 	ptr = ikcp_encode32u(ptr, seg.sn)
 	ptr = ikcp_encode32u(ptr, seg.una)
 	ptr = ikcp_encode32u(ptr, uint32(len(seg.data)))
-	ptr = ikcp_encode32u(ptr, uint32(0))
+	if byteCheckModeEnable {
+		if seg.cmd == IKCP_CMD_PUSH {
+			ptr = ikcp_encode32u(ptr, byte_check_hash(seg.data))
+		} else {
+			ptr = ikcp_encode32u(ptr, 0)
+		}
+	}
+	atomic.AddUint64(&DefaultSnmp.OutSegs, 1)
 	return ptr
 }
 
@@ -186,7 +212,7 @@ func NewKCP(conv uint64, output output_callback) *KCP {
 	kcp.rcv_wnd = IKCP_WND_RCV
 	kcp.rmt_wnd = IKCP_WND_RCV
 	kcp.mtu = IKCP_MTU_DEF
-	kcp.mss = kcp.mtu - IKCP_OVERHEAD
+	kcp.mss = kcp.mtu - uint32(IKCP_OVERHEAD)
 	kcp.buffer = make([]byte, kcp.mtu)
 	kcp.rx_rto = IKCP_RTO_DEF
 	kcp.rx_minrto = IKCP_RTO_MIN
@@ -217,11 +243,11 @@ func (kcp *KCP) delSegment(seg *segment) {
 //
 // Return false if n >= mss
 func (kcp *KCP) ReserveBytes(n int) bool {
-	if n >= int(kcp.mtu-IKCP_OVERHEAD) || n < 0 {
+	if n >= int(kcp.mtu-uint32(IKCP_OVERHEAD)) || n < 0 {
 		return false
 	}
 	kcp.reserved = n
-	kcp.mss = kcp.mtu - IKCP_OVERHEAD - uint32(n)
+	kcp.mss = kcp.mtu - uint32(IKCP_OVERHEAD) - uint32(n)
 	return true
 }
 
@@ -550,7 +576,7 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 	var windowSlides bool
 
 	for {
-		var ts, sn, length, una, crc uint32
+		var ts, sn, length, una uint32
 		var conv uint64
 		var wnd uint16
 		var cmd, frg uint8
@@ -571,7 +597,15 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 		data = ikcp_decode32u(data, &sn)
 		data = ikcp_decode32u(data, &una)
 		data = ikcp_decode32u(data, &length)
-		data = ikcp_decode32u(data, &crc)
+		if byteCheckModeEnable {
+			if cmd == IKCP_CMD_PUSH {
+				var hash uint32
+				data = ikcp_decode32u(data, &hash)
+				if hash != byte_check_hash(data[:length]) {
+					return -4
+				}
+			}
+		}
 		if len(data) < int(length) {
 			return -2
 		}
@@ -596,6 +630,7 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 			flag |= 1
 			latest = ts
 		} else if cmd == IKCP_CMD_PUSH {
+			repeat := true
 			if _itimediff(sn, kcp.rcv_nxt+kcp.rcv_wnd) < 0 {
 				kcp.ack_push(sn, ts)
 				if _itimediff(sn, kcp.rcv_nxt) >= 0 {
@@ -608,8 +643,11 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 					seg.sn = sn
 					seg.una = una
 					seg.data = data[:length] // delayed data copying
-					kcp.parse_data(seg)
+					repeat = kcp.parse_data(seg)
 				}
+			}
+			if regular && repeat {
+				atomic.AddUint64(&DefaultSnmp.RepeatSegs, 1)
 			}
 		} else if cmd == IKCP_CMD_WASK {
 			// ready to send back IKCP_CMD_WINS in Ikcp_flush
@@ -624,6 +662,7 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 		inSegs++
 		data = data[length:]
 	}
+	atomic.AddUint64(&DefaultSnmp.InSegs, inSegs)
 
 	// update rtt with the latest ts
 	// ignore the FEC packet
@@ -863,11 +902,19 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 
 	// counter updates
 	sum := lostSegs
+	if lostSegs > 0 {
+		atomic.AddUint64(&DefaultSnmp.LostSegs, lostSegs)
+	}
 	if fastRetransSegs > 0 {
+		atomic.AddUint64(&DefaultSnmp.FastRetransSegs, fastRetransSegs)
 		sum += fastRetransSegs
 	}
 	if earlyRetransSegs > 0 {
+		atomic.AddUint64(&DefaultSnmp.EarlyRetransSegs, earlyRetransSegs)
 		sum += earlyRetransSegs
+	}
+	if sum > 0 {
+		atomic.AddUint64(&DefaultSnmp.RetransSegs, sum)
 	}
 
 	// cwnd update
@@ -990,7 +1037,7 @@ func (kcp *KCP) SetMtu(mtu int) int {
 	if mtu < 50 || mtu < IKCP_OVERHEAD {
 		return -1
 	}
-	if kcp.reserved >= int(kcp.mtu-IKCP_OVERHEAD) || kcp.reserved < 0 {
+	if kcp.reserved >= int(kcp.mtu-uint32(IKCP_OVERHEAD)) || kcp.reserved < 0 {
 		return -1
 	}
 
@@ -999,7 +1046,7 @@ func (kcp *KCP) SetMtu(mtu int) int {
 		return -2
 	}
 	kcp.mtu = uint32(mtu)
-	kcp.mss = kcp.mtu - IKCP_OVERHEAD - uint32(kcp.reserved)
+	kcp.mss = kcp.mtu - uint32(IKCP_OVERHEAD) - uint32(kcp.reserved)
 	kcp.buffer = buffer
 	return 0
 }

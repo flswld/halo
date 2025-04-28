@@ -9,6 +9,9 @@ import (
 	"strconv"
 	"time"
 	"unsafe"
+
+	"github.com/flswld/halo/cpu"
+	"github.com/flswld/halo/mem"
 )
 
 // #cgo CFLAGS: -msse4.2
@@ -27,17 +30,15 @@ func Log(msg string) {
 }
 
 type Config struct {
-	GolangCpuCoreList []int  // golang侧使用的核心编号列表 每个网口两个核心
-	StatsLog          bool   // 收发包统计日志
-	DpdkCpuCoreList   []int  // dpdk侧使用的核心编号列表 主线程第一个核心 杂项线程第二个核心 每个网口两个核心
-	DpdkMemChanNum    int    // dpdk内存通道数
-	PortIdList        []int  // 使用网口id列表
-	RingBufferSize    int    // 环状缓冲区大小
-	DebugLog          bool   // 收发包调试日志
-	IdleSleep         bool   // 空闲睡眠 降低cpu占用
-	SingleCore        bool   // 单核模式 物理单核机器需要开启
-	KniBypass         bool   // kni旁路目标ip 只接收来自目标ip的包 其他的包全部送到kni网卡
-	KniBypassTargetIp string // kni旁路目标ip地址
+	GolangCpuCoreList []int // golang侧使用的核心编号列表 每个网口两个核心
+	StatsLog          bool  // 收发包统计日志
+	DpdkCpuCoreList   []int // dpdk侧使用的核心编号列表 主线程第一个核心 杂项线程第二个核心 每个网口两个核心
+	DpdkMemChanNum    int   // dpdk内存通道数
+	PortIdList        []int // 使用网口id列表
+	RingBufferSize    int   // 环状缓冲区大小
+	DebugLog          bool  // 收发包调试日志
+	IdleSleep         bool  // 空闲睡眠 降低cpu占用
+	SingleCore        bool  // 单核模式 物理单核机器需要开启
 }
 
 type ring_buffer struct {
@@ -52,8 +53,11 @@ type ring_buffer struct {
 var (
 	conf              *Config       = nil
 	port_ring_buffer  []ring_buffer = nil
+	kni_ring_buffer   ring_buffer
 	port_dpdk_rx_chan []chan []byte = nil
 	port_dpdk_tx_chan []chan []byte = nil
+	kni_dpdk_rx_chan  chan []byte   = nil
+	kni_dpdk_tx_chan  chan []byte   = nil
 	force_quit                      = false
 )
 
@@ -84,27 +88,44 @@ func Run(config *Config) {
 	}
 	go run_dpdk()
 	// 等待DPDK启动完成
-	time.Sleep(time.Second * 30)
+	for {
+		if C.dpdk_start == C.bool(true) {
+			break
+		}
+		time.Sleep(time.Second * 1)
+	}
 	port_ring_buffer = make([]ring_buffer, len(conf.PortIdList))
 	port_dpdk_rx_chan = make([]chan []byte, len(conf.PortIdList))
 	port_dpdk_tx_chan = make([]chan []byte, len(conf.PortIdList))
 	for port_index := range conf.PortIdList {
-		port_ring_buffer[port_index].mem_send_head = C.mem_send_head_pointer(C.int(port_index))
-		port_ring_buffer[port_index].mem_recv_head = C.mem_recv_head_pointer(C.int(port_index))
-		port_ring_buffer[port_index].recv_pos_pointer_addr = C.recv_pos_pointer_addr(C.int(port_index))
-		port_ring_buffer[port_index].send_pos_pointer_addr = C.send_pos_pointer_addr(C.int(port_index))
+		port_ring_buffer[port_index].mem_send_head = C.cgo_mem_send_head_pointer(C.int(port_index))
+		port_ring_buffer[port_index].mem_recv_head = C.cgo_mem_recv_head_pointer(C.int(port_index))
+		port_ring_buffer[port_index].recv_pos_pointer_addr = C.cgo_recv_pos_pointer_addr(C.int(port_index))
+		port_ring_buffer[port_index].send_pos_pointer_addr = C.cgo_send_pos_pointer_addr(C.int(port_index))
+		kni_ring_buffer.mem_send_head = C.cgo_kni_mem_send_head_pointer()
+		kni_ring_buffer.mem_recv_head = C.cgo_kni_mem_recv_head_pointer()
+		kni_ring_buffer.recv_pos_pointer_addr = C.cgo_kni_recv_pos_pointer_addr()
+		kni_ring_buffer.send_pos_pointer_addr = C.cgo_kni_send_pos_pointer_addr()
 		port_dpdk_rx_chan[port_index] = make(chan []byte, 1024)
 		port_dpdk_tx_chan[port_index] = make(chan []byte, 1024)
-		go tx_pkt(port_index)
-		go rx_pkt(port_index)
+		go eth_tx_pkt(port_index)
+		go eth_rx_pkt(port_index)
 		if conf.DebugLog {
 			if conf.RingBufferSize <= 1520*3 {
-				go print_ring_buffer(port_index)
+				go print_ring_buffer(&(port_ring_buffer[port_index]))
 			}
 		}
-		if conf.StatsLog {
-			go print_stats(port_index)
+	}
+	kni_dpdk_rx_chan = make(chan []byte, 1024)
+	kni_dpdk_tx_chan = make(chan []byte, 1024)
+	go kni_rx_tx_pkt()
+	if conf.DebugLog {
+		if conf.RingBufferSize <= 1520*3 {
+			go print_ring_buffer(&(kni_ring_buffer))
 		}
+	}
+	if conf.StatsLog {
+		go print_port_stats(conf.PortIdList)
 	}
 }
 
@@ -116,35 +137,43 @@ func Exit() {
 		close(port_dpdk_rx_chan[port_index])
 		close(port_dpdk_tx_chan[port_index])
 	}
+	close(kni_dpdk_rx_chan)
+	close(kni_dpdk_tx_chan)
 	time.Sleep(time.Second * 1)
-	C.exit_signal_handler()
+	C.cgo_exit_signal_handler()
 	time.Sleep(time.Second * 1)
 	port_dpdk_rx_chan = nil
 	port_dpdk_tx_chan = nil
+	kni_dpdk_rx_chan = nil
+	kni_dpdk_tx_chan = nil
 	port_ring_buffer = nil
+	kni_ring_buffer = ring_buffer{}
 	conf = nil
 	force_quit = false
 }
 
-// Rx 获取网口RX管道
-func Rx(port_index int) chan []byte {
+// RxChan 获取网卡RX管道
+func RxChan(port_index int) chan []byte {
 	return port_dpdk_rx_chan[port_index]
 }
 
-// Tx 获取网口TX管道
-func Tx(port_index int) chan []byte {
+// TxChan 获取网卡TX管道
+func TxChan(port_index int) chan []byte {
 	return port_dpdk_tx_chan[port_index]
 }
 
-// BindCpuCore 协程绑核
-func BindCpuCore(core int) {
-	runtime.LockOSThread()
-	ret := C.bind_cpu_core(C.int(core))
-	Log(fmt.Sprintf("goroutine bind cpu core: %v, ret: %v\n", core, ret))
+// KniRxChan 获取KNI网卡RX管道
+func KniRxChan() chan []byte {
+	return kni_dpdk_rx_chan
 }
 
-// 收包
-func rx_pkt(port_index int) {
+// KniTxChan 获取KNI网卡TX管道
+func KniTxChan() chan []byte {
+	return kni_dpdk_tx_chan
+}
+
+// 网卡收包
+func eth_rx_pkt(port_index int) {
 	runtime.LockOSThread()
 	core := 0
 	if conf.SingleCore {
@@ -152,15 +181,15 @@ func rx_pkt(port_index int) {
 	} else {
 		core = conf.GolangCpuCoreList[port_index*2+0]
 	}
-	ret := C.bind_cpu_core(C.int(core))
-	Log(fmt.Sprintf("rx goroutine bind cpu core ret: %v, core: %v, port: %v\n", ret, core, conf.PortIdList[port_index]))
+	ret := cpu.BindCpuCore(core)
+	Log(fmt.Sprintf("eth rx goroutine bind cpu core ret: %v, core: %v, port: %v\n", ret, core, conf.PortIdList[port_index]))
 	pkt_rx_buf := make([]uint8, 1514)
 	pkt_len := uint16(0)
 	for {
 		if force_quit {
 			break
 		}
-		read_recv_mem(port_index, pkt_rx_buf, &pkt_len)
+		read_recv_mem(&(port_ring_buffer[port_index]), pkt_rx_buf, &pkt_len)
 		if pkt_len == 0 {
 			if conf.IdleSleep {
 				time.Sleep(time.Millisecond * 1)
@@ -172,13 +201,13 @@ func rx_pkt(port_index int) {
 		copy(pkt, pkt_rx_buf)
 		port_dpdk_rx_chan[port_index] <- pkt
 		if conf.DebugLog {
-			Log(fmt.Sprintf("[rx pkt] port_index: %v, len: %v, data: %02x\n", port_index, pkt_len, pkt))
+			Log(fmt.Sprintf("[eth rx pkt] port_index: %v, len: %v, data: %02x\n", port_index, pkt_len, pkt))
 		}
 	}
 }
 
-// 发包
-func tx_pkt(port_index int) {
+// 网卡发包
+func eth_tx_pkt(port_index int) {
 	runtime.LockOSThread()
 	core := 0
 	if conf.SingleCore {
@@ -186,8 +215,8 @@ func tx_pkt(port_index int) {
 	} else {
 		core = conf.GolangCpuCoreList[port_index*2+1]
 	}
-	ret := C.bind_cpu_core(C.int(core))
-	Log(fmt.Sprintf("tx goroutine bind cpu core ret: %v, core: %v, port: %v\n", ret, core, conf.PortIdList[port_index]))
+	ret := cpu.BindCpuCore(core)
+	Log(fmt.Sprintf("eth tx goroutine bind cpu core ret: %v, core: %v, port: %v\n", ret, core, conf.PortIdList[port_index]))
 	for {
 		if force_quit {
 			break
@@ -198,14 +227,53 @@ func tx_pkt(port_index int) {
 		}
 		pkt_len := len(pkt)
 		if conf.DebugLog {
-			Log(fmt.Sprintf("[tx pkt] port_index: %v, len: %v, data: %02x\n", port_index, pkt_len, pkt))
+			Log(fmt.Sprintf("[eth tx pkt] port_index: %v, len: %v, data: %02x\n", port_index, pkt_len, pkt))
 		}
-		write_send_mem(port_index, pkt, uint16(pkt_len))
+		write_send_mem(&(port_ring_buffer[port_index]), pkt, uint16(pkt_len))
+	}
+}
+
+// KNI网卡收包发包
+func kni_rx_tx_pkt() {
+	runtime.LockOSThread()
+	core := conf.GolangCpuCoreList[0]
+	ret := cpu.BindCpuCore(core)
+	Log(fmt.Sprintf("kni rx tx goroutine bind cpu core ret: %v, core: %v\n", ret, core))
+	pkt_rx_buf := make([]uint8, 1514)
+	pkt_len := uint16(0)
+	for {
+		if force_quit {
+			break
+		}
+		select {
+		case pkt := <-kni_dpdk_tx_chan:
+			if pkt == nil {
+				continue
+			}
+			pkt_len := len(pkt)
+			if conf.DebugLog {
+				Log(fmt.Sprintf("[kni tx pkt] len: %v, data: %02x\n", pkt_len, pkt))
+			}
+			write_send_mem(&kni_ring_buffer, pkt, uint16(pkt_len))
+		default:
+			read_recv_mem(&kni_ring_buffer, pkt_rx_buf, &pkt_len)
+			if pkt_len == 0 {
+				time.Sleep(time.Millisecond * 1)
+				// 单个cpu核心轮询
+				continue
+			}
+			pkt := make([]uint8, pkt_len)
+			copy(pkt, pkt_rx_buf)
+			kni_dpdk_rx_chan <- pkt
+			if conf.DebugLog {
+				Log(fmt.Sprintf("[kni rx pkt] len: %v, data: %02x\n", pkt_len, pkt))
+			}
+		}
 	}
 }
 
 // 打印环状缓冲区数据
-func print_ring_buffer(port_index int) {
+func print_ring_buffer(buffer *ring_buffer) {
 	go func() {
 		ticker := time.NewTicker(time.Second)
 		for {
@@ -216,7 +284,7 @@ func print_ring_buffer(port_index int) {
 			<-ticker.C
 			Log(fmt.Sprintf("\n++++++++++ mem recv ++++++++++\n"))
 			for offset := uintptr(0); offset < uintptr(conf.RingBufferSize); offset++ {
-				byte_data := (*uint8)(unsafe.Pointer(uintptr(port_ring_buffer[port_index].mem_recv_head) + offset))
+				byte_data := (*uint8)(unsafe.Pointer(uintptr(buffer.mem_recv_head) + offset))
 				Log(fmt.Sprintf("%02x ", *byte_data))
 			}
 			Log(fmt.Sprintf("\n++++++++++ mem recv ++++++++++\n"))
@@ -232,7 +300,7 @@ func print_ring_buffer(port_index int) {
 			<-ticker.C
 			Log(fmt.Sprintf("\n++++++++++ mem send ++++++++++\n"))
 			for offset := uintptr(0); offset < uintptr(conf.RingBufferSize); offset++ {
-				byte_data := (*uint8)(unsafe.Pointer(uintptr(port_ring_buffer[port_index].mem_send_head) + offset))
+				byte_data := (*uint8)(unsafe.Pointer(uintptr(buffer.mem_send_head) + offset))
 				Log(fmt.Sprintf("%02x ", *byte_data))
 			}
 			Log(fmt.Sprintf("\n++++++++++ mem send ++++++++++\n"))
@@ -240,8 +308,8 @@ func print_ring_buffer(port_index int) {
 	}()
 }
 
-// 打印收发包统计信息
-func print_stats(port_index int) {
+// 打印网卡收发包统计信息
+func print_port_stats(port_index_list []int) {
 	ticker := time.NewTicker(time.Second)
 	for {
 		if force_quit {
@@ -249,7 +317,11 @@ func print_stats(port_index int) {
 			break
 		}
 		<-ticker.C
-		C.print_stats(C.int(port_index))
+		for _, port_index := range port_index_list {
+			var msg [1 * mem.KB]C.char
+			C.cgo_print_stats(C.int(port_index), (*C.char)(&msg[0]))
+			Log(C.GoString((*C.char)(&msg[0])))
+		}
 	}
 }
 
@@ -302,17 +374,14 @@ func run_dpdk() {
 	config.debug_log = C.bool(conf.DebugLog)
 	config.idle_sleep = C.bool(conf.IdleSleep)
 	config.single_core = C.bool(conf.SingleCore)
-	config.kni_bypass = C.bool(conf.KniBypass)
-	config.kni_bypass_target_ip = C.CString(conf.KniBypassTargetIp)
-	C.dpdk_main(&config)
+	C.cgo_dpdk_main(&config)
 	C.free(unsafe.Pointer(config.eal_args))
 	C.free(unsafe.Pointer(config.cpu_core_list))
 	C.free(unsafe.Pointer(config.port_id_list))
-	C.free(unsafe.Pointer(config.kni_bypass_target_ip))
 }
 
 // 环状缓冲区写入
-func write_send_mem_core(port_index int, data [1520]uint8, len uint16) uint8 {
+func write_send_mem_core(buffer *ring_buffer, data [1520]uint8, len uint16) uint8 {
 	// 内存对齐
 	aling_size := len % 4
 	if aling_size != 0 {
@@ -324,118 +393,123 @@ func write_send_mem_core(port_index int, data [1520]uint8, len uint16) uint8 {
 		((uint32(data[1])) << 8) +
 		((uint32(data[2])) << 16) +
 		((uint32(data[3])) << 24)
-	overflow := int32((uintptr(port_ring_buffer[port_index].mem_send_cur) + uintptr(len)) -
-		(uintptr(port_ring_buffer[port_index].mem_send_head) + uintptr(conf.RingBufferSize)))
+	overflow := int32((uintptr(buffer.mem_send_cur) + uintptr(len)) -
+		(uintptr(buffer.mem_send_head) + uintptr(conf.RingBufferSize)))
 	if conf.DebugLog {
-		Log(fmt.Sprintf("[write_send_mem_core] overflow: %d, len: %d, mem_send_cur: %p, mem_send_head: %p, send_pos_pointer: %p\n", overflow, len,
-			port_ring_buffer[port_index].mem_send_cur, port_ring_buffer[port_index].mem_send_head, *port_ring_buffer[port_index].send_pos_pointer_addr))
+		Log(fmt.Sprintf("[write_send_mem_core] buffer: %p, overflow: %d, len: %d, mem_send_cur: %p, mem_send_head: %p, send_pos_pointer: %p\n", buffer, overflow, len,
+			buffer.mem_send_cur, buffer.mem_send_head, *(buffer.send_pos_pointer_addr)))
 	}
 	if overflow >= 0 {
 		// 有溢出
-		if uintptr(port_ring_buffer[port_index].mem_send_cur) < uintptr(*port_ring_buffer[port_index].send_pos_pointer_addr) {
+		if uintptr(buffer.mem_send_cur) < uintptr(*(buffer.send_pos_pointer_addr)) {
 			// 已经处于读写指针交叉状态 丢弃数据
 			return 1
 		}
-		if uintptr(overflow) >= (uintptr(*port_ring_buffer[port_index].send_pos_pointer_addr) - uintptr(port_ring_buffer[port_index].mem_send_head)) {
+		if uintptr(overflow) >= (uintptr(*(buffer.send_pos_pointer_addr)) - uintptr(buffer.mem_send_head)) {
 			// 即使进入读写指针交叉状态 剩余内存依然不足 丢弃数据
 			return 1
 		}
-		head_ptr := (*uint32)(port_ring_buffer[port_index].mem_send_cur)
+		head_ptr := (*uint32)(buffer.mem_send_cur)
 		// 写入头部 原子操作
 		*head_ptr = head_u32
 		if (int32(len) - overflow) > 4 {
 			// 拷贝前半段数据
 			{
+				// src := data[4:]
+				// mem.MemCpy(unsafe.Pointer(uintptr(buffer.mem_send_cur)+uintptr(4)), unsafe.Pointer(&src), uint64((int32(len)-overflow)-4))
 				internel_slice_ptr := new(reflect.SliceHeader)
-				internel_slice_ptr.Data = uintptr(port_ring_buffer[port_index].mem_send_cur) + uintptr(4)
+				internel_slice_ptr.Data = uintptr(buffer.mem_send_cur) + uintptr(4)
 				internel_slice_ptr.Len = int((int32(len) - overflow) - 4)
 				internel_slice_ptr.Cap = int((int32(len) - overflow) - 4)
 				slice_ptr := *(*[]uint8)(unsafe.Pointer(internel_slice_ptr))
 				copy(slice_ptr, data[4:])
 			}
 		}
-		port_ring_buffer[port_index].mem_send_cur = port_ring_buffer[port_index].mem_send_head
+		buffer.mem_send_cur = buffer.mem_send_head
 		// 拷贝后半段数据
 		{
+			// src := data[4+((int32(len)-overflow)-4):]
+			// mem.MemCpy(buffer.mem_send_cur, unsafe.Pointer(&src), uint64(overflow))
 			internel_slice_ptr := new(reflect.SliceHeader)
-			internel_slice_ptr.Data = uintptr(port_ring_buffer[port_index].mem_send_cur)
+			internel_slice_ptr.Data = uintptr(buffer.mem_send_cur)
 			internel_slice_ptr.Len = int(overflow)
 			internel_slice_ptr.Cap = int(overflow)
 			slice_ptr := *(*[]uint8)(unsafe.Pointer(internel_slice_ptr))
 			copy(slice_ptr, data[4+((int32(len)-overflow)-4):])
 		}
-		port_ring_buffer[port_index].mem_send_cur = unsafe.Pointer(uintptr(port_ring_buffer[port_index].mem_send_cur) + uintptr(overflow))
-		if uintptr(port_ring_buffer[port_index].mem_send_cur) >= uintptr(port_ring_buffer[port_index].mem_send_head)+uintptr(conf.RingBufferSize) {
-			port_ring_buffer[port_index].mem_send_cur = port_ring_buffer[port_index].mem_send_head
+		buffer.mem_send_cur = unsafe.Pointer(uintptr(buffer.mem_send_cur) + uintptr(overflow))
+		if uintptr(buffer.mem_send_cur) >= uintptr(buffer.mem_send_head)+uintptr(conf.RingBufferSize) {
+			buffer.mem_send_cur = buffer.mem_send_head
 		}
 	} else {
 		// 无溢出
-		if (uintptr(port_ring_buffer[port_index].mem_send_cur) < uintptr(*port_ring_buffer[port_index].send_pos_pointer_addr)) &&
-			((uintptr(port_ring_buffer[port_index].mem_send_cur) + uintptr(len)) >= uintptr(*port_ring_buffer[port_index].send_pos_pointer_addr)) {
+		if (uintptr(buffer.mem_send_cur) < uintptr(*(buffer.send_pos_pointer_addr))) &&
+			((uintptr(buffer.mem_send_cur) + uintptr(len)) >= uintptr(*(buffer.send_pos_pointer_addr))) {
 			// 读写指针交叉状态下剩余内存不足 丢弃数据
 			return 1
 		}
-		head_ptr := (*uint32)(port_ring_buffer[port_index].mem_send_cur)
+		head_ptr := (*uint32)(buffer.mem_send_cur)
 		// 写入头部 原子操作
 		*head_ptr = head_u32
 		{
+			// src := data[4:]
+			// mem.MemCpy(unsafe.Pointer(uintptr(buffer.mem_send_cur)+uintptr(4)), unsafe.Pointer(&src), uint64(len-4))
 			internel_slice_ptr := new(reflect.SliceHeader)
-			internel_slice_ptr.Data = uintptr(port_ring_buffer[port_index].mem_send_cur) + uintptr(4)
+			internel_slice_ptr.Data = uintptr(buffer.mem_send_cur) + uintptr(4)
 			internel_slice_ptr.Len = int(len - 4)
 			internel_slice_ptr.Cap = int(len - 4)
 			slice_ptr := *(*[]uint8)(unsafe.Pointer(internel_slice_ptr))
 			copy(slice_ptr, data[4:])
 		}
-		port_ring_buffer[port_index].mem_send_cur = unsafe.Pointer(uintptr(port_ring_buffer[port_index].mem_send_cur) + uintptr(len))
-		if uintptr(port_ring_buffer[port_index].mem_send_cur) >= uintptr(port_ring_buffer[port_index].mem_send_head)+uintptr(conf.RingBufferSize) {
-			port_ring_buffer[port_index].mem_send_cur = port_ring_buffer[port_index].mem_send_head
+		buffer.mem_send_cur = unsafe.Pointer(uintptr(buffer.mem_send_cur) + uintptr(len))
+		if uintptr(buffer.mem_send_cur) >= uintptr(buffer.mem_send_head)+uintptr(conf.RingBufferSize) {
+			buffer.mem_send_cur = buffer.mem_send_head
 		}
 	}
 	return 0
 }
 
 // 写入发送缓冲区
-func write_send_mem(port_index int, data []uint8, len uint16) {
-	if port_ring_buffer[port_index].mem_send_cur == nil {
-		port_ring_buffer[port_index].mem_send_cur = port_ring_buffer[port_index].mem_send_head
+func write_send_mem(buffer *ring_buffer, data []uint8, len uint16) {
+	if buffer.mem_send_cur == nil {
+		buffer.mem_send_cur = buffer.mem_send_head
 	}
 	if len > 1514 {
 		return
 	}
 	// 4字节头部 + 最大1514字节数据 + 2字节内存对齐
-	data_pkg := [4 + 1514 + 2]uint8{0x00}
+	data_pkt := [4 + 1514 + 2]uint8{0x00}
 	// 数据长度标识
-	data_pkg[0] = uint8(len)
-	data_pkg[1] = uint8(len >> 8)
+	data_pkt[0] = uint8(len)
+	data_pkt[1] = uint8(len >> 8)
 	// 写入完成标识
-	finish_flag_pointer := (*uint8)(unsafe.Pointer(uintptr(port_ring_buffer[port_index].mem_send_cur) + uintptr(2)))
-	data_pkg[2] = 0x00
+	finish_flag_pointer := (*uint8)(unsafe.Pointer(uintptr(buffer.mem_send_cur) + uintptr(2)))
+	data_pkt[2] = 0x00
 	// 内存对齐
-	data_pkg[3] = 0x00
+	data_pkt[3] = 0x00
 	// 写入数据
-	copy(data_pkg[4:], data[:len])
-	ret := write_send_mem_core(port_index, data_pkg, len+4)
+	copy(data_pkt[4:], data[:len])
+	ret := write_send_mem_core(buffer, data_pkt, len+4)
 	if ret == 1 {
 		return
 	}
 	// 将后4个字节即长度标识与写入完成标识的内存置为0x00
-	*(*uint8)(unsafe.Pointer(uintptr(port_ring_buffer[port_index].mem_send_cur) + uintptr(0))) = 0x00
-	*(*uint8)(unsafe.Pointer(uintptr(port_ring_buffer[port_index].mem_send_cur) + uintptr(1))) = 0x00
-	*(*uint8)(unsafe.Pointer(uintptr(port_ring_buffer[port_index].mem_send_cur) + uintptr(2))) = 0x00
-	*(*uint8)(unsafe.Pointer(uintptr(port_ring_buffer[port_index].mem_send_cur) + uintptr(3))) = 0x00
+	*(*uint8)(unsafe.Pointer(uintptr(buffer.mem_send_cur) + uintptr(0))) = 0x00
+	*(*uint8)(unsafe.Pointer(uintptr(buffer.mem_send_cur) + uintptr(1))) = 0x00
+	*(*uint8)(unsafe.Pointer(uintptr(buffer.mem_send_cur) + uintptr(2))) = 0x00
+	*(*uint8)(unsafe.Pointer(uintptr(buffer.mem_send_cur) + uintptr(3))) = 0x00
 	// 修改写入完成标识 原子操作
 	*finish_flag_pointer = 0x01
-	return
 }
 
 // 读取接收缓冲区
-func read_recv_mem(port_index int, data []uint8, len *uint16) {
-	if port_ring_buffer[port_index].mem_recv_cur == nil {
-		port_ring_buffer[port_index].mem_recv_cur = port_ring_buffer[port_index].mem_recv_head
+func read_recv_mem(buffer *ring_buffer, data []uint8, len *uint16) {
+	if buffer.mem_recv_cur == nil {
+		buffer.mem_recv_cur = buffer.mem_recv_head
 	}
 	*len = 0
 	// 读取头部 原子操作
-	head_ptr := (*uint32)(port_ring_buffer[port_index].mem_recv_cur)
+	head_ptr := (*uint32)(buffer.mem_recv_cur)
 	head_u32 := *head_ptr
 	*len = uint16(head_u32)
 	if *len == 0 {
@@ -448,31 +522,34 @@ func read_recv_mem(port_index int, data []uint8, len *uint16) {
 		*len = 0
 		return
 	}
-	port_ring_buffer[port_index].mem_recv_cur = unsafe.Pointer(uintptr(port_ring_buffer[port_index].mem_recv_cur) + uintptr(4))
-	if uintptr(port_ring_buffer[port_index].mem_recv_cur) >= uintptr(port_ring_buffer[port_index].mem_recv_head)+uintptr(conf.RingBufferSize) {
-		port_ring_buffer[port_index].mem_recv_cur = port_ring_buffer[port_index].mem_recv_head
+	buffer.mem_recv_cur = unsafe.Pointer(uintptr(buffer.mem_recv_cur) + uintptr(4))
+	if uintptr(buffer.mem_recv_cur) >= uintptr(buffer.mem_recv_head)+uintptr(conf.RingBufferSize) {
+		buffer.mem_recv_cur = buffer.mem_recv_head
 	}
-	overflow := int32((uintptr(port_ring_buffer[port_index].mem_recv_cur) + uintptr(*len)) -
-		(uintptr(port_ring_buffer[port_index].mem_recv_head) + uintptr(conf.RingBufferSize)))
+	overflow := int32((uintptr(buffer.mem_recv_cur) + uintptr(*len)) -
+		(uintptr(buffer.mem_recv_head) + uintptr(conf.RingBufferSize)))
 	if conf.DebugLog {
-		Log(fmt.Sprintf("[read_recv_mem] overflow: %d, len: %d, mem_recv_cur: %p, mem_recv_head: %p, recv_pos_pointer: %p\n", overflow, *len,
-			port_ring_buffer[port_index].mem_recv_cur, port_ring_buffer[port_index].mem_recv_head, *port_ring_buffer[port_index].recv_pos_pointer_addr))
+		Log(fmt.Sprintf("[read_recv_mem] buffer: %p, overflow: %d, len: %d, mem_recv_cur: %p, mem_recv_head: %p, recv_pos_pointer: %p\n", buffer, overflow, *len,
+			buffer.mem_recv_cur, buffer.mem_recv_head, *(buffer.recv_pos_pointer_addr)))
 	}
 	if overflow >= 0 {
 		// 拷贝前半段数据
 		{
+			// mem.MemCpy(unsafe.Pointer(&data), buffer.mem_recv_cur, uint64(int32(*len)-overflow))
 			internel_slice_ptr := new(reflect.SliceHeader)
-			internel_slice_ptr.Data = uintptr(port_ring_buffer[port_index].mem_recv_cur)
+			internel_slice_ptr.Data = uintptr(buffer.mem_recv_cur)
 			internel_slice_ptr.Len = int(int32(*len) - overflow)
 			internel_slice_ptr.Cap = int(int32(*len) - overflow)
 			slice_ptr := *(*[]uint8)(unsafe.Pointer(internel_slice_ptr))
 			copy(data, slice_ptr)
 		}
-		port_ring_buffer[port_index].mem_recv_cur = port_ring_buffer[port_index].mem_recv_head
+		buffer.mem_recv_cur = buffer.mem_recv_head
 		// 拷贝后半段数据
 		{
+			// dst := data[int32(*len)-overflow:]
+			// mem.MemCpy(unsafe.Pointer(&dst), buffer.mem_recv_cur, uint64(int32(*len)-(int32(*len)-overflow)))
 			internel_slice_ptr := new(reflect.SliceHeader)
-			internel_slice_ptr.Data = uintptr(port_ring_buffer[port_index].mem_recv_cur)
+			internel_slice_ptr.Data = uintptr(buffer.mem_recv_cur)
 			internel_slice_ptr.Len = int(int32(*len) - (int32(*len) - overflow))
 			internel_slice_ptr.Cap = int(int32(*len) - (int32(*len) - overflow))
 			slice_ptr := *(*[]uint8)(unsafe.Pointer(internel_slice_ptr))
@@ -483,15 +560,16 @@ func read_recv_mem(port_index int, data []uint8, len *uint16) {
 		if aling_size != 0 {
 			aling_size = 4 - aling_size
 		}
-		port_ring_buffer[port_index].mem_recv_cur = unsafe.Pointer(uintptr(port_ring_buffer[port_index].mem_recv_cur) + uintptr(overflow) + uintptr(aling_size))
-		if uintptr(port_ring_buffer[port_index].mem_recv_cur) >= uintptr(port_ring_buffer[port_index].mem_recv_head)+uintptr(conf.RingBufferSize) {
-			port_ring_buffer[port_index].mem_recv_cur = port_ring_buffer[port_index].mem_recv_head
+		buffer.mem_recv_cur = unsafe.Pointer(uintptr(buffer.mem_recv_cur) + uintptr(overflow) + uintptr(aling_size))
+		if uintptr(buffer.mem_recv_cur) >= uintptr(buffer.mem_recv_head)+uintptr(conf.RingBufferSize) {
+			buffer.mem_recv_cur = buffer.mem_recv_head
 		}
-		*port_ring_buffer[port_index].recv_pos_pointer_addr = port_ring_buffer[port_index].mem_recv_cur
+		*(buffer.recv_pos_pointer_addr) = buffer.mem_recv_cur
 	} else {
 		{
+			// mem.MemCpy(unsafe.Pointer(&data), buffer.mem_recv_cur, uint64(*len))
 			internel_slice_ptr := new(reflect.SliceHeader)
-			internel_slice_ptr.Data = uintptr(port_ring_buffer[port_index].mem_recv_cur)
+			internel_slice_ptr.Data = uintptr(buffer.mem_recv_cur)
 			internel_slice_ptr.Len = int(*len)
 			internel_slice_ptr.Cap = int(*len)
 			slice_ptr := *(*[]uint8)(unsafe.Pointer(internel_slice_ptr))
@@ -502,11 +580,10 @@ func read_recv_mem(port_index int, data []uint8, len *uint16) {
 		if aling_size != 0 {
 			aling_size = 4 - aling_size
 		}
-		port_ring_buffer[port_index].mem_recv_cur = unsafe.Pointer(uintptr(port_ring_buffer[port_index].mem_recv_cur) + uintptr(*len) + uintptr(aling_size))
-		if uintptr(port_ring_buffer[port_index].mem_recv_cur) >= uintptr(port_ring_buffer[port_index].mem_recv_head)+uintptr(conf.RingBufferSize) {
-			port_ring_buffer[port_index].mem_recv_cur = port_ring_buffer[port_index].mem_recv_head
+		buffer.mem_recv_cur = unsafe.Pointer(uintptr(buffer.mem_recv_cur) + uintptr(*len) + uintptr(aling_size))
+		if uintptr(buffer.mem_recv_cur) >= uintptr(buffer.mem_recv_head)+uintptr(conf.RingBufferSize) {
+			buffer.mem_recv_cur = buffer.mem_recv_head
 		}
-		*port_ring_buffer[port_index].recv_pos_pointer_addr = port_ring_buffer[port_index].mem_recv_cur
+		*(buffer.recv_pos_pointer_addr) = buffer.mem_recv_cur
 	}
-	return
 }

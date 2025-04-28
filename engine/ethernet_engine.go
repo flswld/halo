@@ -9,7 +9,7 @@ import (
 
 func (i *NetIf) RxEthernet(ethFrm []byte) {
 	if i.Engine.DebugLog {
-		Log(fmt.Sprintf("rx eth frm, len: %v, data: %v\n", len(ethFrm), ethFrm))
+		Log(fmt.Sprintf("rx eth frm, len: %v, data: %02x\n", len(ethFrm), ethFrm))
 	}
 	ethPayload, ethDstMac, ethSrcMac, ethProto, err := protocol.ParseEthFrm(ethFrm)
 	if err != nil {
@@ -35,7 +35,7 @@ func (i *NetIf) TxEthernet(ethPayload []byte, ethDstMac []byte, ethProto uint16)
 		return nil
 	}
 	if i.Engine.DebugLog {
-		Log(fmt.Sprintf("tx eth frm, len: %v, data: %v\n", len(ethFrm), ethFrm))
+		Log(fmt.Sprintf("tx eth frm, len: %v, data: %02x\n", len(ethFrm), ethFrm))
 	}
 	i.EthTxChan <- ethFrm
 	return ethFrm

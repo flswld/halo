@@ -16,6 +16,7 @@ import (
 
 // Enet Enet协议上报结构体
 type Enet struct {
+	Addr      string
 	SessionId uint32
 	Conv      uint32
 	ConnType  string
@@ -24,18 +25,23 @@ type Enet struct {
 
 // Enet连接状态类型
 const (
-	ConnEnetSyn = "ConnEnetSyn"
-	ConnEnetEst = "ConnEnetEst"
-	ConnEnetFin = "ConnEnetFin"
+	ConnEnetSyn  = "ConnEnetSyn"  // 客户端前置握手获取conv
+	ConnEnetEst  = "ConnEnetEst"  // 连接建立
+	ConnEnetFin  = "ConnEnetFin"  // 连接断开
+	ConnEnetPing = "ConnEnetPing" // 网络检查
 )
 
 // Enet连接状态类型幻数
-var MagicEnetSynHead, _ = hex.DecodeString("000000ff")
-var MagicEnetSynTail, _ = hex.DecodeString("ffffffff")
-var MagicEnetEstHead, _ = hex.DecodeString("00000145")
-var MagicEnetEstTail, _ = hex.DecodeString("14514545")
-var MagicEnetFinHead, _ = hex.DecodeString("00000194")
-var MagicEnetFinTail, _ = hex.DecodeString("19419494")
+var (
+	MagicEnetSynHead, _  = hex.DecodeString("000000ff")
+	MagicEnetSynTail, _  = hex.DecodeString("ffffffff")
+	MagicEnetEstHead, _  = hex.DecodeString("00000145")
+	MagicEnetEstTail, _  = hex.DecodeString("14514545")
+	MagicEnetFinHead, _  = hex.DecodeString("00000194")
+	MagicEnetFinTail, _  = hex.DecodeString("19419494")
+	MagicEnetPingHead, _ = hex.DecodeString("00000227")
+	MagicEnetPingTail, _ = hex.DecodeString("22722727")
+)
 
 // Enet事件类型
 const (
@@ -75,6 +81,9 @@ func BuildEnet(connType string, enetType uint32, sessionId uint32, conv uint32) 
 	} else if connType == ConnEnetFin {
 		copy(data[0:4], MagicEnetFinHead)
 		copy(data[16:20], MagicEnetFinTail)
+	} else if connType == ConnEnetPing {
+		copy(data[0:4], MagicEnetPingHead)
+		copy(data[16:20], MagicEnetPingTail)
 	} else {
 		return nil
 	}
@@ -96,26 +105,34 @@ func ParseEnet(data []byte) (connType string, enetType uint32, sessionId uint32,
 	enetTypeDataBuffer := bytes.NewBuffer(enetTypeData)
 	enetType = uint32(0)
 	_ = binary.Read(enetTypeDataBuffer, binary.BigEndian, &enetType)
+
 	equalHead := bytes.Equal(udpPayloadEnetHead, MagicEnetSynHead)
 	equalTail := bytes.Equal(udpPayloadEnetTail, MagicEnetSynTail)
 	if equalHead && equalTail {
-		// 客户端前置握手获取conv
 		connType = ConnEnetSyn
 		return connType, enetType, sessionId, conv, rawConv, nil
 	}
+
 	equalHead = bytes.Equal(udpPayloadEnetHead, MagicEnetEstHead)
 	equalTail = bytes.Equal(udpPayloadEnetTail, MagicEnetEstTail)
 	if equalHead && equalTail {
-		// 连接建立
 		connType = ConnEnetEst
 		return connType, enetType, sessionId, conv, rawConv, nil
 	}
+
 	equalHead = bytes.Equal(udpPayloadEnetHead, MagicEnetFinHead)
 	equalTail = bytes.Equal(udpPayloadEnetTail, MagicEnetFinTail)
 	if equalHead && equalTail {
-		// 连接断开
 		connType = ConnEnetFin
 		return connType, enetType, sessionId, conv, rawConv, nil
 	}
+
+	equalHead = bytes.Equal(udpPayloadEnetHead, MagicEnetPingHead)
+	equalTail = bytes.Equal(udpPayloadEnetTail, MagicEnetPingTail)
+	if equalHead && equalTail {
+		connType = ConnEnetPing
+		return connType, enetType, sessionId, conv, rawConv, nil
+	}
+
 	return "", 0, 0, 0, 0, errors.New("unknown conn type")
 }

@@ -8,12 +8,17 @@
 package kcp
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"io"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 )
 
 const (
@@ -30,7 +35,7 @@ var (
 )
 
 var (
-	// a system-wide packet buffer shared among sending, receiving
+	// a system-wide packet buffer shared among sending, receiving and FEC
 	// to mitigate high-frequency memory allocation for packets, bytes from xmitBuf
 	// is aligned to 64bit
 	xmitBuf sync.Pool
@@ -42,54 +47,22 @@ func init() {
 	}
 }
 
-type Message struct {
-	Buffers [][]byte
-}
+const (
+	batchSize = 16
+)
 
-var ErrConnAlreadyClose = errors.New("conn already close")
-
-type Conn struct {
-	RxChan  chan []byte
-	TxChan  chan []byte
-	IsClose bool
-}
-
-func (c *Conn) ReadFrom(buf []byte) (int, error) {
-	if c.IsClose {
-		return 0, ErrConnAlreadyClose
-	}
-	pkt := <-c.RxChan
-	copy(buf, pkt)
-	return len(pkt), nil
-}
-
-func (c *Conn) WriteTo(buf []byte) (int, error) {
-	if c.IsClose {
-		return 0, ErrConnAlreadyClose
-	}
-	pkt := make([]byte, len(buf))
-	copy(pkt, buf)
-	c.TxChan <- pkt
-	return len(pkt), nil
-}
-
-func (c *Conn) Close() error {
-	if c.IsClose {
-		return ErrConnAlreadyClose
-	}
-	c.IsClose = true
-	close(c.RxChan)
-	close(c.TxChan)
-	return nil
+type batchConn interface {
+	WriteBatch(ms []ipv4.Message, flags int) (int, error)
+	ReadBatch(ms []ipv4.Message, flags int) (int, error)
 }
 
 type (
 	// UDPSession defines a KCP session implemented by UDP
 	UDPSession struct {
-		conn    *Conn     // the underlying packet connection
-		ownConn bool      // true if we created conn internally, false if provided by caller
-		kcp     *KCP      // KCP ARQ protocol
-		l       *Listener // pointing to the Listener object if it's been accepted by a Listener
+		conn    net.PacketConn // the underlying packet connection
+		ownConn bool           // true if we created conn internally, false if provided by caller
+		kcp     *KCP           // KCP ARQ protocol
+		l       *Listener      // pointing to the Listener object if it's been accepted by a Listener
 
 		// kcp receiving is based on packets
 		// recvbuf turns packets into stream
@@ -97,6 +70,7 @@ type (
 		bufptr  []byte
 
 		// settings
+		remote     net.Addr  // remote peer address
 		rd         time.Time // read deadline
 		wd         time.Time // write deadline
 		headerSize int       // the header size additional to a KCP frame
@@ -119,24 +93,56 @@ type (
 		socketWriteErrorOnce sync.Once
 
 		// packets waiting to be sent on wire
-		txqueue []Message
+		txqueue         []ipv4.Message
+		xconn           batchConn // for x/net
+		xconnWriteError error
 
 		mu sync.Mutex
+
+		isChanConn bool
+	}
+
+	setReadBuffer interface {
+		SetReadBuffer(bytes int) error
+	}
+
+	setWriteBuffer interface {
+		SetWriteBuffer(bytes int) error
+	}
+
+	setDSCP interface {
+		SetDSCP(int) error
 	}
 )
 
 // newUDPSession create a new udp session for client or server
-func newUDPSession(conv uint64, l *Listener, conn *Conn, ownConn bool) *UDPSession {
+func newUDPSession(conv uint64, l *Listener, conn net.PacketConn, ownConn bool, remote net.Addr) *UDPSession {
 	sess := new(UDPSession)
 	sess.die = make(chan struct{})
 	sess.chReadEvent = make(chan struct{}, 1)
 	sess.chWriteEvent = make(chan struct{}, 1)
 	sess.chSocketReadError = make(chan struct{})
 	sess.chSocketWriteError = make(chan struct{})
+	sess.remote = remote
 	sess.conn = conn
 	sess.ownConn = ownConn
 	sess.l = l
 	sess.recvbuf = make([]byte, mtuLimit)
+
+	// cast to writebatch conn
+	if _, ok := conn.(*net.UDPConn); ok {
+		addr, err := net.ResolveUDPAddr("udp", conn.LocalAddr().String())
+		if err == nil {
+			if addr.IP.To4() != nil {
+				sess.xconn = ipv4.NewPacketConn(conn)
+			} else {
+				sess.xconn = ipv6.NewPacketConn(conn)
+			}
+		}
+	}
+	if _, ok := conn.(*ChanConn); ok {
+		sess.isChanConn = true
+	}
 
 	sess.kcp = NewKCP(conv, func(buf []byte, size int) {
 		if size >= IKCP_OVERHEAD+sess.headerSize {
@@ -146,11 +152,24 @@ func newUDPSession(conv uint64, l *Listener, conn *Conn, ownConn bool) *UDPSessi
 	sess.kcp.ReserveBytes(sess.headerSize)
 
 	if sess.l == nil { // it's a client connection
-		go sess.rx()
+		if !sess.isChanConn {
+			go sess.rx()
+		} else {
+			go sess.rxChanConn()
+		}
+		atomic.AddUint64(&DefaultSnmp.ActiveOpens, 1)
+	} else {
+		atomic.AddUint64(&DefaultSnmp.PassiveOpens, 1)
 	}
 
 	// start per-session updater
 	SystemTimedSched.Put(sess.update, time.Now())
+
+	currestab := atomic.AddUint64(&DefaultSnmp.CurrEstab, 1)
+	maxconn := atomic.LoadUint64(&DefaultSnmp.MaxConn)
+	if currestab > maxconn {
+		atomic.CompareAndSwapUint64(&DefaultSnmp.MaxConn, maxconn, currestab)
+	}
 
 	return sess
 }
@@ -163,6 +182,7 @@ func (s *UDPSession) Read(b []byte) (n int, err error) {
 			n = copy(b, s.bufptr)
 			s.bufptr = s.bufptr[n:]
 			s.mu.Unlock()
+			atomic.AddUint64(&DefaultSnmp.BytesReceived, uint64(n))
 			return n, nil
 		}
 
@@ -170,6 +190,7 @@ func (s *UDPSession) Read(b []byte) (n int, err error) {
 			if len(b) >= size { // receive data into 'b' directly
 				s.kcp.Recv(b)
 				s.mu.Unlock()
+				atomic.AddUint64(&DefaultSnmp.BytesReceived, uint64(size))
 				return size, nil
 			}
 
@@ -184,6 +205,7 @@ func (s *UDPSession) Read(b []byte) (n int, err error) {
 			n = copy(b, s.recvbuf)   // copy to 'b'
 			s.bufptr = s.recvbuf[n:] // pointer update
 			s.mu.Unlock()
+			atomic.AddUint64(&DefaultSnmp.BytesReceived, uint64(n))
 			return n, nil
 		}
 
@@ -218,7 +240,6 @@ func (s *UDPSession) Read(b []byte) (n int, err error) {
 	}
 }
 
-// GetMaxPayloadLen 获取应用层最大包长度
 func (s *UDPSession) GetMaxPayloadLen() int {
 	return 256 * int(s.kcp.mss)
 }
@@ -228,7 +249,11 @@ func (s *UDPSession) Write(b []byte) (n int, err error) {
 	if len(b) > s.GetMaxPayloadLen() {
 		return 0, errors.New("send payload above 256*mss")
 	}
+	return s.WriteBuffers([][]byte{b})
+}
 
+// WriteBuffers write a vector of byte slices to the underlying connection
+func (s *UDPSession) WriteBuffers(v [][]byte) (n int, err error) {
 	for {
 		select {
 		case <-s.chSocketWriteError:
@@ -243,8 +268,20 @@ func (s *UDPSession) Write(b []byte) (n int, err error) {
 		// make sure write do not overflow the max sliding window on both side
 		waitsnd := s.kcp.WaitSnd()
 		if waitsnd < int(s.kcp.snd_wnd) && waitsnd < int(s.kcp.rmt_wnd) {
-			n += len(b)
-			s.kcp.Send(b)
+			for _, b := range v {
+				n += len(b)
+				// KCP消息模式 上层不要对消息进行分割 并且保证消息长度小于256*mss
+				// for {
+				//	if len(b) <= int(s.kcp.mss) {
+				//		s.kcp.Send(b)
+				//		break
+				//	} else {
+				//		s.kcp.Send(b[:s.kcp.mss])
+				//		b = b[s.kcp.mss:]
+				//	}
+				// }
+				s.kcp.Send(b)
+			}
 
 			waitsnd = s.kcp.WaitSnd()
 			if waitsnd >= int(s.kcp.snd_wnd) || waitsnd >= int(s.kcp.rmt_wnd) || !s.writeDelay {
@@ -252,6 +289,7 @@ func (s *UDPSession) Write(b []byte) (n int, err error) {
 				s.uncork()
 			}
 			s.mu.Unlock()
+			atomic.AddUint64(&DefaultSnmp.BytesSent, uint64(n))
 			return n, nil
 		}
 
@@ -286,7 +324,11 @@ func (s *UDPSession) Write(b []byte) (n int, err error) {
 // uncork sends data in txqueue if there is any
 func (s *UDPSession) uncork() {
 	if len(s.txqueue) > 0 {
-		s.tx(s.txqueue)
+		if !s.isChanConn {
+			s.tx(s.txqueue)
+		} else {
+			s.txChanConn(s.txqueue)
+		}
 		// recycle
 		for k := range s.txqueue {
 			xmitBuf.Put(s.txqueue[k].Buffers[0])
@@ -297,7 +339,7 @@ func (s *UDPSession) uncork() {
 }
 
 // Close closes the connection.
-func (s *UDPSession) Close() error {
+func (s *UDPSession) Close(e uint32) error {
 	var once bool
 	s.dieOnce.Do(func() {
 		close(s.die)
@@ -305,6 +347,15 @@ func (s *UDPSession) Close() error {
 	})
 
 	if once {
+		enet := &Enet{
+			ConnType: ConnEnetFin,
+			EnetType: e,
+		}
+		if !s.isChanConn {
+			s.sendEnetNotifyToPeer(enet)
+		} else {
+			s.sendEnetNotifyToPeerChanConn(enet)
+		}
 		// try best to send all queued messages
 		s.mu.Lock()
 		s.kcp.flush(false)
@@ -325,6 +376,12 @@ func (s *UDPSession) Close() error {
 		return io.ErrClosedPipe
 	}
 }
+
+// LocalAddr returns the local network address. The Addr returned is shared by all invocations of LocalAddr, so do not modify it.
+func (s *UDPSession) LocalAddr() net.Addr { return s.conn.LocalAddr() }
+
+// RemoteAddr returns the remote network address. The Addr returned is shared by all invocations of RemoteAddr, so do not modify it.
+func (s *UDPSession) RemoteAddr() net.Addr { return s.remote }
 
 // SetDeadline sets the deadline associated with the listener. A zero time value disables the deadline.
 func (s *UDPSession) SetDeadline(t time.Time) error {
@@ -416,15 +473,77 @@ func (s *UDPSession) SetNoDelay(nodelay, interval, resend, nc int) {
 	s.kcp.NoDelay(nodelay, interval, resend, nc)
 }
 
+// SetDSCP sets the 6bit DSCP field in IPv4 header, or 8bit Traffic Class in IPv6 header.
+//
+// if the underlying connection has implemented `func SetDSCP(int) error`, SetDSCP() will invoke
+// this function instead.
+//
+// It has no effect if it's accepted from Listener.
+func (s *UDPSession) SetDSCP(dscp int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.l != nil {
+		return errInvalidOperation
+	}
+
+	// interface enabled
+	if ts, ok := s.conn.(setDSCP); ok {
+		return ts.SetDSCP(dscp)
+	}
+
+	if nc, ok := s.conn.(net.Conn); ok {
+		var succeed bool
+		if err := ipv4.NewConn(nc).SetTOS(dscp << 2); err == nil {
+			succeed = true
+		}
+		if err := ipv6.NewConn(nc).SetTrafficClass(dscp); err == nil {
+			succeed = true
+		}
+
+		if succeed {
+			return nil
+		}
+	}
+	return errInvalidOperation
+}
+
+// SetReadBuffer sets the socket read buffer, no effect if it's accepted from Listener
+func (s *UDPSession) SetReadBuffer(bytes int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.l == nil {
+		if nc, ok := s.conn.(setReadBuffer); ok {
+			return nc.SetReadBuffer(bytes)
+		}
+	}
+	return errInvalidOperation
+}
+
+// SetWriteBuffer sets the socket write buffer, no effect if it's accepted from Listener
+func (s *UDPSession) SetWriteBuffer(bytes int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.l == nil {
+		if nc, ok := s.conn.(setWriteBuffer); ok {
+			return nc.SetWriteBuffer(bytes)
+		}
+	}
+	return errInvalidOperation
+}
+
 // post-processing for sending a packet from kcp core
+// steps:
+// 1. TxQueue
 func (s *UDPSession) output(buf []byte) {
 	var ecc [][]byte
 
-	var msg Message
+	// 1. TxQueue
+	var msg ipv4.Message
 	for i := 0; i < s.dup+1; i++ {
 		bts := xmitBuf.Get().([]byte)[:len(buf)]
 		copy(bts, buf)
 		msg.Buffers = [][]byte{bts}
+		msg.Addr = s.remote
 		s.txqueue = append(s.txqueue, msg)
 	}
 
@@ -432,6 +551,7 @@ func (s *UDPSession) output(buf []byte) {
 		bts := xmitBuf.Get().([]byte)[:len(ecc[k])]
 		copy(bts, ecc[k])
 		msg.Buffers = [][]byte{bts}
+		msg.Addr = s.remote
 		s.txqueue = append(s.txqueue, msg)
 	}
 }
@@ -545,17 +665,25 @@ func (s *UDPSession) kcpInput(data []byte) {
 	}
 	s.uncork()
 	s.mu.Unlock()
+
+	atomic.AddUint64(&DefaultSnmp.InPkts, 1)
+	atomic.AddUint64(&DefaultSnmp.InBytes, uint64(len(data)))
+	if kcpInErrors > 0 {
+		atomic.AddUint64(&DefaultSnmp.KCPInErrors, kcpInErrors)
+	}
 }
 
 type (
 	// Listener defines a server which will be waiting to accept incoming connections
 	Listener struct {
-		conn *Conn // the underlying packet connection
+		conn    net.PacketConn // the underlying packet connection
+		ownConn bool           // true if we created conn internally, false if provided by caller
 
 		// 网络切换会话保持改造 将convId作为会话的唯一标识 不再校验源地址
-		sessions    map[uint64]*UDPSession // all sessions accepted by this Listener
-		sessionLock sync.RWMutex
-		chAccepts   chan *UDPSession // Listen() backlog
+		sessions        map[uint64]*UDPSession // all sessions accepted by this Listener
+		sessionLock     sync.RWMutex
+		chAccepts       chan *UDPSession // Listen() backlog
+		chSessionClosed chan net.Addr    // session close queue
 
 		die     chan struct{} // notify the listener has closed
 		dieOnce sync.Once
@@ -567,35 +695,161 @@ type (
 
 		rd atomic.Value // read deadline for Accept()
 
-		enetNotifyChan chan *Enet // Enet事件上报管道
+		xconn           batchConn // for x/net
+		xconnWriteError error
+
+		enetNotifyChan           chan *Enet // Enet事件上报管道
+		sessionIdCounter         uint32
+		remoteAddrEnetSynMap     map[string]*EnetSyn
+		remoteAddrEnetSynMapLock sync.RWMutex
+
+		isChanConn bool
 	}
 )
 
-func (l *Listener) GetEnetNotifyChan() chan *Enet {
-	return l.enetNotifyChan
+type EnetSyn struct {
+	sessionId  uint32
+	conv       uint32
+	rawConv    uint64
+	createTime uint32
+}
+
+func (l *Listener) enetHandle() {
+	ticker := time.NewTicker(time.Second)
+	defer func() {
+		ticker.Stop()
+	}()
+	for {
+		select {
+		case <-l.die:
+			return
+		case <-ticker.C:
+			now := uint32(time.Now().Unix())
+			l.remoteAddrEnetSynMapLock.Lock()
+			for remoteAddr, enetSyn := range l.remoteAddrEnetSynMap {
+				if now > enetSyn.createTime+60 {
+					delete(l.remoteAddrEnetSynMap, remoteAddr)
+				}
+			}
+			l.remoteAddrEnetSynMapLock.Unlock()
+		case enetNotify := <-l.enetNotifyChan:
+			switch enetNotify.ConnType {
+			case ConnEnetSyn:
+				if enetNotify.EnetType != EnetClientConnectKey {
+					continue
+				}
+				l.remoteAddrEnetSynMapLock.Lock()
+				enetSyn, exist := l.remoteAddrEnetSynMap[enetNotify.Addr]
+				if !exist {
+					sessionId := atomic.AddUint32(&l.sessionIdCounter, 1)
+					var conv uint32
+					_ = binary.Read(rand.Reader, binary.LittleEndian, &conv)
+					rawConvData := make([]byte, 8)
+					binary.LittleEndian.PutUint32(rawConvData[0:4], sessionId)
+					binary.LittleEndian.PutUint32(rawConvData[4:8], conv)
+					rawConv := binary.LittleEndian.Uint64(rawConvData)
+					enetSyn = &EnetSyn{
+						sessionId:  sessionId,
+						conv:       conv,
+						rawConv:    rawConv,
+						createTime: uint32(time.Now().Unix()),
+					}
+					l.remoteAddrEnetSynMap[enetNotify.Addr] = enetSyn
+				}
+				l.remoteAddrEnetSynMapLock.Unlock()
+				enet := &Enet{
+					Addr:      enetNotify.Addr,
+					SessionId: enetSyn.sessionId,
+					Conv:      enetSyn.conv,
+					ConnType:  ConnEnetEst,
+					EnetType:  enetNotify.EnetType,
+				}
+				if !l.isChanConn {
+					l.sendEnetNotifyToPeer(enet)
+				} else {
+					l.sendEnetNotifyToPeerChanConn(enet)
+				}
+			case ConnEnetFin:
+				rawConvData := make([]byte, 8)
+				binary.LittleEndian.PutUint32(rawConvData[0:4], enetNotify.SessionId)
+				binary.LittleEndian.PutUint32(rawConvData[4:8], enetNotify.Conv)
+				rawConv := binary.LittleEndian.Uint64(rawConvData)
+				l.sessionLock.RLock()
+				conn, exist := l.sessions[rawConv]
+				l.sessionLock.RUnlock()
+				if !exist {
+					continue
+				}
+				_ = conn.Close(enetNotify.EnetType)
+			case ConnEnetPing:
+				enet := &Enet{
+					Addr:      enetNotify.Addr,
+					SessionId: 0,
+					Conv:      0,
+					ConnType:  ConnEnetPing,
+					EnetType:  enetNotify.EnetType,
+				}
+				if !l.isChanConn {
+					l.sendEnetNotifyToPeer(enet)
+				} else {
+					l.sendEnetNotifyToPeerChanConn(enet)
+				}
+			default:
+			}
+		}
+	}
 }
 
 // packet input stage
-func (l *Listener) packetInput(data []byte, rawConv uint64) {
-	if len(data) >= IKCP_OVERHEAD {
+func (l *Listener) packetInput(data []byte, addr net.Addr) {
+	if len(data) == 20 {
+		// 连接控制协议
+		connType, enetType, sessionId, conv, _, err := ParseEnet(data)
+		if err != nil {
+			return
+		}
+		switch connType {
+		case ConnEnetSyn:
+			l.enetNotifyChan <- &Enet{Addr: addr.String(), SessionId: sessionId, Conv: conv, ConnType: ConnEnetSyn, EnetType: enetType}
+		case ConnEnetEst:
+			l.enetNotifyChan <- &Enet{Addr: addr.String(), SessionId: sessionId, Conv: conv, ConnType: ConnEnetEst, EnetType: enetType}
+		case ConnEnetFin:
+			l.enetNotifyChan <- &Enet{Addr: addr.String(), SessionId: sessionId, Conv: conv, ConnType: ConnEnetFin, EnetType: enetType}
+		case ConnEnetPing:
+			l.enetNotifyChan <- &Enet{Addr: addr.String(), SessionId: sessionId, Conv: conv, ConnType: ConnEnetPing, EnetType: enetType}
+		default:
+			return
+		}
+	} else if len(data) >= IKCP_OVERHEAD {
+		// 正常KCP包
+		conv := binary.LittleEndian.Uint64(data)
 		l.sessionLock.RLock()
-		s, ok := l.sessions[rawConv]
+		s, ok := l.sessions[conv]
 		l.sessionLock.RUnlock()
-
 		if ok { // existing connection
-			if rawConv == s.kcp.conv { // parity data or valid conversation
+			if s.remote.String() != addr.String() {
+				s.remote = addr
+			}
+			if conv == s.kcp.conv { // parity data or valid conversation
 				s.kcpInput(data)
 			}
 		}
-
 		if s == nil { // new session
-			if len(l.chAccepts) < cap(l.chAccepts) { // do not let the new sessions overwhelm accept queue
-				s := newUDPSession(rawConv, l, l.conn, false)
-				s.kcpInput(data)
-				l.sessionLock.Lock()
-				l.sessions[rawConv] = s
-				l.sessionLock.Unlock()
-				l.chAccepts <- s
+			l.remoteAddrEnetSynMapLock.Lock()
+			enetSyn, exist := l.remoteAddrEnetSynMap[addr.String()]
+			if exist {
+				delete(l.remoteAddrEnetSynMap, addr.String())
+			}
+			l.remoteAddrEnetSynMapLock.Unlock()
+			if exist && enetSyn.rawConv == conv {
+				if len(l.chAccepts) < cap(l.chAccepts) { // do not let the new sessions overwhelm accept queue
+					s := newUDPSession(conv, l, l.conn, false, addr)
+					s.kcpInput(data)
+					l.sessionLock.Lock()
+					l.sessions[conv] = s
+					l.sessionLock.Unlock()
+					l.chAccepts <- s
+				}
 			}
 		}
 	}
@@ -613,6 +867,48 @@ func (l *Listener) notifyReadError(err error) {
 		}
 		l.sessionLock.RUnlock()
 	})
+}
+
+// SetReadBuffer sets the socket read buffer for the Listener
+func (l *Listener) SetReadBuffer(bytes int) error {
+	if nc, ok := l.conn.(setReadBuffer); ok {
+		return nc.SetReadBuffer(bytes)
+	}
+	return errInvalidOperation
+}
+
+// SetWriteBuffer sets the socket write buffer for the Listener
+func (l *Listener) SetWriteBuffer(bytes int) error {
+	if nc, ok := l.conn.(setWriteBuffer); ok {
+		return nc.SetWriteBuffer(bytes)
+	}
+	return errInvalidOperation
+}
+
+// SetDSCP sets the 6bit DSCP field in IPv4 header, or 8bit Traffic Class in IPv6 header.
+//
+// if the underlying connection has implemented `func SetDSCP(int) error`, SetDSCP() will invoke
+// this function instead.
+func (l *Listener) SetDSCP(dscp int) error {
+	// interface enabled
+	if ts, ok := l.conn.(setDSCP); ok {
+		return ts.SetDSCP(dscp)
+	}
+
+	if nc, ok := l.conn.(net.Conn); ok {
+		var succeed bool
+		if err := ipv4.NewConn(nc).SetTOS(dscp << 2); err == nil {
+			succeed = true
+		}
+		if err := ipv6.NewConn(nc).SetTrafficClass(dscp); err == nil {
+			succeed = true
+		}
+
+		if succeed {
+			return nil
+		}
+	}
+	return errInvalidOperation
 }
 
 // AcceptKCP accepts a KCP connection
@@ -660,7 +956,9 @@ func (l *Listener) Close() error {
 
 	var err error
 	if once {
-		err = l.conn.Close()
+		if l.ownConn {
+			err = l.conn.Close()
+		}
 	} else {
 		err = io.ErrClosedPipe
 	}
@@ -678,21 +976,79 @@ func (l *Listener) closeSession(conv uint64) (ret bool) {
 	return false
 }
 
-// Listen 监听
-func Listen(conn *Conn) (*Listener, error) {
+// Addr returns the listener's network address, The Addr returned is shared by all invocations of Addr, so do not modify it.
+func (l *Listener) Addr() net.Addr { return l.conn.LocalAddr() }
+
+// ListenKCP listens for incoming KCP packets addressed to the local address laddr on the network "udp",
+func ListenKCP(laddr string) (*Listener, error) {
+	udpaddr, err := net.ResolveUDPAddr("udp", laddr)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := net.ListenUDP("udp", udpaddr)
+	if err != nil {
+		return nil, err
+	}
+
+	return serveConn(conn, true)
+}
+
+// ServeConn serves KCP protocol for a single packet connection.
+func ServeConn(conn net.PacketConn) (*Listener, error) {
+	return serveConn(conn, false)
+}
+
+func serveConn(conn net.PacketConn, ownConn bool) (*Listener, error) {
 	l := new(Listener)
 	l.conn = conn
+	l.ownConn = ownConn
 	l.sessions = make(map[uint64]*UDPSession)
 	l.chAccepts = make(chan *UDPSession, acceptBacklog)
+	l.chSessionClosed = make(chan net.Addr)
 	l.die = make(chan struct{})
 	l.chSocketReadError = make(chan struct{})
-	l.enetNotifyChan = make(chan *Enet, 1000)
-	go l.rx()
+	l.enetNotifyChan = make(chan *Enet, 100)
+	l.remoteAddrEnetSynMap = make(map[string]*EnetSyn)
+
+	if _, ok := l.conn.(*net.UDPConn); ok {
+		addr, err := net.ResolveUDPAddr("udp", l.conn.LocalAddr().String())
+		if err == nil {
+			if addr.IP.To4() != nil {
+				l.xconn = ipv4.NewPacketConn(l.conn)
+			} else {
+				l.xconn = ipv6.NewPacketConn(l.conn)
+			}
+		}
+	}
+	if _, ok := l.conn.(*ChanConn); ok {
+		l.isChanConn = true
+	}
+
+	if !l.isChanConn {
+		go l.rx()
+	} else {
+		go l.rxChanConn()
+	}
+	go l.enetHandle()
 	return l, nil
 }
 
-// Dial 连接
-func Dial(conn *Conn) (*UDPSession, error) {
+// DialKCP connects to the remote address "raddr" on the network "udp" without encryption and FEC
+func DialKCP(raddr string) (*UDPSession, error) {
+	// network type detection
+	udpaddr, err := net.ResolveUDPAddr("udp", raddr)
+	if err != nil {
+		return nil, err
+	}
+	network := "udp4"
+	if udpaddr.IP.To4() == nil {
+		network = "udp"
+	}
+
+	conn, err := net.DialUDP(network, nil, udpaddr)
+	if err != nil {
+		return nil, err
+	}
 	enet := &Enet{
 		SessionId: 0,
 		Conv:      0,
@@ -700,12 +1056,154 @@ func Dial(conn *Conn) (*UDPSession, error) {
 		EnetType:  EnetClientConnectKey,
 	}
 	data := BuildEnet(enet.ConnType, enet.EnetType, enet.SessionId, enet.Conv)
-	_, err := conn.WriteTo(data)
+	_, err = conn.Write(data)
 	if err != nil {
 		return nil, err
 	}
 	buf := make([]byte, mtuLimit)
-	n, err := conn.ReadFrom(buf)
+	err = conn.SetReadDeadline(time.Now().Add(time.Second * 10))
+	if err != nil {
+		return nil, err
+	}
+	n, addr, err := conn.ReadFrom(buf)
+	if err != nil {
+		return nil, err
+	}
+	err = conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		return nil, err
+	}
+	if addr.String() != udpaddr.String() {
+		return nil, errors.New("recv packet remote addr not match")
+	}
+	udpPayload := buf[:n]
+	connType, enetType, sessionId, conv, _, err := ParseEnet(udpPayload)
+	if err != nil || connType != ConnEnetEst || enetType != EnetClientConnectKey {
+		return nil, errors.New("recv packet format error")
+	}
+
+	rawConvData := make([]byte, 8)
+	binary.LittleEndian.PutUint32(rawConvData[0:4], sessionId)
+	binary.LittleEndian.PutUint32(rawConvData[4:8], conv)
+	rawConv := binary.LittleEndian.Uint64(rawConvData)
+
+	return newUDPSession(rawConv, nil, conn, true, udpaddr), nil
+}
+
+// NewConn3 establishes a session and talks KCP protocol over a packet connection.
+func NewConn3(convid uint64, raddr net.Addr, conn net.PacketConn) (*UDPSession, error) {
+	return newUDPSession(convid, nil, conn, false, raddr), nil
+}
+
+// NewConn2 establishes a session and talks KCP protocol over a packet connection.
+func NewConn2(raddr net.Addr, conn net.PacketConn) (*UDPSession, error) {
+	var convid uint64
+	_ = binary.Read(rand.Reader, binary.LittleEndian, &convid)
+	return NewConn3(convid, raddr, conn)
+}
+
+// NewConn establishes a session and talks KCP protocol over a packet connection.
+func NewConn(raddr string, conn net.PacketConn) (*UDPSession, error) {
+	udpaddr, err := net.ResolveUDPAddr("udp", raddr)
+	if err != nil {
+		return nil, err
+	}
+	return NewConn2(udpaddr, conn)
+}
+
+var errChanConnAlreadyClose = errors.New("chan conn already close")
+
+type ChanConnAddr struct {
+}
+
+func (a *ChanConnAddr) Network() string {
+	return "ChanConnAddr"
+}
+
+func (a *ChanConnAddr) String() string {
+	return "ChanConnAddr"
+}
+
+// ChanConn 管道连接
+type ChanConn struct {
+	RxChan    chan []byte
+	TxChan    chan []byte
+	IsClose   atomic.Bool
+	CloseOnce sync.Once
+}
+
+func (c *ChanConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
+	if c.IsClose.Load() {
+		return 0, &ChanConnAddr{}, errChanConnAlreadyClose
+	}
+	pkt := <-c.RxChan
+	copy(p, pkt)
+	return len(pkt), &ChanConnAddr{}, nil
+}
+
+func (c *ChanConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
+	if c.IsClose.Load() {
+		return 0, errChanConnAlreadyClose
+	}
+	pkt := make([]byte, len(p))
+	copy(pkt, p)
+	c.TxChan <- pkt
+	return len(pkt), nil
+}
+
+func (c *ChanConn) Close() error {
+	c.CloseOnce.Do(func() {
+		close(c.RxChan)
+		close(c.TxChan)
+		c.IsClose.Store(true)
+	})
+	return nil
+}
+
+func (c *ChanConn) LocalAddr() net.Addr {
+	return &ChanConnAddr{}
+}
+
+func (c *ChanConn) SetDeadline(t time.Time) error {
+	return nil
+}
+
+func (c *ChanConn) SetReadDeadline(t time.Time) error {
+	return nil
+}
+
+func (c *ChanConn) SetWriteDeadline(t time.Time) error {
+	return nil
+}
+
+// ListenChanConn 监听管道连接
+func ListenChanConn(conn *ChanConn) (*Listener, error) {
+	return serveConn(conn, true)
+}
+
+// DialChanConn 发起管道连接
+func DialChanConn(conn *ChanConn) (*UDPSession, error) {
+	enet := &Enet{
+		SessionId: 0,
+		Conv:      0,
+		ConnType:  ConnEnetSyn,
+		EnetType:  EnetClientConnectKey,
+	}
+	data := BuildEnet(enet.ConnType, enet.EnetType, enet.SessionId, enet.Conv)
+	_, err := conn.WriteTo(data, &ChanConnAddr{})
+	if err != nil {
+		return nil, err
+	}
+	buf := make([]byte, mtuLimit)
+	err = conn.SetReadDeadline(time.Now().Add(time.Second * 10))
+	if err != nil {
+		return nil, err
+	}
+	n, _, err := conn.ReadFrom(buf)
+	if err != nil {
+		return nil, err
+	}
+	err = conn.SetReadDeadline(time.Time{})
 	if err != nil {
 		return nil, err
 	}
@@ -720,5 +1218,5 @@ func Dial(conn *Conn) (*UDPSession, error) {
 	binary.LittleEndian.PutUint32(rawConvData[4:8], conv)
 	rawConv := binary.LittleEndian.Uint64(rawConvData)
 
-	return newUDPSession(rawConv, nil, conn, true), nil
+	return newUDPSession(rawConv, nil, conn, true, &ChanConnAddr{}), nil
 }

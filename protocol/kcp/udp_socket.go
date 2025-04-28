@@ -1,14 +1,26 @@
 package kcp
 
 import (
-	"encoding/binary"
+	"net"
+	"sync/atomic"
+
+	"golang.org/x/net/ipv4"
 )
 
-func (s *UDPSession) rx() {
+// 客户端收包循环
+func (s *UDPSession) defaultRx() {
 	buf := make([]byte, mtuLimit)
+	var src string
 	for {
-		if n, err := s.conn.ReadFrom(buf); err == nil {
+		if n, addr, err := s.conn.ReadFrom(buf); err == nil {
 			udpPayload := buf[:n]
+			// make sure the packet is from the same source
+			if src == "" { // set source address
+				src = addr.String()
+			} else if addr.String() != src {
+				s.remote = addr
+				src = addr.String()
+			}
 			if n == 20 {
 				connType, enetType, sessionId, conv, _, err := ParseEnet(udpPayload)
 				if err != nil {
@@ -18,13 +30,13 @@ func (s *UDPSession) rx() {
 					continue
 				}
 				if connType == ConnEnetFin {
-					s.SendEnetNotifyToPeer(&Enet{
+					s.defaultSendEnetNotifyToPeer(&Enet{
 						SessionId: s.GetSessionId(),
 						Conv:      s.GetConv(),
 						ConnType:  ConnEnetFin,
 						EnetType:  enetType,
 					})
-					_ = s.Close()
+					_ = s.Close(enetType)
 					continue
 				}
 			}
@@ -36,42 +48,12 @@ func (s *UDPSession) rx() {
 	}
 }
 
-func (l *Listener) rx() {
+// 服务器全局收包循环
+func (l *Listener) defaultRx() {
 	buf := make([]byte, mtuLimit)
 	for {
-		if n, err := l.conn.ReadFrom(buf); err == nil {
-			udpPayload := buf[:n]
-			var sessionId uint32 = 0
-			var conv uint32 = 0
-			var rawConv uint64 = 0
-			if n == 20 {
-				// 连接控制协议
-				var connType = ""
-				var enetType uint32 = 0
-				connType, enetType, sessionId, conv, rawConv, err = ParseEnet(udpPayload)
-				if err != nil {
-					continue
-				}
-				switch connType {
-				case ConnEnetSyn:
-					// 客户端前置握手获取conv
-					l.enetNotifyChan <- &Enet{SessionId: sessionId, Conv: conv, ConnType: ConnEnetSyn, EnetType: enetType}
-				case ConnEnetEst:
-					// 连接建立
-					l.enetNotifyChan <- &Enet{SessionId: sessionId, Conv: conv, ConnType: ConnEnetEst, EnetType: enetType}
-				case ConnEnetFin:
-					// 连接断开
-					l.enetNotifyChan <- &Enet{SessionId: sessionId, Conv: conv, ConnType: ConnEnetFin, EnetType: enetType}
-				default:
-					continue
-				}
-			} else {
-				// 正常KCP包
-				sessionId = binary.LittleEndian.Uint32(udpPayload[0:4])
-				conv = binary.LittleEndian.Uint32(udpPayload[4:8])
-				rawConv = binary.LittleEndian.Uint64(udpPayload[0:8])
-			}
-			l.packetInput(udpPayload, rawConv)
+		if n, from, err := l.conn.ReadFrom(buf); err == nil {
+			l.packetInput(buf[:n], from)
 		} else {
 			l.notifyReadError(err)
 			return
@@ -79,13 +61,18 @@ func (l *Listener) rx() {
 	}
 }
 
-func (s *UDPSession) tx(txqueue []Message) {
+// 公共发包接口
+func (s *UDPSession) defaultTx(txqueue []ipv4.Message) {
 	nbytes := 0
 	npkts := 0
 	for k := range txqueue {
 		var n = 0
 		var err error = nil
-		n, err = s.conn.WriteTo(txqueue[k].Buffers[0])
+		if s.l != nil {
+			n, err = s.conn.WriteTo(txqueue[k].Buffers[0], txqueue[k].Addr)
+		} else {
+			n, err = s.conn.(*net.UDPConn).Write(txqueue[k].Buffers[0])
+		}
 		if err == nil {
 			nbytes += n
 			npkts++
@@ -94,20 +81,117 @@ func (s *UDPSession) tx(txqueue []Message) {
 			break
 		}
 	}
+	atomic.AddUint64(&DefaultSnmp.OutPkts, uint64(npkts))
+	atomic.AddUint64(&DefaultSnmp.OutBytes, uint64(nbytes))
 }
 
-func (l *Listener) SendEnetNotifyToPeer(enet *Enet) {
+// 服务器Enet事件发送接口
+func (l *Listener) defaultSendEnetNotifyToPeer(enet *Enet) {
 	data := BuildEnet(enet.ConnType, enet.EnetType, enet.SessionId, enet.Conv)
 	if data == nil {
 		return
 	}
-	_, _ = l.conn.WriteTo(data)
+	remoteAddr, err := net.ResolveUDPAddr("udp", enet.Addr)
+	if err != nil {
+		return
+	}
+	_, _ = l.conn.WriteTo(data, remoteAddr)
 }
 
-func (s *UDPSession) SendEnetNotifyToPeer(enet *Enet) {
+// 客户端Enet事件发送接口
+func (s *UDPSession) defaultSendEnetNotifyToPeer(enet *Enet) {
 	data := BuildEnet(enet.ConnType, enet.EnetType, s.GetSessionId(), s.GetConv())
 	if data == nil {
 		return
 	}
-	_, _ = s.conn.WriteTo(data)
+	if s.l != nil {
+		_, _ = s.conn.WriteTo(data, s.remote)
+	} else {
+		_, _ = s.conn.(*net.UDPConn).Write(data)
+	}
+}
+
+func (s *UDPSession) rxChanConn() {
+	buf := make([]byte, mtuLimit)
+	var src string
+	for {
+		if n, addr, err := s.conn.ReadFrom(buf); err == nil {
+			udpPayload := buf[:n]
+			// make sure the packet is from the same source
+			if src == "" { // set source address
+				src = addr.String()
+			} else if addr.String() != src {
+				s.remote = addr
+				src = addr.String()
+			}
+			if n == 20 {
+				connType, enetType, sessionId, conv, _, err := ParseEnet(udpPayload)
+				if err != nil {
+					continue
+				}
+				if sessionId != s.GetSessionId() || conv != s.GetConv() {
+					continue
+				}
+				if connType == ConnEnetFin {
+					s.sendEnetNotifyToPeerChanConn(&Enet{
+						ConnType: ConnEnetFin,
+						EnetType: enetType,
+					})
+					_ = s.Close(enetType)
+					continue
+				}
+			}
+			s.packetInput(udpPayload)
+		} else {
+			s.notifyReadError(err)
+			return
+		}
+	}
+}
+
+func (l *Listener) rxChanConn() {
+	buf := make([]byte, mtuLimit)
+	for {
+		if n, from, err := l.conn.ReadFrom(buf); err == nil {
+			l.packetInput(buf[:n], from)
+		} else {
+			l.notifyReadError(err)
+			return
+		}
+	}
+}
+
+func (s *UDPSession) txChanConn(txqueue []ipv4.Message) {
+	nbytes := 0
+	npkts := 0
+	for k := range txqueue {
+		var n = 0
+		var err error = nil
+		n, err = s.conn.WriteTo(txqueue[k].Buffers[0], txqueue[k].Addr)
+		if err == nil {
+			nbytes += n
+			npkts++
+		} else {
+			s.notifyWriteError(err)
+			break
+		}
+	}
+	atomic.AddUint64(&DefaultSnmp.OutPkts, uint64(npkts))
+	atomic.AddUint64(&DefaultSnmp.OutBytes, uint64(nbytes))
+}
+
+func (l *Listener) sendEnetNotifyToPeerChanConn(enet *Enet) {
+	data := BuildEnet(enet.ConnType, enet.EnetType, enet.SessionId, enet.Conv)
+	if data == nil {
+		return
+	}
+	_, _ = l.conn.WriteTo(data, &ChanConnAddr{})
+}
+
+func (s *UDPSession) sendEnetNotifyToPeerChanConn(enet *Enet) {
+	data := BuildEnet(enet.ConnType, enet.EnetType, s.GetSessionId(), s.GetConv())
+	if data == nil {
+		return
+	}
+	_, _ = s.conn.WriteTo(data, &ChanConnAddr{})
 }

@@ -4,6 +4,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/flswld/halo/cpu"
 	"github.com/flswld/halo/dpdk"
 	"github.com/flswld/halo/engine"
 	"github.com/flswld/halo/logger"
@@ -24,13 +25,11 @@ func DirectDpdk() {
 		DebugLog:          false,             // 收发包调试日志
 		IdleSleep:         false,             // 空闲睡眠 降低cpu占用
 		SingleCore:        false,             // 单核模式 物理单核机器需要开启
-		KniBypass:         false,             // kni旁路目标ip 只接收来自目标ip的包 其他的包全部送到kni网卡
-		KniBypassTargetIp: "",                // kni旁路目标ip地址
 	})
 
 	// 通过RX和TX管道发送接收原始以太网报文
-	pkt := <-dpdk.Rx(0)
-	dpdk.Tx(0) <- pkt
+	pkt := <-dpdk.RxChan(0)
+	dpdk.TxChan(0) <- pkt
 	time.Sleep(time.Second)
 
 	// 停止dpdk
@@ -61,8 +60,8 @@ func NetworkEngine() {
 				NetworkMask: "255.255.255.0",        // 子网掩码
 				NatEnable:   false,                  // 网络地址转换
 				NatType:     engine.NatTypeFullCone, // 网络地址转换类型
-				EthRxChan:   dpdk.Rx(0),             // 物理层接收管道
-				EthTxChan:   dpdk.Tx(0),             // 物理层发送管道
+				EthRxChan:   dpdk.RxChan(0),         // 物理层接收管道
+				EthTxChan:   dpdk.TxChan(0),         // 物理层发送管道
 			},
 		},
 		// 路由表
@@ -86,8 +85,8 @@ func NetworkEngine() {
 				MacAddr:     "AA:AA:AA:AA:AA:BB",
 				IpAddr:      "192.168.111.111",
 				NetworkMask: "255.255.255.0",
-				EthRxChan:   dpdk.Rx(1),
-				EthTxChan:   dpdk.Tx(1),
+				EthRxChan:   dpdk.RxChan(1),
+				EthTxChan:   dpdk.TxChan(1),
 			},
 		},
 		RoutingTable: []*engine.RoutingEntryConfig{
@@ -136,29 +135,29 @@ func EthernetHub() {
 	// 转发
 	exit := false
 	go func() {
-		dpdk.BindCpuCore(11)
+		cpu.BindCpuCore(11)
 		for {
 			if exit {
 				break
 			}
-			pkt := <-dpdk.Rx(0)
+			pkt := <-dpdk.RxChan(0)
 			if pkt == nil {
 				continue
 			}
-			dpdk.Tx(1) <- pkt
+			dpdk.TxChan(1) <- pkt
 		}
 	}()
 	go func() {
-		dpdk.BindCpuCore(12)
+		cpu.BindCpuCore(12)
 		for {
 			if exit {
 				break
 			}
-			pkt := <-dpdk.Rx(1)
+			pkt := <-dpdk.RxChan(1)
 			if pkt == nil {
 				continue
 			}
-			dpdk.Tx(0) <- pkt
+			dpdk.TxChan(0) <- pkt
 		}
 	}()
 	time.Sleep(time.Minute)
@@ -205,8 +204,8 @@ func EthernetRouter() {
 						LanHostPort:   22,
 					},
 				},
-				EthRxChan: dpdk.Rx(0),
-				EthTxChan: dpdk.Tx(0),
+				EthRxChan: dpdk.RxChan(0),
+				EthTxChan: dpdk.TxChan(0),
 			},
 			{
 				Name:        "wan1",
@@ -215,16 +214,16 @@ func EthernetRouter() {
 				NetworkMask: "255.255.255.0",
 				NatEnable:   true,
 				NatType:     engine.NatTypeFullCone,
-				EthRxChan:   dpdk.Rx(1),
-				EthTxChan:   dpdk.Tx(1),
+				EthRxChan:   dpdk.RxChan(1),
+				EthTxChan:   dpdk.TxChan(1),
 			},
 			{
 				Name:        "lan0",
 				MacAddr:     "AA:AA:AA:AA:AA:CC",
 				IpAddr:      "192.168.111.111",
 				NetworkMask: "255.255.255.0",
-				EthRxChan:   dpdk.Rx(2),
-				EthTxChan:   dpdk.Tx(2),
+				EthRxChan:   dpdk.RxChan(2),
+				EthTxChan:   dpdk.TxChan(2),
 			},
 		},
 		RoutingTable: []*engine.RoutingEntryConfig{
@@ -286,8 +285,8 @@ func DDoS() {
 				MacAddr:     "AA:AA:AA:AA:AA:AA",
 				IpAddr:      "192.168.100.100",
 				NetworkMask: "255.255.255.0",
-				EthRxChan:   dpdk.Rx(0),
-				EthTxChan:   dpdk.Tx(0),
+				EthRxChan:   dpdk.RxChan(0),
+				EthTxChan:   dpdk.TxChan(0),
 			},
 		},
 		RoutingTable: []*engine.RoutingEntryConfig{
@@ -317,12 +316,12 @@ func DDoS() {
 	}
 	exit := false
 	go func() {
-		dpdk.BindCpuCore(7)
+		cpu.BindCpuCore(7)
 		for {
 			if exit {
 				break
 			}
-			dpdk.Tx(0) <- pkt
+			dpdk.TxChan(0) <- pkt
 		}
 	}()
 	time.Sleep(time.Minute)
@@ -359,16 +358,16 @@ func MagicPacketModifier() {
 				NetworkMask: "255.255.255.0",
 				NatEnable:   true,
 				NatType:     engine.NatTypeFullCone,
-				EthRxChan:   dpdk.Rx(0),
-				EthTxChan:   dpdk.Tx(0),
+				EthRxChan:   dpdk.RxChan(0),
+				EthTxChan:   dpdk.TxChan(0),
 			},
 			{
 				Name:        "lan0",
 				MacAddr:     "AA:AA:AA:AA:AA:BB",
 				IpAddr:      "192.168.111.111",
 				NetworkMask: "255.255.255.0",
-				EthRxChan:   dpdk.Rx(1),
-				EthTxChan:   dpdk.Tx(1),
+				EthRxChan:   dpdk.RxChan(1),
+				EthTxChan:   dpdk.TxChan(1),
 			},
 		},
 		RoutingTable: []*engine.RoutingEntryConfig{
@@ -463,27 +462,21 @@ func kcpServer(netIf *engine.NetIf) {
 			}
 		}
 	}()
-	listener, err := kcp.Listen(&kcp.Conn{
+	listener, err := kcp.ListenChanConn(&kcp.ChanConn{
 		RxChan: rxChan,
 		TxChan: txChan,
 	})
 	if err != nil {
 		return
 	}
-	enetNotify := <-listener.GetEnetNotifyChan()
-	if enetNotify.ConnType != kcp.ConnEnetSyn {
-		return
-	}
-	listener.SendEnetNotifyToPeer(&kcp.Enet{
-		SessionId: 1,
-		Conv:      1,
-		ConnType:  kcp.ConnEnetEst,
-		EnetType:  enetNotify.EnetType,
-	})
 	conn, err := listener.AcceptKCP()
 	if err != nil {
 		return
 	}
+	conn.SetACKNoDelay(true)
+	conn.SetWriteDelay(false)
+	conn.SetWindowSize(256, 256)
+	conn.SetMtu(1200)
 	for i := 0; i < 30; i++ {
 		buf := make([]byte, 1472)
 		size, err := conn.Read(buf)
@@ -497,14 +490,8 @@ func kcpServer(netIf *engine.NetIf) {
 			break
 		}
 	}
-	listener.SendEnetNotifyToPeer(&kcp.Enet{
-		SessionId: conn.GetSessionId(),
-		Conv:      conn.GetConv(),
-		ConnType:  kcp.ConnEnetFin,
-		EnetType:  kcp.EnetClientClose,
-	})
 	netIf.HandleUdp = nil
-	_ = conn.Close()
+	_ = conn.Close(kcp.EnetClientClose)
 }
 
 func kcpClient(netIf *engine.NetIf) {
@@ -530,13 +517,17 @@ func kcpClient(netIf *engine.NetIf) {
 			}
 		}
 	}()
-	conn, err := kcp.Dial(&kcp.Conn{
+	conn, err := kcp.DialChanConn(&kcp.ChanConn{
 		RxChan: rxChan,
 		TxChan: txChan,
 	})
 	if err != nil {
 		return
 	}
+	conn.SetACKNoDelay(true)
+	conn.SetWriteDelay(false)
+	conn.SetWindowSize(256, 256)
+	conn.SetMtu(1200)
 	for {
 		time.Sleep(time.Second)
 		_, err = conn.Write([]byte{0x45, 0x67, 0x89, 0xab})
@@ -552,5 +543,5 @@ func kcpClient(netIf *engine.NetIf) {
 		log.Printf("kcp client recv data: %02x\n", buf)
 	}
 	netIf.HandleUdp = nil
-	_ = conn.Close()
+	_ = conn.Close(kcp.EnetClientClose)
 }

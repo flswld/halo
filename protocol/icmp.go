@@ -29,31 +29,40 @@ const (
 	ICMP_UNKNOWN uint8 = 0xff
 )
 
-func ParseIcmpPkt(pkt []byte) (payload []byte, icmpType uint8, icmpId []byte, icmpSeq []byte, err error) {
+func ParseIcmpPkt(pkt []byte) (payload []byte, icmpType uint8, icmpId []byte, icmpSeq uint16, err error) {
 	if len(pkt) < 8 || len(pkt) > 1480 {
-		return nil, ICMP_UNKNOWN, nil, nil, errors.New("icmp packet len must >= 8 and <= 1480 bytes")
+		return nil, ICMP_UNKNOWN, nil, 0, errors.New("icmp packet len must >= 8 and <= 1480 bytes")
 	}
 	// 类型
-	icmpType = pkt[0]
+	switch pkt[0] {
+	case ICMP_REQUEST:
+		icmpType = ICMP_REQUEST
+	case ICMP_REPLY:
+		icmpType = ICMP_REPLY
+	case ICMP_TTL:
+		icmpType = ICMP_TTL
+	default:
+		return nil, ICMP_UNKNOWN, nil, 0, errors.New("not support type of icmp packet")
+	}
 	// 代码
-	if (pkt[0] != 0x08 && pkt[0] != 0x00) || pkt[1] != 0x00 {
-		return nil, ICMP_UNKNOWN, nil, nil, errors.New("not support type of icmp packet")
+	if pkt[1] != 0x00 {
+		return nil, ICMP_UNKNOWN, nil, 0, errors.New("not support type of icmp packet")
 	}
 	// 检查校验和
 	sum := GetCheckSum(pkt)
 	if binary.BigEndian.Uint16(sum) != 0 {
-		return nil, ICMP_UNKNOWN, nil, nil, errors.New("check sum error")
+		return nil, ICMP_UNKNOWN, nil, 0, errors.New("check sum error")
 	}
 	// 标识
 	icmpId = pkt[4:6]
 	// 序号
-	icmpSeq = pkt[6:8]
+	icmpSeq = binary.BigEndian.Uint16(pkt[6:8])
 	// 数据
 	payload = pkt[8:]
 	return payload, icmpType, icmpId, icmpSeq, nil
 }
 
-func BuildIcmpPkt(payload []byte, icmpType uint8, icmpId []byte, icmpSeq []byte) (pkt []byte, err error) {
+func BuildIcmpPkt(payload []byte, icmpType uint8, icmpId []byte, icmpSeq uint16) (pkt []byte, err error) {
 	if len(payload) > 1472 {
 		return nil, errors.New("payload len must <= 1472")
 	}
@@ -67,7 +76,7 @@ func BuildIcmpPkt(payload []byte, icmpType uint8, icmpId []byte, icmpSeq []byte)
 	// 标识
 	pkt = append(pkt, icmpId...)
 	// 序号
-	pkt = append(pkt, icmpSeq...)
+	pkt = append(pkt, uint8(icmpSeq>>8), uint8(icmpSeq))
 	// 数据
 	pkt = append(pkt, payload...)
 	// 计算校验和

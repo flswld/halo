@@ -57,14 +57,14 @@ func ParseIpv4Pkt(pkt []byte) (payload []byte, ipHeadProto uint8, srcAddr []byte
 		return nil, IPH_PROTO_UNKNOWN, nil, nil, errors.New("not support ip frg")
 	}
 	// 协议
-	protocolParse := pkt[9]
-	if protocolParse == IPH_PROTO_ICMP {
+	switch pkt[9] {
+	case IPH_PROTO_ICMP:
 		ipHeadProto = IPH_PROTO_ICMP
-	} else if protocolParse == IPH_PROTO_TCP {
+	case IPH_PROTO_TCP:
 		ipHeadProto = IPH_PROTO_TCP
-	} else if protocolParse == IPH_PROTO_UDP {
+	case IPH_PROTO_UDP:
 		ipHeadProto = IPH_PROTO_UDP
-	} else {
+	default:
 		return nil, IPH_PROTO_UNKNOWN, nil, nil, errors.New("unknown ip protocol")
 	}
 	// 检查首部校验和
@@ -118,8 +118,7 @@ func BuildIpv4Pkt(payload []byte, ipHeadProto uint8, srcAddr []byte, dstAddr []b
 	return pkt, nil
 }
 
-func HandleIpv4PktTtl(pktRaw []byte) (pkt []byte, alive bool) {
-	pkt = pktRaw
+func HandleIpv4PktTtl(pkt []byte) ([]byte, bool) {
 	if pkt[8] <= 1 {
 		return pkt, false
 	}
@@ -128,8 +127,7 @@ func HandleIpv4PktTtl(pktRaw []byte) (pkt []byte, alive bool) {
 	return pkt, true
 }
 
-func ReCalcIpv4CheckSum(pktRaw []byte) (pkt []byte) {
-	pkt = pktRaw
+func ReCalcIpv4CheckSum(pkt []byte) []byte {
 	pkt[10] = 0x00
 	pkt[11] = 0x00
 	headerSum := GetCheckSum(pkt[:20])
@@ -138,8 +136,16 @@ func ReCalcIpv4CheckSum(pktRaw []byte) (pkt []byte) {
 	return pkt
 }
 
-func ReCalcTcpCheckSum(pktRaw []byte) (pkt []byte) {
-	pkt = pktRaw
+func ReCalcIcmpCheckSum(pkt []byte) []byte {
+	pkt[22] = 0x00
+	pkt[23] = 0x00
+	sum := GetCheckSum(pkt)
+	pkt[22] = sum[0]
+	pkt[23] = sum[1]
+	return pkt
+}
+
+func ReCalcTcpCheckSum(pkt []byte) []byte {
 	pkt[36] = 0x00
 	pkt[37] = 0x00
 	fakeHeader := make([]byte, 0)
@@ -150,15 +156,14 @@ func ReCalcTcpCheckSum(pktRaw []byte) (pkt []byte) {
 	fakeHeader = append(fakeHeader, byte((totalLen-20)>>8), byte(totalLen-20))
 	checkSumSrc := make([]byte, 0)
 	checkSumSrc = append(checkSumSrc, fakeHeader...)
-	checkSumSrc = append(checkSumSrc, pkt[20:totalLen]...)
+	checkSumSrc = append(checkSumSrc, pkt[20:]...)
 	sum := GetCheckSum(checkSumSrc)
 	pkt[36] = sum[0]
 	pkt[37] = sum[1]
 	return pkt
 }
 
-func ReCalcUdpCheckSum(pktRaw []byte) (pkt []byte) {
-	pkt = pktRaw
+func ReCalcUdpCheckSum(pkt []byte) []byte {
 	pkt[26] = 0x00
 	pkt[27] = 0x00
 	fakeHeader := make([]byte, 0)
@@ -169,7 +174,7 @@ func ReCalcUdpCheckSum(pktRaw []byte) (pkt []byte) {
 	fakeHeader = append(fakeHeader, byte((totalLen-20)>>8), byte(totalLen-20))
 	sumData := make([]byte, 0)
 	sumData = append(sumData, fakeHeader...)
-	sumData = append(sumData, pkt[20:totalLen]...)
+	sumData = append(sumData, pkt[20:]...)
 	sum := GetCheckSum(sumData)
 	pkt[26] = sum[0]
 	pkt[27] = sum[1]
@@ -179,25 +184,29 @@ func ReCalcUdpCheckSum(pktRaw []byte) (pkt []byte) {
 func NatGetSrcDstPort(pkt []byte) (srcPort uint16, dstPort uint16) {
 	switch pkt[9] {
 	case IPH_PROTO_ICMP:
-		srcPort = 0
-		dstPort = 0
-	case IPH_PROTO_UDP:
-		fallthrough
+		srcPort = binary.BigEndian.Uint16(pkt[24:26])
+		dstPort = binary.BigEndian.Uint16(pkt[24:26])
 	case IPH_PROTO_TCP:
+		srcPort = binary.BigEndian.Uint16(pkt[20:22])
+		dstPort = binary.BigEndian.Uint16(pkt[22:24])
+	case IPH_PROTO_UDP:
 		srcPort = binary.BigEndian.Uint16(pkt[20:22])
 		dstPort = binary.BigEndian.Uint16(pkt[22:24])
 	}
 	return srcPort, dstPort
 }
 
-func NatChangeSrc(pktRaw []byte, ipAddr []byte, port uint16) (pkt []byte) {
-	pkt = pktRaw
+func NatChangeSrc(pkt []byte, ipAddr []byte, port uint16) []byte {
 	pkt[12] = ipAddr[0]
 	pkt[13] = ipAddr[1]
 	pkt[14] = ipAddr[2]
 	pkt[15] = ipAddr[3]
 	pkt = ReCalcIpv4CheckSum(pkt)
 	switch pkt[9] {
+	case IPH_PROTO_ICMP:
+		pkt[24] = byte(port >> 8)
+		pkt[25] = byte(port)
+		pkt = ReCalcIcmpCheckSum(pkt)
 	case IPH_PROTO_TCP:
 		pkt[20] = byte(port >> 8)
 		pkt[21] = byte(port)
@@ -210,14 +219,17 @@ func NatChangeSrc(pktRaw []byte, ipAddr []byte, port uint16) (pkt []byte) {
 	return pkt
 }
 
-func NatChangeDst(pktRaw []byte, ipAddr []byte, port uint16) (pkt []byte) {
-	pkt = pktRaw
+func NatChangeDst(pkt []byte, ipAddr []byte, port uint16) []byte {
 	pkt[16] = ipAddr[0]
 	pkt[17] = ipAddr[1]
 	pkt[18] = ipAddr[2]
 	pkt[19] = ipAddr[3]
 	pkt = ReCalcIpv4CheckSum(pkt)
 	switch pkt[9] {
+	case IPH_PROTO_ICMP:
+		pkt[24] = byte(port >> 8)
+		pkt[25] = byte(port)
+		pkt = ReCalcIcmpCheckSum(pkt)
 	case IPH_PROTO_TCP:
 		pkt[22] = byte(port >> 8)
 		pkt[23] = byte(port)

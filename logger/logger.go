@@ -416,11 +416,11 @@ type LogFlag struct {
 }
 
 func parseLogFlag(msg string) (string, LogFlag) {
-	logFlag := new(LogFlag)
-	logFlagRef := reflect.ValueOf(logFlag).Elem()
 	if len(msg) == 0 || msg[0] != '@' {
 		return msg, LogFlag{}
 	}
+	logFlag := new(LogFlag)
+	logFlagRef := reflect.ValueOf(logFlag).Elem()
 	end := 0
 	for i := 0; i < len(msg); i++ {
 		if msg[i] == '|' {

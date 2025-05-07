@@ -21,6 +21,10 @@ const (
 	ETH_PROTO_UNKNOWN uint16 = 0xffff
 )
 
+var (
+	BROADCAST_MAC_ADDR = []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+)
+
 func ParseEthFrm(frm []byte) (payload []byte, dstMac []byte, srcMac []byte, ethProto uint16, err error) {
 	if len(frm) < 42 || len(frm) > 1514 {
 		return nil, nil, nil, ETH_PROTO_UNKNOWN, errors.New("ethernet frame len must >= 42 and <= 1514 bytes")
@@ -30,21 +34,21 @@ func ParseEthFrm(frm []byte) (payload []byte, dstMac []byte, srcMac []byte, ethP
 	// 源MAC地址
 	srcMac = frm[6:12]
 	// 类型
-	protocolParse := binary.BigEndian.Uint16([]byte{frm[12], frm[13]})
-	if protocolParse <= IEEE_802_3 {
+	switch binary.BigEndian.Uint16([]byte{frm[12], frm[13]}) {
+	case IEEE_802_3:
 		ethProto = IEEE_802_3
-	} else if protocolParse == ETH_PROTO_IPV4 {
+	case ETH_PROTO_IPV4:
 		ethProto = ETH_PROTO_IPV4
-	} else if protocolParse == ETH_PROTO_ARP {
+	case ETH_PROTO_ARP:
 		ethProto = ETH_PROTO_ARP
-	} else if protocolParse == ETH_PROTO_IPV6 {
+	case ETH_PROTO_IPV6:
 		ethProto = ETH_PROTO_IPV6
-	} else {
+	default:
 		return nil, nil, nil, ETH_PROTO_UNKNOWN, errors.New("unknown ethernet protocol")
 	}
 	// 数据
 	payload = frm[14:]
-	// 若数据小于46字节，则返回的数据会包含末尾的填充字节
+	// 若数据小于46字节则返回的数据会包含末尾的填充字节
 	return payload, dstMac, srcMac, ethProto, nil
 }
 

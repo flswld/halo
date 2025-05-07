@@ -7,35 +7,13 @@ import (
 	"github.com/flswld/halo/protocol"
 )
 
-func (i *NetIf) MacAddrToU(macAddr []byte) (macAddrU uint64) {
-	macAddrU = uint64(0)
-	macAddrU += uint64(macAddr[0]) << 40
-	macAddrU += uint64(macAddr[1]) << 32
-	macAddrU += uint64(macAddr[2]) << 24
-	macAddrU += uint64(macAddr[3]) << 16
-	macAddrU += uint64(macAddr[4]) << 8
-	macAddrU += uint64(macAddr[5]) << 0
-	return macAddrU
-}
-
-func (i *NetIf) UToMacAddr(macAddrU uint64) (macAddr []byte) {
-	macAddr = make([]byte, 6)
-	macAddr[0] = uint8(macAddrU >> 40)
-	macAddr[1] = uint8(macAddrU >> 32)
-	macAddr[2] = uint8(macAddrU >> 24)
-	macAddr[3] = uint8(macAddrU >> 16)
-	macAddr[4] = uint8(macAddrU >> 8)
-	macAddr[5] = uint8(macAddrU >> 0)
-	return macAddr
-}
-
 func (i *NetIf) SendFreeArp() {
-	arpPkt, err := protocol.BuildArpPkt(protocol.ARP_REQUEST, i.MacAddr, i.IpAddr, BROADCAST_MAC_ADDR, i.IpAddr)
+	arpPkt, err := protocol.BuildArpPkt(protocol.ARP_REQUEST, i.MacAddr, i.IpAddr, protocol.BROADCAST_MAC_ADDR, i.IpAddr)
 	if err != nil {
 		Log(fmt.Sprintf("build arp packet error: %v\n", err))
 		return
 	}
-	i.TxEthernet(arpPkt, BROADCAST_MAC_ADDR, protocol.ETH_PROTO_ARP)
+	i.TxEthernet(arpPkt, protocol.BROADCAST_MAC_ADDR, protocol.ETH_PROTO_ARP)
 }
 
 func (i *NetIf) GetArpCache(ipAddr []byte) (macAddr []byte) {
@@ -48,21 +26,21 @@ func (i *NetIf) GetArpCache(ipAddr []byte) (macAddr []byte) {
 	i.ArpCacheTableLock.RUnlock()
 	if !exist {
 		// 不存在则发起ARP询问并返回空
-		arpPkt, err := protocol.BuildArpPkt(protocol.ARP_REQUEST, i.MacAddr, i.IpAddr, BROADCAST_MAC_ADDR, ipAddr)
+		arpPkt, err := protocol.BuildArpPkt(protocol.ARP_REQUEST, i.MacAddr, i.IpAddr, protocol.BROADCAST_MAC_ADDR, ipAddr)
 		if err != nil {
 			Log(fmt.Sprintf("build arp packet error: %v\n", err))
 			return nil
 		}
-		i.TxEthernet(arpPkt, BROADCAST_MAC_ADDR, protocol.ETH_PROTO_ARP)
+		i.TxEthernet(arpPkt, protocol.BROADCAST_MAC_ADDR, protocol.ETH_PROTO_ARP)
 		return nil
 	}
-	macAddr = i.UToMacAddr(macAddrU)
+	macAddr = protocol.UToMacAddr(macAddrU)
 	return macAddr
 }
 
 func (i *NetIf) SetArpCache(ipAddr []byte, macAddr []byte) {
 	ipAddrU := protocol.IpAddrToU(ipAddr)
-	macAddrU := i.MacAddrToU(macAddr)
+	macAddrU := protocol.MacAddrToU(macAddr)
 	i.ArpCacheTableLock.Lock()
 	i.ArpCacheTable[ipAddrU] = macAddrU
 	i.ArpCacheTableLock.Unlock()

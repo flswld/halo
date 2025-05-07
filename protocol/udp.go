@@ -43,7 +43,7 @@ func ParseUdpPkt(pkt []byte, srcAddr []byte, dstAddr []byte) (payload []byte, sr
 		}
 	}
 	// 数据
-	payload = pkt[8:totalLen]
+	payload = pkt[8:]
 	return payload, srcPort, dstPort, nil
 }
 

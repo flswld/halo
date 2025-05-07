@@ -6,32 +6,23 @@ import (
 	"github.com/flswld/halo/protocol"
 )
 
-func (i *NetIf) RxTcp() {
+func (i *NetIf) RxTcp(ipv4Payload []byte, ipv4SrcAddr []byte) {
+	tcpPayload, tcpSrcPort, tcpDstPort, seqNum, ackNum, flags, err := protocol.ParseTcpPkt(ipv4Payload, ipv4SrcAddr, i.IpAddr)
+	if err != nil {
+		Log(fmt.Sprintf("parse tcp packet error: %v\n", err))
+		return
+	}
+	if i.HandleTcp != nil {
+		i.HandleTcp(tcpPayload, tcpSrcPort, tcpDstPort, seqNum, ackNum, flags, ipv4SrcAddr)
+		return
+	}
 }
 
-func (i *NetIf) TxTcpSyn(tcpSrcPort uint16, tcpDstPort uint16, ipv4DstAddr []byte) []byte {
-	tcpSynPkt, err := protocol.BuildTcpSynPkt(tcpSrcPort, tcpDstPort, i.IpAddr, ipv4DstAddr, 0)
+func (i *NetIf) TxTcp(tcpPayload []byte, tcpSrcPort uint16, tcpDstPort uint16, ipv4DstAddr []byte, seqNum uint32, ackNum uint32, flags uint8) []byte {
+	tcpPkt, err := protocol.BuildTcpPkt(tcpPayload, tcpSrcPort, tcpDstPort, i.IpAddr, ipv4DstAddr, seqNum, ackNum, flags)
 	if err != nil {
-		Log(fmt.Sprintf("build tcp syn packet error: %v\n", err))
+		Log(fmt.Sprintf("build tcp packet error: %v\n", err))
 		return nil
 	}
-	return i.TxIpv4(tcpSynPkt, protocol.IPH_PROTO_TCP, ipv4DstAddr)
-}
-
-func (i *NetIf) TxTcpSynAck(tcpSrcPort uint16, tcpDstPort uint16, ipv4DstAddr []byte) []byte {
-	tcpSynAckPkt, err := protocol.BuildTcpSynAckPkt(tcpSrcPort, tcpDstPort, i.IpAddr, ipv4DstAddr, 0, 0)
-	if err != nil {
-		Log(fmt.Sprintf("build tcp syn ack packet error: %v\n", err))
-		return nil
-	}
-	return i.TxIpv4(tcpSynAckPkt, protocol.IPH_PROTO_TCP, ipv4DstAddr)
-}
-
-func (i *NetIf) TxTcpAck(tcpSrcPort uint16, tcpDstPort uint16, ipv4DstAddr []byte) []byte {
-	tcpAckPkt, err := protocol.BuildTcpAckPkt(tcpSrcPort, tcpDstPort, i.IpAddr, ipv4DstAddr, 0, 0)
-	if err != nil {
-		Log(fmt.Sprintf("build tcp ack packet error: %v\n", err))
-		return nil
-	}
-	return i.TxIpv4(tcpAckPkt, protocol.IPH_PROTO_TCP, ipv4DstAddr)
+	return i.TxIpv4(tcpPkt, protocol.IPH_PROTO_TCP, ipv4DstAddr)
 }

@@ -36,12 +36,12 @@ func ParseArpPkt(pkt []byte) (option uint16, srcMac []byte, srcAddr []byte, dstM
 		return ARP_UNKNOWN, nil, nil, nil, nil, errors.New("arp packet len < 28 bytes")
 	}
 	// 操作类型
-	optionParse := binary.BigEndian.Uint16([]byte{pkt[6], pkt[7]})
-	if optionParse == ARP_REQUEST {
+	switch binary.BigEndian.Uint16([]byte{pkt[6], pkt[7]}) {
+	case ARP_REQUEST:
 		option = ARP_REQUEST
-	} else if optionParse == ARP_REPLY {
+	case ARP_REPLY:
 		option = ARP_REPLY
-	} else {
+	default:
 		return ARP_UNKNOWN, nil, nil, nil, nil, errors.New("unknown arp option")
 	}
 	// 地址

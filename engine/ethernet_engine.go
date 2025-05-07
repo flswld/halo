@@ -9,14 +9,14 @@ import (
 
 func (i *NetIf) RxEthernet(ethFrm []byte) {
 	if i.Engine.DebugLog {
-		Log(fmt.Sprintf("rx eth frm, len: %v, data: %02x\n", len(ethFrm), ethFrm))
+		Log(fmt.Sprintf("rx eth frm, if: %v, len: %v, data: %02x\n", i.Name, len(ethFrm), ethFrm))
 	}
 	ethPayload, ethDstMac, ethSrcMac, ethProto, err := protocol.ParseEthFrm(ethFrm)
 	if err != nil {
 		Log(fmt.Sprintf("parse ethernet frame error: %v\n", err))
 		return
 	}
-	if !bytes.Equal(ethDstMac, BROADCAST_MAC_ADDR) && !bytes.Equal(ethDstMac, i.MacAddr) {
+	if !bytes.Equal(ethDstMac, protocol.BROADCAST_MAC_ADDR) && !bytes.Equal(ethDstMac, i.MacAddr) {
 		return
 	}
 	switch ethProto {
@@ -35,7 +35,7 @@ func (i *NetIf) TxEthernet(ethPayload []byte, ethDstMac []byte, ethProto uint16)
 		return nil
 	}
 	if i.Engine.DebugLog {
-		Log(fmt.Sprintf("tx eth frm, len: %v, data: %02x\n", len(ethFrm), ethFrm))
+		Log(fmt.Sprintf("tx eth frm, if: %v, len: %v, data: %02x\n", i.Name, len(ethFrm), ethFrm))
 	}
 	i.EthTxChan <- ethFrm
 	return ethFrm

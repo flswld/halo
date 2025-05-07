@@ -14,6 +14,7 @@ func (i *NetIf) RxUdp(ipv4Payload []byte, ipv4SrcAddr []byte) {
 	}
 	if i.HandleUdp != nil {
 		i.HandleUdp(udpPayload, udpSrcPort, udpDstPort, ipv4SrcAddr)
+		return
 	}
 }
 

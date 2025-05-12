@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-func GetCheckSum(data []byte) []byte {
+func GetCheckSum(data []byte) uint16 {
 	sum := uint32(0)
 	length := len(data)
 	index := 0
@@ -21,10 +21,7 @@ func GetCheckSum(data []byte) []byte {
 		sum = (sum & 0xffff) + (sum >> 16)
 	}
 	sum16 := uint16(^sum)
-	return []byte{
-		byte(sum16 >> 8),
-		byte(sum16),
-	}
+	return sum16
 }
 
 func IpAddrToU(ipAddr []byte) uint32 {
@@ -43,28 +40,6 @@ func UToIpAddr(ipAddrU uint32) []byte {
 	ipAddr[2] = uint8(ipAddrU >> 8)
 	ipAddr[3] = uint8(ipAddrU >> 0)
 	return ipAddr
-}
-
-func MacAddrToU(macAddr []byte) uint64 {
-	macAddrU := uint64(0)
-	macAddrU += uint64(macAddr[0]) << 40
-	macAddrU += uint64(macAddr[1]) << 32
-	macAddrU += uint64(macAddr[2]) << 24
-	macAddrU += uint64(macAddr[3]) << 16
-	macAddrU += uint64(macAddr[4]) << 8
-	macAddrU += uint64(macAddr[5]) << 0
-	return macAddrU
-}
-
-func UToMacAddr(macAddrU uint64) []byte {
-	macAddr := make([]byte, 6)
-	macAddr[0] = uint8(macAddrU >> 40)
-	macAddr[1] = uint8(macAddrU >> 32)
-	macAddr[2] = uint8(macAddrU >> 24)
-	macAddr[3] = uint8(macAddrU >> 16)
-	macAddr[4] = uint8(macAddrU >> 8)
-	macAddr[5] = uint8(macAddrU >> 0)
-	return macAddr
 }
 
 func ParseMacAddr(macAddrStr string) ([]byte, error) {

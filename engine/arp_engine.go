@@ -8,7 +8,8 @@ import (
 )
 
 func (i *NetIf) SendFreeArp() {
-	arpPkt, err := protocol.BuildArpPkt(protocol.ARP_REQUEST, i.MacAddr, i.IpAddr, protocol.BROADCAST_MAC_ADDR, i.IpAddr)
+	arpPkt := make([]byte, 0, 28)
+	arpPkt, err := protocol.BuildArpPkt(arpPkt, protocol.ARP_REQUEST, i.MacAddr, i.IpAddr, protocol.BROADCAST_MAC_ADDR, i.IpAddr)
 	if err != nil {
 		Log(fmt.Sprintf("build arp packet error: %v\n", err))
 		return
@@ -16,17 +17,18 @@ func (i *NetIf) SendFreeArp() {
 	i.TxEthernet(arpPkt, protocol.BROADCAST_MAC_ADDR, protocol.ETH_PROTO_ARP)
 }
 
-func (i *NetIf) GetArpCache(ipAddr []byte) (macAddr []byte) {
+func (i *NetIf) GetArpCache(ipAddr []byte) []byte {
 	if bytes.Equal(ipAddr, i.IpAddr) {
 		return nil
 	}
 	ipAddrU := protocol.IpAddrToU(ipAddr)
 	i.ArpCacheTableLock.RLock()
-	macAddrU, exist := i.ArpCacheTable[ipAddrU]
+	macAddr, exist := i.ArpCacheTable[ipAddrU]
 	i.ArpCacheTableLock.RUnlock()
 	if !exist {
 		// 不存在则发起ARP询问并返回空
-		arpPkt, err := protocol.BuildArpPkt(protocol.ARP_REQUEST, i.MacAddr, i.IpAddr, protocol.BROADCAST_MAC_ADDR, ipAddr)
+		arpPkt := make([]byte, 0, 28)
+		arpPkt, err := protocol.BuildArpPkt(arpPkt, protocol.ARP_REQUEST, i.MacAddr, i.IpAddr, protocol.BROADCAST_MAC_ADDR, ipAddr)
 		if err != nil {
 			Log(fmt.Sprintf("build arp packet error: %v\n", err))
 			return nil
@@ -34,15 +36,15 @@ func (i *NetIf) GetArpCache(ipAddr []byte) (macAddr []byte) {
 		i.TxEthernet(arpPkt, protocol.BROADCAST_MAC_ADDR, protocol.ETH_PROTO_ARP)
 		return nil
 	}
-	macAddr = protocol.UToMacAddr(macAddrU)
 	return macAddr
 }
 
 func (i *NetIf) SetArpCache(ipAddr []byte, macAddr []byte) {
 	ipAddrU := protocol.IpAddrToU(ipAddr)
-	macAddrU := protocol.MacAddrToU(macAddr)
+	_macAddr := make([]byte, 6)
+	copy(_macAddr, macAddr)
 	i.ArpCacheTableLock.Lock()
-	i.ArpCacheTable[ipAddrU] = macAddrU
+	i.ArpCacheTable[ipAddrU] = _macAddr
 	i.ArpCacheTableLock.Unlock()
 }
 
@@ -63,7 +65,8 @@ func (i *NetIf) HandleArp(ethPayload []byte, ethSrcMac []byte) {
 	i.SetArpCache(arpSrcAddr, arpSrcMac)
 	// 对目的IP为本机的ARP询问请求进行回应
 	if arpOption == protocol.ARP_REQUEST && bytes.Equal(arpDstAddr, i.IpAddr) {
-		arpPkt, err := protocol.BuildArpPkt(protocol.ARP_REPLY, i.MacAddr, i.IpAddr, arpSrcMac, arpSrcAddr)
+		arpPkt := make([]byte, 0, 28)
+		arpPkt, err := protocol.BuildArpPkt(arpPkt, protocol.ARP_REPLY, i.MacAddr, i.IpAddr, arpSrcMac, arpSrcAddr)
 		if err != nil {
 			Log(fmt.Sprintf("build arp packet error: %v\n", err))
 			return

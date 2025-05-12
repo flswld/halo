@@ -35,25 +35,28 @@ func (i *NetIf) RxIpv4(ethPayload []byte) {
 	}
 }
 
-func (i *NetIf) TxIpv4(ipv4Payload []byte, ipv4HeadProto uint8, ipv4DstAddr []byte) []byte {
-	ipv4Pkt, err := protocol.BuildIpv4Pkt(ipv4Payload, ipv4HeadProto, i.IpAddr, ipv4DstAddr)
+func (i *NetIf) TxIpv4(ipv4Payload []byte, ipv4HeadProto uint8, ipv4DstAddr []byte) bool {
+	ipv4Pkt := make([]byte, 0, 1500)
+	ipv4Pkt, err := protocol.BuildIpv4Pkt(ipv4Pkt, ipv4Payload, ipv4HeadProto, i.IpAddr, ipv4DstAddr)
 	if err != nil {
 		Log(fmt.Sprintf("build ip packet error: %v\n", err))
-		return nil
+		return false
 	}
 	// 三层路由
 	nextHopIpAddr, outNetIfName := i.FindRoute(ipv4DstAddr)
 	if nextHopIpAddr == nil && outNetIfName == "" {
 		Log(fmt.Sprintf("no route found for: %v\n", ipv4DstAddr))
-		return nil
+		return false
 	}
 	outNetIf := i.Engine.NetIfMap[outNetIfName]
 	dstIpAddrU := protocol.IpAddrToU(ipv4DstAddr)
 	outNetIfIpAddrU := protocol.IpAddrToU(outNetIf.IpAddr)
 	if dstIpAddrU == outNetIfIpAddrU {
 		// 本地回环
-		outNetIf.LoChan <- ipv4Pkt
-		return ipv4Pkt
+		_ipv4Pkt := make([]byte, len(ipv4Pkt))
+		copy(_ipv4Pkt, ipv4Pkt)
+		outNetIf.LoChan <- _ipv4Pkt
+		return true
 	}
 	// 二层封装
 	var ethDstMac []byte = nil
@@ -63,7 +66,7 @@ func (i *NetIf) TxIpv4(ipv4Payload []byte, ipv4HeadProto uint8, ipv4DstAddr []by
 		ethDstMac = outNetIf.GetArpCache(ipv4DstAddr)
 	}
 	if ethDstMac == nil {
-		return nil
+		return false
 	}
 	return outNetIf.TxEthernet(ipv4Pkt, ethDstMac, protocol.ETH_PROTO_IPV4)
 }

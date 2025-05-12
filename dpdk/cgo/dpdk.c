@@ -5,6 +5,7 @@ const char *VERSION = "1.0.0";
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #include <unistd.h>
 #include <sys/time.h>
@@ -35,7 +36,8 @@ const char *VERSION = "1.0.0";
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
 #define RTE_DEV_NAME_MAX_LEN 512
 
-volatile bool dpdk_start = false;
+_Atomic
+bool dpdk_start = false;
 
 int ring_buffer_size = 0;
 bool debug = false;
@@ -49,6 +51,7 @@ struct ring_buffer {
     uint8_t *mem_recv_cur;
     volatile uint8_t *send_pos_pointer;
     volatile uint8_t *recv_pos_pointer;
+    uint64_t size;
 };
 
 int port_count = 0;
@@ -60,7 +63,8 @@ struct rte_eth_stats *port_old_stats = NULL;
 static struct rte_eth_conf port_conf_default = {0};
 static struct rte_kni *kni;
 struct rte_mempool *mbuf_pool = NULL;
-volatile bool force_quit = false;
+_Atomic
+bool running = false;
 
 /*
 0				8				16			24				32				...
@@ -109,67 +113,6 @@ void **cgo_kni_recv_pos_pointer_addr() {
     return (void **) &kni_ring_buffer.recv_pos_pointer;
 }
 
-// 环状缓冲区写入
-uint8_t write_recv_mem_core(struct ring_buffer *buffer, const uint8_t *data, uint16_t len) {
-    // 内存对齐
-    uint8_t aling_size = len % 4;
-    if (aling_size != 0) {
-        aling_size = 4 - aling_size;
-    }
-    len += aling_size;
-    uint32_t head_u32 = 0;
-    head_u32 = ((uint32_t) data[0] << 0) +
-               ((uint32_t) data[1] << 8) +
-               ((uint32_t) data[2] << 16) +
-               ((uint32_t) data[3] << 24);
-    const int32_t overflow = (int32_t) buffer->mem_recv_cur + (int32_t) len - ((int32_t) buffer->mem_recv_head + ring_buffer_size);
-    if (debug) {
-        printf("[write_recv_mem_core] buffer: %p, overflow: %d, len: %d, mem_recv_cur: %p, mem_recv_head: %p, recv_pos_pointer: %p\n", buffer, overflow, len,
-               buffer->mem_recv_cur, buffer->mem_recv_head, buffer->recv_pos_pointer);
-    }
-    if (overflow >= 0) {
-        // 有溢出
-        if (buffer->mem_recv_cur < buffer->recv_pos_pointer) {
-            // 已经处于读写指针交叉状态 丢弃数据
-            return 1;
-        }
-        if (overflow >= buffer->recv_pos_pointer - buffer->mem_recv_head) {
-            // 即使进入读写指针交叉状态 剩余内存依然不足 丢弃数据
-            return 1;
-        }
-        uint32_t *head_ptr = (uint32_t *) buffer->mem_recv_cur;
-        // 写入头部 原子操作
-        *head_ptr = head_u32;
-        if (len - overflow > 4) {
-            // 拷贝前半段数据
-            memcpy(buffer->mem_recv_cur + 4, data + 4, len - overflow - 4);
-        }
-        buffer->mem_recv_cur = buffer->mem_recv_head;
-        // 拷贝后半段数据
-        memcpy(buffer->mem_recv_cur, data + 4 + (len - overflow - 4), overflow);
-        buffer->mem_recv_cur += overflow;
-        if (buffer->mem_recv_cur >= buffer->mem_recv_head + ring_buffer_size) {
-            buffer->mem_recv_cur = buffer->mem_recv_head;
-        }
-    } else {
-        // 无溢出
-        if (buffer->mem_recv_cur < buffer->recv_pos_pointer &&
-            buffer->mem_recv_cur + len >= buffer->recv_pos_pointer) {
-            // 状态下剩余内存不足 丢弃数据
-            return 1;
-        }
-        uint32_t *head_ptr = (uint32_t *) buffer->mem_recv_cur;
-        // 写入头部 原子操作
-        *head_ptr = head_u32;
-        memcpy(buffer->mem_recv_cur + 4, data + 4, len - 4);
-        buffer->mem_recv_cur += len;
-        if (buffer->mem_recv_cur >= buffer->mem_recv_head + ring_buffer_size) {
-            buffer->mem_recv_cur = buffer->mem_recv_head;
-        }
-    }
-    return 0;
-}
-
 // 写入接收缓冲区
 void write_recv_mem(struct ring_buffer *buffer, const uint8_t *data, const uint16_t len) {
     if (buffer->mem_recv_cur == NULL) {
@@ -178,29 +121,71 @@ void write_recv_mem(struct ring_buffer *buffer, const uint8_t *data, const uint1
     if (len > 1514) {
         return;
     }
-    // 4字节头部 + 最大1514字节数据 + 2字节内存对齐
-    uint8_t data_pkt[4 + 1514 + 2] = {0};
-    // 数据长度标识
-    data_pkt[0] = (uint8_t) len;
-    data_pkt[1] = (uint8_t) (len >> 8);
-    // 写入完成标识
-    uint8_t *finish_flag_pointer = buffer->mem_recv_cur + 2;
-    data_pkt[2] = 0x00;
+    // 4字节头部
+    uint8_t head[4] = {(uint8_t) len, (uint8_t) (len >> 8), 0x00, 0x00};
+    _Atomic
+    uint32_t *head_ptr = (uint32_t *) buffer->mem_recv_cur;
+    uint16_t _len = len + 4;
     // 内存对齐
-    data_pkt[3] = 0x00;
-    // 写入数据
-    memcpy(data_pkt + 4, data, len);
-    const uint8_t ret = write_recv_mem_core(buffer, data_pkt, len + 4);
-    if (ret == 1) {
-        return;
+    uint8_t aling_size = _len % 4;
+    if (aling_size != 0) {
+        aling_size = 4 - aling_size;
     }
-    // 将后4个字节即长度标识与写入完成标识的内存置为0x00
-    buffer->mem_recv_cur[0] = 0x00;
-    buffer->mem_recv_cur[1] = 0x00;
-    buffer->mem_recv_cur[2] = 0x00;
-    buffer->mem_recv_cur[3] = 0x00;
+    _len += aling_size;
+    const int32_t overflow = (int32_t) buffer->mem_recv_cur + (int32_t) _len - ((int32_t) buffer->mem_recv_head + (int32_t) buffer->size);
+    if (debug) {
+        printf("[write_recv_mem] buffer: %p, overflow: %d, len: %d, mem_recv_cur: %p, mem_recv_head: %p, recv_pos_pointer: %p\n", buffer, overflow, _len,
+               buffer->mem_recv_cur, buffer->mem_recv_head, buffer->recv_pos_pointer);
+    }
+    if (overflow >= 0) {
+        // 有溢出
+        if (buffer->mem_recv_cur < buffer->recv_pos_pointer) {
+            // 已经处于读写指针交叉状态 丢弃数据
+            return;
+        }
+        if (overflow >= buffer->recv_pos_pointer - buffer->mem_recv_head) {
+            // 即使进入读写指针交叉状态 剩余内存依然不足 丢弃数据
+            return;
+        }
+        // 写入头部 原子操作
+        uint32_t head_u32 = ((uint32_t) head[0] << 0) + ((uint32_t) head[1] << 8) + ((uint32_t) head[2] << 16) + ((uint32_t) head[3] << 24);
+        atomic_store(head_ptr, head_u32);
+        if (_len - overflow > 4) {
+            // 拷贝前半段数据
+            memcpy(buffer->mem_recv_cur + 4, data, len - overflow);
+        }
+        buffer->mem_recv_cur = buffer->mem_recv_head;
+        if (overflow > 0) {
+            // 拷贝后半段数据
+            memcpy(buffer->mem_recv_cur, data + (len - overflow), overflow);
+            buffer->mem_recv_cur += overflow;
+            if (buffer->mem_recv_cur >= buffer->mem_recv_head + (int32_t) buffer->size) {
+                buffer->mem_recv_cur = buffer->mem_recv_head;
+            }
+        }
+    } else {
+        // 无溢出
+        if (buffer->mem_recv_cur < buffer->recv_pos_pointer && buffer->mem_recv_cur + _len >= buffer->recv_pos_pointer) {
+            // 状态下剩余内存不足 丢弃数据
+            return;
+        }
+        // 写入头部 原子操作
+        uint32_t head_u32 = ((uint32_t) head[0] << 0) + ((uint32_t) head[1] << 8) + ((uint32_t) head[2] << 16) + ((uint32_t) head[3] << 24);
+        atomic_store(head_ptr, head_u32);
+        memcpy(buffer->mem_recv_cur + 4, data, len);
+        buffer->mem_recv_cur += _len;
+        if (buffer->mem_recv_cur >= buffer->mem_recv_head + (int32_t) buffer->size) {
+            buffer->mem_recv_cur = buffer->mem_recv_head;
+        }
+    }
+    // 将后面的数据长度与写入完成标识置为0x00
+    _Atomic
+    uint32_t *next_head_ptr = (uint32_t *) buffer->mem_recv_cur;
+    atomic_store(next_head_ptr, 0x00);
     // 修改写入完成标识 原子操作
-    *finish_flag_pointer = 0x01;
+    head[2] = 0x01;
+    uint32_t head_u32 = ((uint32_t) head[0] << 0) + ((uint32_t) head[1] << 8) + ((uint32_t) head[2] << 16) + ((uint32_t) head[3] << 24);
+    atomic_store(head_ptr, head_u32);
 }
 
 // 读取发送缓冲区
@@ -210,8 +195,9 @@ void read_send_mem(struct ring_buffer *buffer, uint8_t *data, uint16_t *len) {
     }
     *len = 0;
     // 读取头部 原子操作
-    const uint32_t *head_ptr = (uint32_t *) buffer->mem_send_cur;
-    const uint32_t head_u32 = *head_ptr;
+    _Atomic
+    uint32_t *head_ptr = (uint32_t *) buffer->mem_send_cur;
+    const uint32_t head_u32 = atomic_load(head_ptr);
     *len = (uint16_t) head_u32;
     if (*len == 0) {
         // 没有新数据
@@ -224,10 +210,10 @@ void read_send_mem(struct ring_buffer *buffer, uint8_t *data, uint16_t *len) {
         return;
     }
     buffer->mem_send_cur += 4;
-    if (buffer->mem_send_cur >= buffer->mem_send_head + ring_buffer_size) {
+    if (buffer->mem_send_cur >= buffer->mem_send_head + (int32_t) buffer->size) {
         buffer->mem_send_cur = buffer->mem_send_head;
     }
-    const int32_t overflow = (int32_t) buffer->mem_send_cur + (int32_t) *len - ((int32_t) buffer->mem_send_head + ring_buffer_size);
+    const int32_t overflow = (int32_t) buffer->mem_send_cur + (int32_t) *len - ((int32_t) buffer->mem_send_head + (int32_t) buffer->size);
     if (debug) {
         printf("[read_send_mem] buffer: %p, overflow: %d, len: %d, mem_send_cur: %p, mem_send_head: %p, send_pos_pointer: %p\n", buffer, overflow, *len,
                buffer->mem_send_cur, buffer->mem_send_head, buffer->send_pos_pointer);
@@ -236,18 +222,19 @@ void read_send_mem(struct ring_buffer *buffer, uint8_t *data, uint16_t *len) {
         // 拷贝前半段数据
         memcpy(data, buffer->mem_send_cur, *len - overflow);
         buffer->mem_send_cur = buffer->mem_send_head;
-        // 拷贝后半段数据
-        memcpy(data + (*len - overflow), buffer->mem_send_cur, *len - (*len - overflow));
-        // 内存对齐
-        uint8_t aling_size = overflow % 4;
-        if (aling_size != 0) {
-            aling_size = 4 - aling_size;
+        if (overflow > 0) {
+            // 拷贝后半段数据
+            memcpy(data + (*len - overflow), buffer->mem_send_cur, overflow);
+            // 内存对齐
+            uint8_t aling_size = overflow % 4;
+            if (aling_size != 0) {
+                aling_size = 4 - aling_size;
+            }
+            buffer->mem_send_cur += overflow + aling_size;
+            if (buffer->mem_send_cur >= buffer->mem_send_head + (int32_t) buffer->size) {
+                buffer->mem_send_cur = buffer->mem_send_head;
+            }
         }
-        buffer->mem_send_cur += overflow + aling_size;
-        if (buffer->mem_send_cur >= buffer->mem_send_head + ring_buffer_size) {
-            buffer->mem_send_cur = buffer->mem_send_head;
-        }
-        buffer->send_pos_pointer = buffer->mem_send_cur;
     } else {
         memcpy(data, buffer->mem_send_cur, *len);
         // 内存对齐
@@ -256,11 +243,13 @@ void read_send_mem(struct ring_buffer *buffer, uint8_t *data, uint16_t *len) {
             aling_size = 4 - aling_size;
         }
         buffer->mem_send_cur += *len + aling_size;
-        if (buffer->mem_send_cur >= buffer->mem_send_head + ring_buffer_size) {
+        if (buffer->mem_send_cur >= buffer->mem_send_head + (int32_t) buffer->size) {
             buffer->mem_send_cur = buffer->mem_send_head;
         }
-        buffer->send_pos_pointer = buffer->mem_send_cur;
     }
+    _Atomic
+    uint64_t *send_pos_pointer = (uint64_t *) &buffer->send_pos_pointer;
+    atomic_store(send_pos_pointer, (uint64_t)buffer->mem_send_cur);
 }
 
 static int kni_change_mtu(uint16_t port_id, unsigned int new_mtu) {
@@ -349,11 +338,11 @@ void cgo_print_stats(const int port_index, char *msg) {
     struct rte_eth_stats new_stats = {0};
     rte_eth_stats_get(port_id, &new_stats);
     sprintf(msg, "[rte_eth_stats]\tport:%2u | "
-            "rx:%10llu (pps) | "
-            "tx:%10llu (pps) | "
-            "drop:%10llu (pps) | "
-            "rx:%20llu (byte/s) | "
-            "tx:%20llu (byte/s)\n",
+            "rx:%10lu (pps) | "
+            "tx:%10lu (pps) | "
+            "drop:%10lu (pps) | "
+            "rx:%20lu (byte/s) | "
+            "tx:%20lu (byte/s)\n",
             port_id,
             new_stats.ipackets - old_stats.ipackets,
             new_stats.opackets - old_stats.opackets,
@@ -366,7 +355,7 @@ void cgo_print_stats(const int port_index, char *msg) {
 // 处理退出信号并终止程序
 void cgo_exit_signal_handler(void) {
     RTE_LOG(INFO, APP, "exit signal received, exit...\n");
-    force_quit = true;
+    atomic_store(&running, false);
 }
 
 // 初始化网口 配置收发队列
@@ -441,7 +430,7 @@ void misc(void) {
 int lcore_misc(void *arg) {
     const unsigned int lcore_id = rte_lcore_id();
     RTE_LOG(INFO, APP, "lcore_misc run in lcore: %u\n", lcore_id);
-    while (!force_quit) {
+    while (atomic_load(&running)) {
         misc();
     }
     RTE_LOG(INFO, APP, "lcore_misc exit in lcore: %u\n", lcore_id);
@@ -523,7 +512,7 @@ int lcore_rx(void *arg) {
     uint64_t loop_times = 0;
     struct timeval time_begin = {0};
     struct timeval time_end = {0};
-    while (!force_quit) {
+    while (atomic_load(&running)) {
         if (debug) {
             loop_times++;
             if (loop_times % (1000 * 1000 * 10) == 0) {
@@ -669,7 +658,7 @@ int lcore_tx(void *arg) {
     uint64_t loop_times = 0;
     struct timeval time_begin = {0};
     struct timeval time_end = {0};
-    while (!force_quit) {
+    while (atomic_load(&running)) {
         if (debug) {
             loop_times++;
             if (loop_times % (1000 * 1000 * 10) == 0) {
@@ -697,7 +686,7 @@ int lcore_misc_rx_tx() {
     const unsigned int lcore_id = rte_lcore_id();
     RTE_LOG(INFO, APP, "lcore_misc_rx_tx run in lcore: %u\n", lcore_id);
 
-    while (!force_quit) {
+    while (atomic_load(&running)) {
         misc();
         bool all_port_idle = true;
         for (int i = 0; i < port_count; i++) {
@@ -765,7 +754,7 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
     printf("\n");
 
     // 初始化DPDK
-    dpdk_start = false;
+    atomic_store(&dpdk_start, false);
     int argc = 0;
     char **argv = NULL;
     parse_args(config->eal_args, &argc, &argv);
@@ -775,7 +764,7 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
         rte_exit(EXIT_FAILURE, "eal init failed\n");
     }
     printf("\n");
-    dpdk_start = true;
+    atomic_store(&dpdk_start, true);
 
     int cpu_core_count = 0;
     char **cpu_core_value = NULL;
@@ -799,7 +788,7 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
     single_core = config->single_core;
     printf("single core mode: %d\n", single_core);
 
-    force_quit = false;
+    atomic_store(&running, true);
 
     const uint8_t nb_ports = rte_eth_dev_count();
     for (int i = 0; i < nb_ports; i++) {
@@ -855,6 +844,7 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
         port_ring_buffer[i].mem_recv_cur = NULL;
         port_ring_buffer[i].send_pos_pointer = port_ring_buffer[i].mem_send_head;
         port_ring_buffer[i].recv_pos_pointer = port_ring_buffer[i].mem_recv_head;
+        port_ring_buffer[i].size = ring_buffer_size;
     }
     // kni分配环状缓冲区内存
     kni_ring_buffer.mem_send_head = rte_malloc("send_ring_buffer", ring_buffer_size, 0);
@@ -869,6 +859,7 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
     kni_ring_buffer.mem_recv_cur = NULL;
     kni_ring_buffer.send_pos_pointer = kni_ring_buffer.mem_send_head;
     kni_ring_buffer.recv_pos_pointer = kni_ring_buffer.mem_recv_head;
+    kni_ring_buffer.size = ring_buffer_size;
     printf("\n");
 
     rte_kni_init(1);

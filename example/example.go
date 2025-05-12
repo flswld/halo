@@ -18,44 +18,43 @@ import (
 func DirectDpdk() {
 	// 启动dpdk
 	dpdk.Run(&dpdk.Config{
-		DpdkCpuCoreList:   []int{1, 2, 3, 4, 5, 6}, // dpdk侧使用的核心编号列表 主线程第一个核心 杂项线程第二个核心 每个网口两个核心
-		GolangCpuCoreList: []int{7, 8, 9, 10},      // golang侧使用的核心编号列表 每个网口两个核心
-		DpdkMemChanNum:    4,                       // dpdk内存通道数
-		RingBufferSize:    128 * mem.MB,            // 环状缓冲区大小
-		PortIdList:        []int{0, 1},             // 使用的网卡id列表
-		AfPacketDevList:   nil,                     // 使用的AF_PACKET虚拟网卡列表
-		StatsLog:          true,                    // 收发包统计日志
-		DebugLog:          false,                   // 收发包调试日志
-		IdleSleep:         false,                   // 空闲睡眠 降低cpu占用
-		SingleCore:        false,                   // 单核模式 只使用cpu0
+		DpdkCpuCoreList: []int{1, 2, 3, 4, 5, 6}, // dpdk使用的核心编号列表 主线程第一个核心 杂项线程第二个核心 每个网卡两个核心
+		DpdkMemChanNum:  4,                       // dpdk内存通道数
+		RingBufferSize:  128 * mem.MB,            // 环状缓冲区大小
+		PortIdList:      []int{0, 1},             // 使用的网卡id列表
+		AfPacketDevList: nil,                     // 使用的AF_PACKET虚拟网卡列表
+		StatsLog:        true,                    // 收发包统计日志
+		DebugLog:        false,                   // 收发包调试日志
+		IdleSleep:       false,                   // 空闲睡眠 降低cpu占用
+		SingleCore:      false,                   // 单核模式 只使用cpu0
 	})
 
-	// 通过RX和TX管道发送接收原始以太网报文
+	// 通过EthRxPkt和EthTxPkt方法发送接收原始以太网报文
 	var exit atomic.Bool
 	go func() {
-		cpu.BindCpuCore(11)
+		cpu.BindCpuCore(7)
 		for {
 			if exit.Load() {
 				break
 			}
-			pkt := <-dpdk.RxChan(0)
+			pkt := dpdk.EthRxPkt(0)
 			if pkt == nil {
 				continue
 			}
-			dpdk.TxChan(1) <- pkt
+			dpdk.EthTxPkt(1, pkt)
 		}
 	}()
 	go func() {
-		cpu.BindCpuCore(12)
+		cpu.BindCpuCore(8)
 		for {
 			if exit.Load() {
 				break
 			}
-			pkt := <-dpdk.RxChan(1)
+			pkt := dpdk.EthRxPkt(1)
 			if pkt == nil {
 				continue
 			}
-			dpdk.TxChan(0) <- pkt
+			dpdk.EthTxPkt(0, pkt)
 		}
 	}()
 	time.Sleep(time.Minute)
@@ -74,16 +73,15 @@ func EthernetRouter() {
 	// 启动dpdk
 	dpdk.DefaultLogWriter = new(logger.LogWriter)
 	dpdk.Run(&dpdk.Config{
-		DpdkCpuCoreList:   nil,
-		GolangCpuCoreList: nil,
-		DpdkMemChanNum:    1,
-		RingBufferSize:    128 * mem.MB,
-		PortIdList:        []int{0, 1, 2},
-		AfPacketDevList:   []string{"eth0", "eth1", "wlan0"},
-		StatsLog:          true,
-		DebugLog:          false,
-		IdleSleep:         true,
-		SingleCore:        true,
+		DpdkCpuCoreList: nil,
+		DpdkMemChanNum:  1,
+		RingBufferSize:  128 * mem.MB,
+		PortIdList:      []int{0, 1},
+		AfPacketDevList: []string{"eth0", "wlan0"},
+		StatsLog:        true,
+		DebugLog:        false,
+		IdleSleep:       true,
+		SingleCore:      true,
 	})
 
 	// 初始化协议栈
@@ -109,8 +107,9 @@ func EthernetRouter() {
 						Ipv4HeadProto: protocol.IPH_PROTO_TCP, // ip头部协议
 					},
 				},
-				EthRxChan: dpdk.RxChan(0), // 物理层接收管道
-				EthTxChan: dpdk.TxChan(0), // 物理层发送管道
+				EthRxFunc:   func() (pkt []byte) { return dpdk.EthRxPkt(0) }, // 网卡收包方法
+				EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(0, pkt) },      // 网卡发包方法
+				BindCpuCore: 0,                                               // 绑定的cpu核心
 			},
 			{
 				Name:        "wan1",
@@ -119,16 +118,26 @@ func EthernetRouter() {
 				NetworkMask: "255.255.255.0",
 				NatEnable:   true,
 				NatType:     engine.NatTypeFullCone,
-				EthRxChan:   dpdk.RxChan(1),
-				EthTxChan:   dpdk.TxChan(1),
+				EthRxFunc: func() (pkt []byte) {
+					return dpdk.EthRxPkt(1)
+				},
+				EthTxFunc: func(pkt []byte) {
+					dpdk.EthTxPkt(1, pkt)
+				},
+				BindCpuCore: 0,
 			},
 			{
 				Name:        "lan0",
 				MacAddr:     "AA:AA:AA:AA:AA:CC",
 				IpAddr:      "192.168.111.111",
 				NetworkMask: "255.255.255.0",
-				EthRxChan:   dpdk.RxChan(2),
-				EthTxChan:   dpdk.TxChan(2),
+				EthRxFunc: func() (pkt []byte) {
+					return dpdk.KniRxPkt()
+				},
+				EthTxFunc: func(pkt []byte) {
+					dpdk.KniTxPkt(pkt)
+				},
+				BindCpuCore: 0,
 			},
 		},
 		// 路由表
@@ -175,17 +184,18 @@ func EthernetRouter() {
 func DDoS() {
 	// 启动dpdk
 	dpdk.Run(&dpdk.Config{
-		DpdkCpuCoreList:   []int{1, 2, 3, 4},
-		GolangCpuCoreList: []int{5, 6},
-		DpdkMemChanNum:    4,
-		RingBufferSize:    128 * mem.MB,
-		PortIdList:        []int{0},
-		AfPacketDevList:   nil,
-		StatsLog:          true,
-		DebugLog:          false,
-		IdleSleep:         true,
-		SingleCore:        true,
+		DpdkCpuCoreList: []int{1, 2, 3, 4},
+		DpdkMemChanNum:  4,
+		RingBufferSize:  128 * mem.MB,
+		PortIdList:      []int{0},
+		AfPacketDevList: nil,
+		StatsLog:        true,
+		DebugLog:        false,
+		IdleSleep:       true,
+		SingleCore:      true,
 	})
+
+	var lastSendPkt []byte = nil
 
 	// 初始化协议栈
 	e, err := engine.InitEngine(&engine.Config{
@@ -195,8 +205,14 @@ func DDoS() {
 				MacAddr:     "AA:AA:AA:AA:AA:AA",
 				IpAddr:      "192.168.100.100",
 				NetworkMask: "255.255.255.0",
-				EthRxChan:   dpdk.RxChan(0),
-				EthTxChan:   dpdk.TxChan(0),
+				EthRxFunc: func() (pkt []byte) {
+					return dpdk.EthRxPkt(0)
+				},
+				EthTxFunc: func(pkt []byte) {
+					dpdk.EthTxPkt(0, pkt)
+					lastSendPkt = pkt
+				},
+				BindCpuCore: 5,
 			},
 		},
 		RoutingTable: []*engine.RoutingEntryConfig{
@@ -216,22 +232,21 @@ func DDoS() {
 	e.RunEngine()
 
 	// 一分钟icmp洪水攻击
-	var pkt []byte = nil
 	for {
-		pkt = e.GetNetIf("eth0").TxIcmp(protocol.ICMP_DEFAULT_PAYLOAD, protocol.ICMP_REQUEST, []byte{0x00, 0x01}, 1, []byte{192, 168, 100, 1})
-		if pkt != nil {
+		ok := e.GetNetIf("eth0").TxIcmp(protocol.ICMP_DEFAULT_PAYLOAD, protocol.ICMP_REQUEST, []byte{0x00, 0x01}, 1, []byte{192, 168, 100, 1})
+		if ok {
 			break
 		}
 		time.Sleep(time.Second)
 	}
 	var exit atomic.Bool
 	go func() {
-		cpu.BindCpuCore(7)
+		cpu.BindCpuCore(6)
 		for {
 			if exit.Load() {
 				break
 			}
-			dpdk.TxChan(0) <- pkt
+			dpdk.EthTxPkt(0, lastSendPkt)
 		}
 	}()
 	time.Sleep(time.Minute)
@@ -249,16 +264,15 @@ func DDoS() {
 func KcpServerClient() {
 	// 启动dpdk
 	dpdk.Run(&dpdk.Config{
-		DpdkCpuCoreList:   nil,
-		GolangCpuCoreList: nil,
-		DpdkMemChanNum:    1,
-		RingBufferSize:    128 * mem.MB,
-		PortIdList:        []int{0, 1},
-		AfPacketDevList:   nil,
-		StatsLog:          true,
-		DebugLog:          false,
-		IdleSleep:         true,
-		SingleCore:        true,
+		DpdkCpuCoreList: nil,
+		DpdkMemChanNum:  1,
+		RingBufferSize:  128 * mem.MB,
+		PortIdList:      []int{0, 1},
+		AfPacketDevList: nil,
+		StatsLog:        true,
+		DebugLog:        false,
+		IdleSleep:       true,
+		SingleCore:      true,
 	})
 
 	// 初始化协议栈
@@ -272,8 +286,12 @@ func KcpServerClient() {
 				NetworkMask: "255.255.255.0",
 				NatEnable:   false,
 				NatType:     engine.NatTypeFullCone,
-				EthRxChan:   dpdk.RxChan(0),
-				EthTxChan:   dpdk.TxChan(0),
+				EthRxFunc: func() (pkt []byte) {
+					return dpdk.EthRxPkt(0)
+				},
+				EthTxFunc: func(pkt []byte) {
+					dpdk.EthTxPkt(0, pkt)
+				},
 			},
 		},
 		RoutingTable: []*engine.RoutingEntryConfig{
@@ -296,8 +314,12 @@ func KcpServerClient() {
 				MacAddr:     "AA:AA:AA:AA:AA:BB",
 				IpAddr:      "192.168.111.111",
 				NetworkMask: "255.255.255.0",
-				EthRxChan:   dpdk.RxChan(1),
-				EthTxChan:   dpdk.TxChan(1),
+				EthRxFunc: func() (pkt []byte) {
+					return dpdk.EthRxPkt(1)
+				},
+				EthTxFunc: func(pkt []byte) {
+					dpdk.EthTxPkt(1, pkt)
+				},
 			},
 		},
 		RoutingTable: []*engine.RoutingEntryConfig{
@@ -334,11 +356,13 @@ func KcpServerClient() {
 func kcpServer(netIf *engine.NetIf) {
 	rxChan := make(chan []byte, 1024)
 	txChan := make(chan []byte, 1024)
-	netIf.HandleUdp = func(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, ipv4SrcAddr []byte) {
-		if udpDstPort != 22222 {
+	netIf.HandleUdp = func(payload []byte, srcPort uint16, dstPort uint16, srcAddr []byte) {
+		if dstPort != 22222 {
 			return
 		}
-		rxChan <- udpPayload
+		_payload := make([]byte, len(payload))
+		copy(_payload, payload)
+		rxChan <- _payload
 	}
 	go func() {
 		for {
@@ -347,7 +371,7 @@ func kcpServer(netIf *engine.NetIf) {
 				break
 			}
 			for {
-				if netIf.TxUdp(pkt, 22222, 33333, []byte{192, 168, 111, 111}) != nil {
+				if netIf.TxUdp(pkt, 22222, 33333, []byte{192, 168, 111, 111}) {
 					break
 				}
 				time.Sleep(time.Second)
@@ -389,11 +413,13 @@ func kcpServer(netIf *engine.NetIf) {
 func kcpClient(netIf *engine.NetIf) {
 	rxChan := make(chan []byte, 1024)
 	txChan := make(chan []byte, 1024)
-	netIf.HandleUdp = func(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, ipv4SrcAddr []byte) {
-		if udpDstPort != 33333 {
+	netIf.HandleUdp = func(payload []byte, srcPort uint16, dstPort uint16, srcAddr []byte) {
+		if dstPort != 33333 {
 			return
 		}
-		rxChan <- udpPayload
+		_payload := make([]byte, len(payload))
+		copy(_payload, payload)
+		rxChan <- _payload
 	}
 	go func() {
 		for {
@@ -402,7 +428,7 @@ func kcpClient(netIf *engine.NetIf) {
 				break
 			}
 			for {
-				if netIf.TxUdp(pkt, 33333, 22222, []byte{192, 168, 100, 100}) != nil {
+				if netIf.TxUdp(pkt, 33333, 22222, []byte{192, 168, 100, 100}) {
 					break
 				}
 				time.Sleep(time.Second)
@@ -442,16 +468,15 @@ func kcpClient(netIf *engine.NetIf) {
 func MagicPacketModifier() {
 	// 启动dpdk
 	dpdk.Run(&dpdk.Config{
-		DpdkCpuCoreList:   nil,
-		GolangCpuCoreList: nil,
-		DpdkMemChanNum:    1,
-		RingBufferSize:    128 * mem.MB,
-		PortIdList:        []int{0, 1},
-		AfPacketDevList:   nil,
-		StatsLog:          true,
-		DebugLog:          false,
-		IdleSleep:         true,
-		SingleCore:        true,
+		DpdkCpuCoreList: nil,
+		DpdkMemChanNum:  1,
+		RingBufferSize:  128 * mem.MB,
+		PortIdList:      []int{0, 1},
+		AfPacketDevList: nil,
+		StatsLog:        true,
+		DebugLog:        false,
+		IdleSleep:       true,
+		SingleCore:      true,
 	})
 
 	// 初始化协议栈
@@ -465,16 +490,24 @@ func MagicPacketModifier() {
 				NetworkMask: "255.255.255.0",
 				NatEnable:   true,
 				NatType:     engine.NatTypeFullCone,
-				EthRxChan:   dpdk.RxChan(0),
-				EthTxChan:   dpdk.TxChan(0),
+				EthRxFunc: func() (pkt []byte) {
+					return dpdk.EthRxPkt(0)
+				},
+				EthTxFunc: func(pkt []byte) {
+					dpdk.EthTxPkt(0, pkt)
+				},
 			},
 			{
 				Name:        "lan0",
 				MacAddr:     "AA:AA:AA:AA:AA:BB",
 				IpAddr:      "192.168.111.111",
 				NetworkMask: "255.255.255.0",
-				EthRxChan:   dpdk.RxChan(1),
-				EthTxChan:   dpdk.TxChan(1),
+				EthRxFunc: func() (pkt []byte) {
+					return dpdk.EthRxPkt(1)
+				},
+				EthTxFunc: func(pkt []byte) {
+					dpdk.EthTxPkt(1, pkt)
+				},
 			},
 		},
 		RoutingTable: []*engine.RoutingEntryConfig{

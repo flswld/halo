@@ -68,8 +68,7 @@ func ParseIpv4Pkt(pkt []byte) (payload []byte, ipHeadProto uint8, srcAddr []byte
 		return nil, IPH_PROTO_UNKNOWN, nil, nil, errors.New("unknown ip protocol")
 	}
 	// 检查首部校验和
-	headerSum := GetCheckSum(pkt[0:20])
-	if binary.BigEndian.Uint16(headerSum) != 0 {
+	if GetCheckSum(pkt[0:20]) != 0 {
 		return nil, IPH_PROTO_UNKNOWN, nil, nil, errors.New("header check sum error")
 	}
 	// 源地址
@@ -81,14 +80,16 @@ func ParseIpv4Pkt(pkt []byte) (payload []byte, ipHeadProto uint8, srcAddr []byte
 	return payload, ipHeadProto, srcAddr, dstAddr, nil
 }
 
-func BuildIpv4Pkt(payload []byte, ipHeadProto uint8, srcAddr []byte, dstAddr []byte) (pkt []byte, err error) {
+func BuildIpv4Pkt(pkt []byte, payload []byte, ipHeadProto uint8, srcAddr []byte, dstAddr []byte) ([]byte, error) {
+	if pkt == nil {
+		pkt = make([]byte, 0, 20)
+	}
 	if len(payload) > 1480 {
 		return nil, errors.New("payload len must <= 1480 bytes")
 	}
 	if len(srcAddr) != 4 || len(dstAddr) != 4 {
 		return nil, errors.New("src ip addr or dst ip addr len is not 4 bytes")
 	}
-	pkt = make([]byte, 0, 20)
 	// 版本(IPV4)+首部长度(20字节)+服务类型(0x00)
 	pkt = append(pkt, 0x45, 0x00)
 	// 总长度
@@ -110,9 +111,9 @@ func BuildIpv4Pkt(payload []byte, ipHeadProto uint8, srcAddr []byte, dstAddr []b
 	// 目的地址
 	pkt = append(pkt, dstAddr...)
 	// 计算首部校验和
-	headerSum := GetCheckSum(pkt)
-	pkt[10] = headerSum[0]
-	pkt[11] = headerSum[1]
+	sum := GetCheckSum(pkt)
+	pkt[10] = byte(sum >> 8)
+	pkt[11] = byte(sum)
 	// 上层数据
 	pkt = append(pkt, payload...)
 	return pkt, nil
@@ -130,9 +131,9 @@ func HandleIpv4PktTtl(pkt []byte) ([]byte, bool) {
 func ReCalcIpv4CheckSum(pkt []byte) []byte {
 	pkt[10] = 0x00
 	pkt[11] = 0x00
-	headerSum := GetCheckSum(pkt[:20])
-	pkt[10] = headerSum[0]
-	pkt[11] = headerSum[1]
+	sum := GetCheckSum(pkt[:20])
+	pkt[10] = byte(sum >> 8)
+	pkt[11] = byte(sum)
 	return pkt
 }
 
@@ -140,44 +141,44 @@ func ReCalcIcmpCheckSum(pkt []byte) []byte {
 	pkt[22] = 0x00
 	pkt[23] = 0x00
 	sum := GetCheckSum(pkt)
-	pkt[22] = sum[0]
-	pkt[23] = sum[1]
+	pkt[22] = byte(sum >> 8)
+	pkt[23] = byte(sum)
 	return pkt
 }
 
 func ReCalcTcpCheckSum(pkt []byte) []byte {
 	pkt[36] = 0x00
 	pkt[37] = 0x00
-	fakeHeader := make([]byte, 0)
+	fakeHeader := make([]byte, 0, 12)
 	fakeHeader = append(fakeHeader, pkt[12:16]...)
 	fakeHeader = append(fakeHeader, pkt[16:20]...)
 	fakeHeader = append(fakeHeader, 0x00, 0x06)
 	totalLen := int(binary.BigEndian.Uint16([]byte{pkt[2], pkt[3]}))
 	fakeHeader = append(fakeHeader, byte((totalLen-20)>>8), byte(totalLen-20))
-	checkSumSrc := make([]byte, 0)
-	checkSumSrc = append(checkSumSrc, fakeHeader...)
-	checkSumSrc = append(checkSumSrc, pkt[20:]...)
-	sum := GetCheckSum(checkSumSrc)
-	pkt[36] = sum[0]
-	pkt[37] = sum[1]
+	sumData := make([]byte, 0, 12+1500)
+	sumData = append(sumData, fakeHeader...)
+	sumData = append(sumData, pkt[20:]...)
+	sum := GetCheckSum(sumData)
+	pkt[36] = byte(sum >> 8)
+	pkt[37] = byte(sum)
 	return pkt
 }
 
 func ReCalcUdpCheckSum(pkt []byte) []byte {
 	pkt[26] = 0x00
 	pkt[27] = 0x00
-	fakeHeader := make([]byte, 0)
+	fakeHeader := make([]byte, 0, 12)
 	fakeHeader = append(fakeHeader, pkt[12:16]...)
 	fakeHeader = append(fakeHeader, pkt[16:20]...)
 	fakeHeader = append(fakeHeader, 0x00, 0x11)
 	totalLen := int(binary.BigEndian.Uint16([]byte{pkt[2], pkt[3]}))
 	fakeHeader = append(fakeHeader, byte((totalLen-20)>>8), byte(totalLen-20))
-	sumData := make([]byte, 0)
+	sumData := make([]byte, 0, 12+1500)
 	sumData = append(sumData, fakeHeader...)
 	sumData = append(sumData, pkt[20:]...)
 	sum := GetCheckSum(sumData)
-	pkt[26] = sum[0]
-	pkt[27] = sum[1]
+	pkt[26] = byte(sum >> 8)
+	pkt[27] = byte(sum)
 	return pkt
 }
 

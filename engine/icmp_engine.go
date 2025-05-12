@@ -21,11 +21,12 @@ func (i *NetIf) RxIcmp(ipv4Payload []byte, ipv4SrcAddr []byte) {
 	}
 }
 
-func (i *NetIf) TxIcmp(icmpPayload []byte, icmpType uint8, icmpId []byte, icmpSeq uint16, ipv4DstAddr []byte) []byte {
-	icmpPkt, err := protocol.BuildIcmpPkt(icmpPayload, icmpType, icmpId, icmpSeq)
+func (i *NetIf) TxIcmp(icmpPayload []byte, icmpType uint8, icmpId []byte, icmpSeq uint16, ipv4DstAddr []byte) bool {
+	icmpPkt := make([]byte, 0, 1480)
+	icmpPkt, err := protocol.BuildIcmpPkt(icmpPkt, icmpPayload, icmpType, icmpId, icmpSeq)
 	if err != nil {
 		Log(fmt.Sprintf("build icmp packet error: %v\n", err))
-		return nil
+		return false
 	}
 	return i.TxIpv4(icmpPkt, protocol.IPH_PROTO_ICMP, ipv4DstAddr)
 }

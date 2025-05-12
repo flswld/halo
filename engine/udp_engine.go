@@ -18,11 +18,12 @@ func (i *NetIf) RxUdp(ipv4Payload []byte, ipv4SrcAddr []byte) {
 	}
 }
 
-func (i *NetIf) TxUdp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, ipv4DstAddr []byte) []byte {
-	udpPkt, err := protocol.BuildUdpPkt(udpPayload, udpSrcPort, udpDstPort, i.IpAddr, ipv4DstAddr)
+func (i *NetIf) TxUdp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, ipv4DstAddr []byte) bool {
+	udpPkt := make([]byte, 0, 1480)
+	udpPkt, err := protocol.BuildUdpPkt(udpPkt, udpPayload, udpSrcPort, udpDstPort, i.IpAddr, ipv4DstAddr)
 	if err != nil {
 		Log(fmt.Sprintf("build udp packet error: %v\n", err))
-		return nil
+		return false
 	}
 	return i.TxIpv4(udpPkt, protocol.IPH_PROTO_UDP, ipv4DstAddr)
 }

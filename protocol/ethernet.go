@@ -52,14 +52,16 @@ func ParseEthFrm(frm []byte) (payload []byte, dstMac []byte, srcMac []byte, ethP
 	return payload, dstMac, srcMac, ethProto, nil
 }
 
-func BuildEthFrm(payload []byte, dstMac []byte, srcMac []byte, ethProto uint16) (frm []byte, err error) {
+func BuildEthFrm(frm []byte, payload []byte, dstMac []byte, srcMac []byte, ethProto uint16) ([]byte, error) {
+	if frm == nil {
+		frm = make([]byte, 0, 60)
+	}
 	if len(payload) > 1500 {
 		return nil, errors.New("payload len must <= 1500 bytes")
 	}
 	if len(dstMac) != 6 || len(srcMac) != 6 {
 		return nil, errors.New("dst mac addr or src mac addr len is not 6 bytes")
 	}
-	frm = make([]byte, 0, 14)
 	// 目的MAC地址
 	frm = append(frm, dstMac...)
 	// 源MAC地址
@@ -69,10 +71,8 @@ func BuildEthFrm(payload []byte, dstMac []byte, srcMac []byte, ethProto uint16) 
 	// 上层数据
 	frm = append(frm, payload...)
 	// 小于60字节填充0
-	zeroSize := 60 - len(frm)
-	if zeroSize > 0 {
-		zeroBuf := make([]byte, zeroSize)
-		frm = append(frm, zeroBuf...)
+	for i := 0; i < 60-len(frm); i++ {
+		frm = append(frm, 0x00)
 	}
 	return frm, nil
 }

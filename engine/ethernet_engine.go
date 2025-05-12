@@ -28,15 +28,18 @@ func (i *NetIf) RxEthernet(ethFrm []byte) {
 	}
 }
 
-func (i *NetIf) TxEthernet(ethPayload []byte, ethDstMac []byte, ethProto uint16) []byte {
-	ethFrm, err := protocol.BuildEthFrm(ethPayload, ethDstMac, i.MacAddr, ethProto)
+func (i *NetIf) TxEthernet(ethPayload []byte, ethDstMac []byte, ethProto uint16) bool {
+	i.EthTxLock.Lock()
+	defer i.EthTxLock.UnLock()
+	i.EthTxBuffer = i.EthTxBuffer[0:0]
+	ethFrm, err := protocol.BuildEthFrm(i.EthTxBuffer, ethPayload, ethDstMac, i.MacAddr, ethProto)
 	if err != nil {
 		Log(fmt.Sprintf("build ethernet frame error: %v\n", err))
-		return nil
+		return false
 	}
 	if i.Engine.DebugLog {
 		Log(fmt.Sprintf("tx eth frm, if: %v, len: %v, data: %02x\n", i.Name, len(ethFrm), ethFrm))
 	}
-	i.EthTxChan <- ethFrm
-	return ethFrm
+	i.EthTxFunc(ethFrm)
+	return true
 }

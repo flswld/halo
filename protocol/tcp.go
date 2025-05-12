@@ -50,16 +50,15 @@ func ParseTcpPkt(pkt []byte, srcAddr []byte, dstAddr []byte) (payload []byte, sr
 	// 检查校验和
 	if pkt[16] != 0x00 && pkt[17] != 0x00 {
 		totalLen := len(pkt)
-		fakeHeader := make([]byte, 0)
+		fakeHeader := make([]byte, 0, 12)
 		fakeHeader = append(fakeHeader, srcAddr...)
 		fakeHeader = append(fakeHeader, dstAddr...)
 		fakeHeader = append(fakeHeader, 0x00, 0x06)
 		fakeHeader = append(fakeHeader, byte(totalLen>>8), byte(totalLen))
-		sumData := make([]byte, 0)
+		sumData := make([]byte, 0, 12+1500)
 		sumData = append(sumData, fakeHeader...)
 		sumData = append(sumData, pkt...)
-		sum := GetCheckSum(sumData)
-		if binary.BigEndian.Uint16(sum) != 0 {
+		if GetCheckSum(sumData) != 0 {
 			return nil, 0, 0, 0, 0, 0, errors.New("check sum error")
 		}
 	}
@@ -68,11 +67,16 @@ func ParseTcpPkt(pkt []byte, srcAddr []byte, dstAddr []byte) (payload []byte, sr
 	return payload, srcPort, dstPort, seqNum, ackNum, flags, nil
 }
 
-func BuildTcpPkt(payload []byte, srcPort uint16, dstPort uint16, srcAddr []byte, dstAddr []byte, seqNum uint32, ackNum uint32, flags uint8) (pkt []byte, err error) {
+func BuildTcpPkt(pkt []byte, payload []byte, srcPort uint16, dstPort uint16, srcAddr []byte, dstAddr []byte, seqNum uint32, ackNum uint32, flags uint8) ([]byte, error) {
+	if pkt == nil {
+		pkt = make([]byte, 0, 20)
+	}
+	if len(payload) > 1460 {
+		return nil, errors.New("payload len must <= 1460")
+	}
 	if len(srcAddr) != 4 || len(dstAddr) != 4 {
 		return nil, errors.New("src ip addr or dst ip addr len is not 4 bytes")
 	}
-	pkt = make([]byte, 0, 20)
 	// 源端口
 	pkt = append(pkt, byte(srcPort>>8), byte(srcPort))
 	// 目的端口
@@ -92,7 +96,7 @@ func BuildTcpPkt(payload []byte, srcPort uint16, dstPort uint16, srcAddr []byte,
 	// 数据
 	pkt = append(pkt, payload...)
 	// 计算校验和
-	fakeHeader := make([]byte, 0)
+	fakeHeader := make([]byte, 0, 12)
 	fakeHeader = append(fakeHeader, srcAddr...)
 	fakeHeader = append(fakeHeader, dstAddr...)
 	// 保留字节0x00+TCP协议号0x06
@@ -100,11 +104,11 @@ func BuildTcpPkt(payload []byte, srcPort uint16, dstPort uint16, srcAddr []byte,
 	// TCP报文总长度
 	totalLen := 20 + len(payload)
 	fakeHeader = append(fakeHeader, byte(totalLen>>8), byte(totalLen))
-	checkSumSrc := make([]byte, 0)
-	checkSumSrc = append(checkSumSrc, fakeHeader...)
-	checkSumSrc = append(checkSumSrc, pkt...)
-	sum := GetCheckSum(checkSumSrc)
-	pkt[16] = sum[0]
-	pkt[17] = sum[1]
+	sumData := make([]byte, 0, 12+1500)
+	sumData = append(sumData, fakeHeader...)
+	sumData = append(sumData, pkt...)
+	sum := GetCheckSum(sumData)
+	pkt[16] = byte(sum >> 8)
+	pkt[17] = byte(sum)
 	return pkt, nil
 }

@@ -52,14 +52,16 @@ func ParseArpPkt(pkt []byte) (option uint16, srcMac []byte, srcAddr []byte, dstM
 	return option, srcMac, srcAddr, dstMac, dstAddr, nil
 }
 
-func BuildArpPkt(option uint16, srcMac []byte, srcAddr []byte, dstMac []byte, dstAddr []byte) (pkt []byte, err error) {
+func BuildArpPkt(pkt []byte, option uint16, srcMac []byte, srcAddr []byte, dstMac []byte, dstAddr []byte) ([]byte, error) {
+	if pkt == nil {
+		pkt = make([]byte, 0, 28)
+	}
 	if len(srcMac) != 6 || len(dstMac) != 6 {
 		return nil, errors.New("src mac addr or dst mac addr len is not 6 bytes")
 	}
 	if len(srcAddr) != 4 || len(dstAddr) != 4 {
 		return nil, errors.New("src ip addr or dst ip addr len is not 4 bytes")
 	}
-	pkt = make([]byte, 0, 28)
 	// 硬件类型+协议类型+硬件地址长度+协议长度
 	pkt = append(pkt, 0x00, 0x01, 0x08, 0x00, 0x06, 0x04)
 	// 操作类型

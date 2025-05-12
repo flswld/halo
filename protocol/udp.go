@@ -29,16 +29,15 @@ func ParseUdpPkt(pkt []byte, srcAddr []byte, dstAddr []byte) (payload []byte, sr
 	totalLen := int(binary.BigEndian.Uint16([]byte{pkt[4], pkt[5]}))
 	// 检查校验和
 	if pkt[6] != 0x00 && pkt[7] != 0x00 {
-		fakeHeader := make([]byte, 0)
+		fakeHeader := make([]byte, 0, 12)
 		fakeHeader = append(fakeHeader, srcAddr...)
 		fakeHeader = append(fakeHeader, dstAddr...)
 		fakeHeader = append(fakeHeader, 0x00, 0x11)
 		fakeHeader = append(fakeHeader, byte(totalLen>>8), byte(totalLen))
-		sumData := make([]byte, 0)
+		sumData := make([]byte, 0, 12+1500)
 		sumData = append(sumData, fakeHeader...)
 		sumData = append(sumData, pkt...)
-		sum := GetCheckSum(sumData)
-		if binary.BigEndian.Uint16(sum) != 0 {
+		if GetCheckSum(sumData) != 0 {
 			return nil, 0, 0, errors.New("check sum error")
 		}
 	}
@@ -47,11 +46,13 @@ func ParseUdpPkt(pkt []byte, srcAddr []byte, dstAddr []byte) (payload []byte, sr
 	return payload, srcPort, dstPort, nil
 }
 
-func BuildUdpPkt(payload []byte, srcPort uint16, dstPort uint16, srcAddr []byte, dstAddr []byte) (pkt []byte, err error) {
+func BuildUdpPkt(pkt []byte, payload []byte, srcPort uint16, dstPort uint16, srcAddr []byte, dstAddr []byte) ([]byte, error) {
+	if pkt == nil {
+		pkt = make([]byte, 0, 8)
+	}
 	if len(payload) > 1472 {
 		return nil, errors.New("payload len must <= 1472")
 	}
-	pkt = make([]byte, 0, 8)
 	// 源端口
 	pkt = append(pkt, byte(srcPort>>8), byte(srcPort))
 	// 目标端口
@@ -64,18 +65,18 @@ func BuildUdpPkt(payload []byte, srcPort uint16, dstPort uint16, srcAddr []byte,
 	// 上层数据
 	pkt = append(pkt, payload...)
 	// 计算校验和
-	fakeHeader := make([]byte, 0)
+	fakeHeader := make([]byte, 0, 12)
 	fakeHeader = append(fakeHeader, srcAddr...)
 	fakeHeader = append(fakeHeader, dstAddr...)
 	// 保留字节0x00+UDP协议号0x11
 	fakeHeader = append(fakeHeader, 0x00, 0x11)
 	// UDP报文总长度
 	fakeHeader = append(fakeHeader, byte(udpPktLen>>8), byte(udpPktLen))
-	sumData := make([]byte, 0)
+	sumData := make([]byte, 0, 12+1500)
 	sumData = append(sumData, fakeHeader...)
 	sumData = append(sumData, pkt...)
 	sum := GetCheckSum(sumData)
-	pkt[6] = sum[0]
-	pkt[7] = sum[1]
+	pkt[6] = byte(sum >> 8)
+	pkt[7] = byte(sum)
 	return pkt, nil
 }

@@ -17,9 +17,29 @@ int bind_cpu_core(int core) {
 #undef _GNU_SOURCE
 */
 import "C"
+import (
+	"runtime"
+	"sync/atomic"
+)
 
 // BindCpuCore 协程绑核
 func BindCpuCore(core int) bool {
+	runtime.LockOSThread()
 	ret := C.bind_cpu_core(C.int(core))
 	return ret == 0
+}
+
+type SpinLock uint32
+
+func (l *SpinLock) Lock() {
+	for {
+		ok := atomic.CompareAndSwapUint32((*uint32)(l), 0, 1)
+		if ok {
+			break
+		}
+	}
+}
+
+func (l *SpinLock) UnLock() {
+	atomic.StoreUint32((*uint32)(l), 0)
 }

@@ -18,11 +18,12 @@ func (i *NetIf) RxTcp(ipv4Payload []byte, ipv4SrcAddr []byte) {
 	}
 }
 
-func (i *NetIf) TxTcp(tcpPayload []byte, tcpSrcPort uint16, tcpDstPort uint16, ipv4DstAddr []byte, seqNum uint32, ackNum uint32, flags uint8) []byte {
-	tcpPkt, err := protocol.BuildTcpPkt(tcpPayload, tcpSrcPort, tcpDstPort, i.IpAddr, ipv4DstAddr, seqNum, ackNum, flags)
+func (i *NetIf) TxTcp(tcpPayload []byte, tcpSrcPort uint16, tcpDstPort uint16, ipv4DstAddr []byte, seqNum uint32, ackNum uint32, flags uint8) bool {
+	tcpPkt := make([]byte, 0, 1480)
+	tcpPkt, err := protocol.BuildTcpPkt(tcpPkt, tcpPayload, tcpSrcPort, tcpDstPort, i.IpAddr, ipv4DstAddr, seqNum, ackNum, flags)
 	if err != nil {
 		Log(fmt.Sprintf("build tcp packet error: %v\n", err))
-		return nil
+		return false
 	}
 	return i.TxIpv4(tcpPkt, protocol.IPH_PROTO_TCP, ipv4DstAddr)
 }

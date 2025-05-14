@@ -71,7 +71,8 @@ func BuildEthFrm(frm []byte, payload []byte, dstMac []byte, srcMac []byte, ethPr
 	// 上层数据
 	frm = append(frm, payload...)
 	// 小于60字节填充0
-	for i := 0; i < 60-len(frm); i++ {
+	n := 60 - len(frm)
+	for i := 0; i < n; i++ {
 		frm = append(frm, 0x00)
 	}
 	return frm, nil

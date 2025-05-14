@@ -1,0 +1,74 @@
+package mem
+
+import (
+	"encoding/binary"
+	"log"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/flswld/halo/cpu"
+)
+
+func TestRingBuffer(t *testing.T) {
+	mem := new(CHeap).AlignedMalloc(1 * MB)
+	rb := RingBufferCreate(mem, 1*MB)
+
+	var stop atomic.Bool
+
+	go func() {
+		cpu.BindCpuCore(0)
+		data := make([]byte, 16)
+		for i := 8; i <= 15; i++ {
+			data[i] = 0xff
+		}
+		seq := uint64(1)
+		for {
+			if stop.Load() {
+				break
+			}
+			binary.BigEndian.PutUint64(data[0:8], seq)
+			ok := WritePacket(rb, data, 16)
+			if !ok {
+				continue
+			}
+			seq++
+		}
+	}()
+
+	go func() {
+		cpu.BindCpuCore(1)
+		_data := make([]byte, 16)
+		_tt := time.Now()
+		_seq := uint64(1)
+		for {
+			if stop.Load() {
+				break
+			}
+			_len := uint16(0)
+			ReadPacket(rb, _data, &_len)
+			if _len == 0 {
+				continue
+			}
+			data := _data[0:_len]
+			if _len != 16 || data[15] != 0xff {
+				panic("???")
+			}
+			seq := binary.BigEndian.Uint64(data[0:8])
+			if seq&((1024*1024*8)-1) == 0 {
+				tt := time.Now()
+				ops := float64(seq-_seq) / (tt.Sub(_tt).Seconds())
+				log.Printf("speed: %.0f op/s\n", ops)
+				_tt = tt
+				_seq = seq
+			}
+		}
+	}()
+
+	time.Sleep(time.Second * 30)
+	stop.Store(true)
+	time.Sleep(time.Second)
+
+	RingBufferDestroy(rb)
+	new(CHeap).AlignedFree(mem)
+}

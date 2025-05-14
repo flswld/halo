@@ -3,7 +3,13 @@
 
 package kcp
 
-// #include "./cgo/xxhash.c"
+import (
+	"unsafe"
+)
+
+// #define XXH_STATIC_LINKING_ONLY
+// #define XXH_IMPLEMENTATION
+// #include "../../cgo/xxhash.h"
 import "C"
 
 func byte_check_hash(data []byte) uint32 {
@@ -13,9 +19,7 @@ func byte_check_hash(data []byte) uint32 {
 	case 1:
 		return 0
 	case 2:
-		d := C.CBytes(data)
-		h := C.XXH3_64bits(d, C.size_t(len(data)))
-		C.free(d)
+		h := C.XXH3_64bits(unsafe.Pointer(&data[0]), C.size_t(len(data)))
 		return uint32(h)
 	default:
 		return 0

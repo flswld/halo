@@ -21,6 +21,8 @@ const char *VERSION = "1.0.0";
 #include <rte_kni.h>
 #include <rte_malloc.h>
 
+#include "ring_buffer.h"
+
 #define KNI_ENET_HEADER_SIZE 14
 #define KNI_ENET_FCS_SIZE 4
 #define KNI_RX_RING_SIZE 1024
@@ -34,10 +36,8 @@ const char *VERSION = "1.0.0";
 #define TX_RING_SIZE 1024
 #define BURST_SIZE 32
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
-#define RTE_DEV_NAME_MAX_LEN 512
 
-_Atomic
-bool dpdk_start = false;
+_Atomic bool dpdk_start = false;
 
 int ring_buffer_size = 0;
 bool debug = false;
@@ -45,13 +45,10 @@ bool idle_sleep = false;
 bool single_core = false;
 
 struct ring_buffer {
-    uint8_t *mem_send_head;
-    uint8_t *mem_send_cur;
-    uint8_t *mem_recv_head;
-    uint8_t *mem_recv_cur;
-    volatile uint8_t *send_pos_pointer;
-    volatile uint8_t *recv_pos_pointer;
-    uint64_t size;
+    void *send_ring_mem;
+    void *recv_ring_mem;
+    ring_buffer_t *send_ring_buffer;
+    ring_buffer_t *recv_ring_buffer;
 };
 
 int port_count = 0;
@@ -63,196 +60,38 @@ struct rte_eth_stats *port_old_stats = NULL;
 static struct rte_eth_conf port_conf_default = {0};
 static struct rte_kni *kni;
 struct rte_mempool *mbuf_pool = NULL;
-_Atomic
-bool running = false;
+_Atomic bool running = false;
 
-/*
-0				8				16			24				32				...
-+---------------------------------------------------------------------------+
-|	len low		|	len high	|	finish	|	mem align	|	raw data	|
-+---------------------------------------------------------------------------+
-*/
-
-// 发送缓冲区头部指针位置
-void *cgo_mem_send_head_pointer(const int port_index) {
-    return port_ring_buffer[port_index].mem_send_head;
+ring_buffer_t *cgo_port_send_ring_buffer(const int port_index) {
+    return port_ring_buffer[port_index].send_ring_buffer;
 }
 
-// 接收缓冲区头部指针位置
-void *cgo_mem_recv_head_pointer(const int port_index) {
-    return port_ring_buffer[port_index].mem_recv_head;
+ring_buffer_t *cgo_port_recv_ring_buffer(const int port_index) {
+    return port_ring_buffer[port_index].recv_ring_buffer;
 }
 
-// 发送缓冲区当前已读指针位置
-void **cgo_send_pos_pointer_addr(const int port_index) {
-    return (void **) &port_ring_buffer[port_index].send_pos_pointer;
+ring_buffer_t *cgo_kni_send_ring_buffer() {
+    return kni_ring_buffer.send_ring_buffer;
 }
 
-// 接收缓冲区当前已读指针位置
-void **cgo_recv_pos_pointer_addr(const int port_index) {
-    return (void **) &port_ring_buffer[port_index].recv_pos_pointer;
-}
-
-// kni发送缓冲区头部指针位置
-void *cgo_kni_mem_send_head_pointer() {
-    return kni_ring_buffer.mem_send_head;
-}
-
-// kni接收缓冲区头部指针位置
-void *cgo_kni_mem_recv_head_pointer() {
-    return kni_ring_buffer.mem_recv_head;
-}
-
-// kni发送缓冲区当前已读指针位置
-void **cgo_kni_send_pos_pointer_addr() {
-    return (void **) &kni_ring_buffer.send_pos_pointer;
-}
-
-// kni接收缓冲区当前已读指针位置
-void **cgo_kni_recv_pos_pointer_addr() {
-    return (void **) &kni_ring_buffer.recv_pos_pointer;
+ring_buffer_t *cgo_kni_recv_ring_buffer() {
+    return kni_ring_buffer.recv_ring_buffer;
 }
 
 // 写入接收缓冲区
-void write_recv_mem(struct ring_buffer *buffer, const uint8_t *data, const uint16_t len) {
-    if (buffer->mem_recv_cur == NULL) {
-        buffer->mem_recv_cur = buffer->mem_recv_head;
-    }
-    if (len > 1514) {
-        return;
-    }
-    // 4字节头部
-    uint8_t head[4] = {(uint8_t) len, (uint8_t) (len >> 8), 0x00, 0x00};
-    _Atomic
-    uint32_t *head_ptr = (uint32_t *) buffer->mem_recv_cur;
-    uint16_t _len = len + 4;
-    // 内存对齐
-    uint8_t aling_size = _len % 4;
-    if (aling_size != 0) {
-        aling_size = 4 - aling_size;
-    }
-    _len += aling_size;
-    const int32_t overflow = (int32_t) buffer->mem_recv_cur + (int32_t) _len - ((int32_t) buffer->mem_recv_head + (int32_t) buffer->size);
-    if (debug) {
-        printf("[write_recv_mem] buffer: %p, overflow: %d, len: %d, mem_recv_cur: %p, mem_recv_head: %p, recv_pos_pointer: %p\n", buffer, overflow, _len,
-               buffer->mem_recv_cur, buffer->mem_recv_head, buffer->recv_pos_pointer);
-    }
-    if (overflow >= 0) {
-        // 有溢出
-        if (buffer->mem_recv_cur < buffer->recv_pos_pointer) {
-            // 已经处于读写指针交叉状态 丢弃数据
-            return;
-        }
-        if (overflow >= buffer->recv_pos_pointer - buffer->mem_recv_head) {
-            // 即使进入读写指针交叉状态 剩余内存依然不足 丢弃数据
-            return;
-        }
-        // 写入头部 原子操作
-        uint32_t head_u32 = ((uint32_t) head[0] << 0) + ((uint32_t) head[1] << 8) + ((uint32_t) head[2] << 16) + ((uint32_t) head[3] << 24);
-        atomic_store(head_ptr, head_u32);
-        if (_len - overflow > 4) {
-            // 拷贝前半段数据
-            memcpy(buffer->mem_recv_cur + 4, data, len - overflow);
-        }
-        buffer->mem_recv_cur = buffer->mem_recv_head;
-        if (overflow > 0) {
-            // 拷贝后半段数据
-            memcpy(buffer->mem_recv_cur, data + (len - overflow), overflow);
-            buffer->mem_recv_cur += overflow;
-            if (buffer->mem_recv_cur >= buffer->mem_recv_head + (int32_t) buffer->size) {
-                buffer->mem_recv_cur = buffer->mem_recv_head;
-            }
-        }
-    } else {
-        // 无溢出
-        if (buffer->mem_recv_cur < buffer->recv_pos_pointer && buffer->mem_recv_cur + _len >= buffer->recv_pos_pointer) {
-            // 状态下剩余内存不足 丢弃数据
-            return;
-        }
-        // 写入头部 原子操作
-        uint32_t head_u32 = ((uint32_t) head[0] << 0) + ((uint32_t) head[1] << 8) + ((uint32_t) head[2] << 16) + ((uint32_t) head[3] << 24);
-        atomic_store(head_ptr, head_u32);
-        memcpy(buffer->mem_recv_cur + 4, data, len);
-        buffer->mem_recv_cur += _len;
-        if (buffer->mem_recv_cur >= buffer->mem_recv_head + (int32_t) buffer->size) {
-            buffer->mem_recv_cur = buffer->mem_recv_head;
-        }
-    }
-    // 将后面的数据长度与写入完成标识置为0x00
-    _Atomic
-    uint32_t *next_head_ptr = (uint32_t *) buffer->mem_recv_cur;
-    atomic_store(next_head_ptr, 0x00);
-    // 修改写入完成标识 原子操作
-    head[2] = 0x01;
-    uint32_t head_u32 = ((uint32_t) head[0] << 0) + ((uint32_t) head[1] << 8) + ((uint32_t) head[2] << 16) + ((uint32_t) head[3] << 24);
-    atomic_store(head_ptr, head_u32);
+void write_recv_mem(const struct ring_buffer *buffer, const uint8_t *data, const uint16_t len) {
+    write_packet(buffer->recv_ring_buffer, data, len);
 }
 
 // 读取发送缓冲区
-void read_send_mem(struct ring_buffer *buffer, uint8_t *data, uint16_t *len) {
-    if (buffer->mem_send_cur == NULL) {
-        buffer->mem_send_cur = buffer->mem_send_head;
-    }
-    *len = 0;
-    // 读取头部 原子操作
-    _Atomic
-    uint32_t *head_ptr = (uint32_t *) buffer->mem_send_cur;
-    const uint32_t head_u32 = atomic_load(head_ptr);
-    *len = (uint16_t) head_u32;
-    if (*len == 0) {
-        // 没有新数据
-        return;
-    }
-    const uint8_t finish_flag = head_u32 >> 16;
-    if (finish_flag == 0x00) {
-        // 数据尚未写入完成
+void read_send_mem(const struct ring_buffer *buffer, uint8_t *data, uint16_t *len) {
+    const bool ok = read_packet(buffer->send_ring_buffer, data, len);
+    if (!ok) {
         *len = 0;
-        return;
     }
-    buffer->mem_send_cur += 4;
-    if (buffer->mem_send_cur >= buffer->mem_send_head + (int32_t) buffer->size) {
-        buffer->mem_send_cur = buffer->mem_send_head;
-    }
-    const int32_t overflow = (int32_t) buffer->mem_send_cur + (int32_t) *len - ((int32_t) buffer->mem_send_head + (int32_t) buffer->size);
-    if (debug) {
-        printf("[read_send_mem] buffer: %p, overflow: %d, len: %d, mem_send_cur: %p, mem_send_head: %p, send_pos_pointer: %p\n", buffer, overflow, *len,
-               buffer->mem_send_cur, buffer->mem_send_head, buffer->send_pos_pointer);
-    }
-    if (overflow >= 0) {
-        // 拷贝前半段数据
-        memcpy(data, buffer->mem_send_cur, *len - overflow);
-        buffer->mem_send_cur = buffer->mem_send_head;
-        if (overflow > 0) {
-            // 拷贝后半段数据
-            memcpy(data + (*len - overflow), buffer->mem_send_cur, overflow);
-            // 内存对齐
-            uint8_t aling_size = overflow % 4;
-            if (aling_size != 0) {
-                aling_size = 4 - aling_size;
-            }
-            buffer->mem_send_cur += overflow + aling_size;
-            if (buffer->mem_send_cur >= buffer->mem_send_head + (int32_t) buffer->size) {
-                buffer->mem_send_cur = buffer->mem_send_head;
-            }
-        }
-    } else {
-        memcpy(data, buffer->mem_send_cur, *len);
-        // 内存对齐
-        uint8_t aling_size = *len % 4;
-        if (aling_size != 0) {
-            aling_size = 4 - aling_size;
-        }
-        buffer->mem_send_cur += *len + aling_size;
-        if (buffer->mem_send_cur >= buffer->mem_send_head + (int32_t) buffer->size) {
-            buffer->mem_send_cur = buffer->mem_send_head;
-        }
-    }
-    _Atomic
-    uint64_t *send_pos_pointer = (uint64_t *) &buffer->send_pos_pointer;
-    atomic_store(send_pos_pointer, (uint64_t)buffer->mem_send_cur);
 }
 
-static int kni_change_mtu(uint16_t port_id, unsigned int new_mtu) {
+static int kni_change_mtu(const uint16_t port_id, const unsigned int new_mtu) {
     if (!rte_eth_dev_is_valid_port(port_id)) {
         RTE_LOG(ERR, APP, "invalid port id: %u\n", port_id);
         return -EINVAL;
@@ -360,12 +199,6 @@ void cgo_exit_signal_handler(void) {
 
 // 初始化网口 配置收发队列
 int port_init(uint16_t port_id) {
-    uint8_t nb_ports = rte_eth_dev_count();
-    if (port_id < 0 || port_id >= nb_ports) {
-        RTE_LOG(ERR, APP, "port is not right\n");
-        return -1;
-    }
-
     struct rte_eth_conf port_conf = port_conf_default;
     port_conf.rxmode.max_rx_pkt_len = ETHER_MAX_LEN;
 
@@ -439,8 +272,8 @@ int lcore_misc(void *arg) {
 
 bool eth_rx(const int port_index, const uint16_t port_id) {
     // 接收多个网卡数据帧
-    struct rte_mbuf *bufs_recv[BURST_SIZE];
-    const uint16_t nb_rx = rte_eth_rx_burst(port_id, 0, bufs_recv, BURST_SIZE);
+    struct rte_mbuf *mbuf_recv[BURST_SIZE];
+    const uint16_t nb_rx = rte_eth_rx_burst(port_id, 0, mbuf_recv, BURST_SIZE);
 
     if (idle_sleep) {
         // 无包时短暂睡眠节省CPU资源
@@ -450,21 +283,21 @@ bool eth_rx(const int port_index, const uint16_t port_id) {
     }
 
     // 有网卡接收数据
-    if (likely(nb_rx != 0)) {
+    if (likely(nb_rx > 0)) {
         for (int i = 0; i < nb_rx; i++) {
-            const uint8_t *pktbuf = rte_pktmbuf_mtod(bufs_recv[i], uint8_t *);
+            const uint8_t *recv_data = rte_pktmbuf_mtod(mbuf_recv[i], uint8_t *);
+            // 环状缓冲区数据发送
+            const uint16_t recv_len = mbuf_recv[i]->data_len;
+            write_recv_mem(&port_ring_buffer[port_index], recv_data, recv_len);
             if (debug) {
                 // 打印网卡接收到的原始数据
-                printf("[nic recv], port_index: %d, len: %d, data: ", port_index, bufs_recv[i]->data_len);
-                for (int j = 0; j < bufs_recv[i]->data_len; j++) {
-                    printf("%02x", pktbuf[j]);
+                printf("[nic recv], port_index: %d, len: %d, data: ", port_index, mbuf_recv[i]->data_len);
+                for (int j = 0; j < mbuf_recv[i]->data_len; j++) {
+                    printf("%02x", recv_data[j]);
                 }
                 printf("\n\n");
             }
-            // 环状缓冲区数据发送
-            const uint16_t ring_send_len = bufs_recv[i]->data_len;
-            write_recv_mem(&port_ring_buffer[port_index], pktbuf, ring_send_len);
-            rte_pktmbuf_free(bufs_recv[i]);
+            rte_pktmbuf_free(mbuf_recv[i]);
         }
     }
     return true;
@@ -472,32 +305,32 @@ bool eth_rx(const int port_index, const uint16_t port_id) {
 
 bool kni_rx() {
     // KNI数据接收
-    struct rte_mbuf *bufs_kni_recv[BURST_SIZE];
-    const uint16_t nb_kni_rx = rte_kni_rx_burst(kni, bufs_kni_recv, BURST_SIZE);
+    struct rte_mbuf *mbuf_recv[BURST_SIZE];
+    const uint16_t nb_rx = rte_kni_rx_burst(kni, mbuf_recv, BURST_SIZE);
 
     if (idle_sleep) {
         // 无包时短暂睡眠节省CPU资源
-        if (unlikely(nb_kni_rx == 0)) {
+        if (unlikely(nb_rx == 0)) {
             return false;
         }
     }
 
     // 有KNI接收数据
-    if (likely(nb_kni_rx != 0)) {
-        for (int i = 0; i < nb_kni_rx; i++) {
-            const uint8_t *pktbuf = rte_pktmbuf_mtod(bufs_kni_recv[i], uint8_t *);
+    if (likely(nb_rx > 0)) {
+        for (int i = 0; i < nb_rx; i++) {
+            const uint8_t *recv_data = rte_pktmbuf_mtod(mbuf_recv[i], uint8_t *);
+            // KNI环状缓冲区数据发送
+            const uint16_t recv_len = mbuf_recv[i]->data_len;
+            write_recv_mem(&kni_ring_buffer, recv_data, recv_len);
             if (debug) {
                 // 打印KNI接收到的原始数据
-                printf("[kni recv], len: %d, data: ", bufs_kni_recv[i]->data_len);
-                for (int j = 0; j < bufs_kni_recv[i]->data_len; j++) {
-                    printf("%02x", pktbuf[j]);
+                printf("[kni recv], len: %d, data: ", mbuf_recv[i]->data_len);
+                for (int j = 0; j < mbuf_recv[i]->data_len; j++) {
+                    printf("%02x", recv_data[j]);
                 }
                 printf("\n\n");
             }
-            // KNI环状缓冲区数据发送
-            const uint16_t ring_send_len = bufs_kni_recv[i]->data_len;
-            write_recv_mem(&kni_ring_buffer, pktbuf, ring_send_len);
-            rte_pktmbuf_free(bufs_kni_recv[i]);
+            rte_pktmbuf_free(mbuf_recv[i]);
         }
     }
     return true;
@@ -522,7 +355,7 @@ int lcore_rx(void *arg) {
         const bool have_rx_data = eth_rx(port_index, port_id);
         const bool have_kni_rx_data = kni_rx();
         if (!have_rx_data && !have_kni_rx_data) {
-            usleep(1000 * 1);
+            usleep(1000 * 10);
         }
         if (debug) {
             if (loop_times % (1000 * 1000 * 10) == 0) {
@@ -539,53 +372,44 @@ int lcore_rx(void *arg) {
 
 bool eth_tx(const int port_index, const uint16_t port_id) {
     // 环状缓冲区数据接收
-    uint8_t ring_recv_buf[BURST_SIZE][1514];
-    uint16_t ring_recv_buf_len[BURST_SIZE];
-    int ring_recv_size = 0;
+    struct rte_mbuf *mbuf_send[BURST_SIZE];
+    int mbuf_send_size = 0;
     for (int i = 0; i < BURST_SIZE; i++) {
-        read_send_mem(&port_ring_buffer[port_index], ring_recv_buf[i], &ring_recv_buf_len[i]);
-        if (unlikely(ring_recv_buf_len[i] == 0)) {
+        mbuf_send[i] = rte_pktmbuf_alloc(mbuf_pool);
+        uint8_t *send_data = (uint8_t *) rte_pktmbuf_append(mbuf_send[i], 1514);
+        uint16_t send_len = 0;
+        read_send_mem(&port_ring_buffer[port_index], send_data, &send_len);
+        if (unlikely(send_len == 0)) {
+            rte_pktmbuf_free(mbuf_send[i]);
             break;
         }
-        ring_recv_size++;
+        rte_pktmbuf_trim(mbuf_send[i], 1514 - send_len);
+        mbuf_send_size++;
+        if (debug) {
+            // 打印环状缓冲区数据
+            printf("[ring recv], port_index: %d, len: %d, data: ", port_index, send_len);
+            for (int j = 0; j < send_len; j++) {
+                printf("%02x", send_data[j]);
+            }
+            printf("\n\n");
+        }
     }
 
     if (idle_sleep) {
         // 无包时短暂睡眠节省CPU资源
-        if (unlikely(ring_recv_size == 0)) {
+        if (unlikely(mbuf_send_size == 0)) {
             return false;
         }
     }
 
     // 有环状缓冲区数据
-    if (likely(ring_recv_size > 0)) {
-        if (debug) {
-            // 打印环状缓冲区数据
-            for (int i = 0; i < ring_recv_size; i++) {
-                printf("[ring recv], port_index: %d, len: %d, data: ", port_index, ring_recv_buf_len[i]);
-                for (int j = 0; j < ring_recv_buf_len[i]; j++) {
-                    printf("%02x", ring_recv_buf[i][j]);
-                }
-                printf("\n\n");
-            }
-        }
-
-        struct rte_mbuf *bufs_send[BURST_SIZE];
-
-        // 数据拷贝
-        for (int i = 0; i < ring_recv_size; i++) {
-            bufs_send[i] = rte_pktmbuf_alloc(mbuf_pool);
-            uint8_t *send_data = (uint8_t *) rte_pktmbuf_append(bufs_send[i], ring_recv_buf_len[i] * sizeof(uint8_t));
-            memcpy(send_data, ring_recv_buf[i], ring_recv_buf_len[i]);
-        }
-
+    if (likely(mbuf_send_size > 0)) {
         // 发送多个网卡数据帧
-        const uint16_t nb_tx = rte_eth_tx_burst(port_id, 0, bufs_send, ring_recv_size);
-
-        if (unlikely(nb_tx < ring_recv_size)) {
+        const uint16_t nb_tx = rte_eth_tx_burst(port_id, 0, mbuf_send, mbuf_send_size);
+        if (unlikely(nb_tx < mbuf_send_size)) {
             // 把没发送成功的mbuf释放掉
-            for (int i = nb_tx; i < ring_recv_size; i++) {
-                rte_pktmbuf_free(bufs_send[i]);
+            for (int i = nb_tx; i < mbuf_send_size; i++) {
+                rte_pktmbuf_free(mbuf_send[i]);
             }
         }
     }
@@ -595,53 +419,44 @@ bool eth_tx(const int port_index, const uint16_t port_id) {
 
 bool kni_tx() {
     // KNI环状缓冲区数据接收
-    uint8_t kni_ring_recv_buf[BURST_SIZE][1514];
-    uint16_t kni_ring_recv_buf_len[BURST_SIZE];
-    int kni_ring_recv_size = 0;
+    struct rte_mbuf *mbuf_send[BURST_SIZE];
+    int mbuf_send_size = 0;
     for (int i = 0; i < BURST_SIZE; i++) {
-        read_send_mem(&kni_ring_buffer, kni_ring_recv_buf[i], &kni_ring_recv_buf_len[i]);
-        if (unlikely(kni_ring_recv_buf_len[i] == 0)) {
+        mbuf_send[i] = rte_pktmbuf_alloc(mbuf_pool);
+        uint8_t *send_data = (uint8_t *) rte_pktmbuf_append(mbuf_send[i], 1514);
+        uint16_t send_len = 0;
+        read_send_mem(&kni_ring_buffer, send_data, &send_len);
+        if (unlikely(send_len == 0)) {
+            rte_pktmbuf_free(mbuf_send[i]);
             break;
         }
-        kni_ring_recv_size++;
+        rte_pktmbuf_trim(mbuf_send[i], 1514 - send_len);
+        mbuf_send_size++;
+        if (debug) {
+            // 打印KNI环状缓冲区数据
+            printf("[kni ring recv], len: %d, data: ", send_len);
+            for (int j = 0; j < send_len; j++) {
+                printf("%02x", send_data[j]);
+            }
+            printf("\n\n");
+        }
     }
 
     if (idle_sleep) {
         // 无包时短暂睡眠节省CPU资源
-        if (unlikely(kni_ring_recv_size == 0)) {
+        if (unlikely(mbuf_send_size == 0)) {
             return false;
         }
     }
 
     // 有KNI环状缓冲区数据
-    if (likely(kni_ring_recv_size > 0)) {
-        if (debug) {
-            // 打印KNI环状缓冲区数据
-            for (int i = 0; i < kni_ring_recv_size; i++) {
-                printf("[kni ring recv], len: %d, data: ", kni_ring_recv_buf_len[i]);
-                for (int j = 0; j < kni_ring_recv_buf_len[i]; j++) {
-                    printf("%02x", kni_ring_recv_buf[i][j]);
-                }
-                printf("\n\n");
-            }
-        }
-
-        struct rte_mbuf *bufs_send[BURST_SIZE];
-
-        // 数据拷贝
-        for (int i = 0; i < kni_ring_recv_size; i++) {
-            bufs_send[i] = rte_pktmbuf_alloc(mbuf_pool);
-            uint8_t *send_data = (uint8_t *) rte_pktmbuf_append(bufs_send[i], kni_ring_recv_buf_len[i] * sizeof(uint8_t));
-            memcpy(send_data, kni_ring_recv_buf[i], kni_ring_recv_buf_len[i]);
-        }
-
+    if (likely(mbuf_send_size > 0)) {
         // KNI数据发送
-        uint16_t nb_kni_tx = rte_kni_tx_burst(kni, bufs_send, kni_ring_recv_size);
-
-        if (unlikely(nb_kni_tx < kni_ring_recv_size)) {
+        const uint16_t nb_tx = rte_kni_tx_burst(kni, mbuf_send, mbuf_send_size);
+        if (unlikely(nb_tx < mbuf_send_size)) {
             // 把没发送成功的mbuf释放掉
-            for (int i = nb_kni_tx; i < kni_ring_recv_size; i++) {
-                rte_pktmbuf_free(bufs_send[i]);
+            for (int i = nb_tx; i < mbuf_send_size; i++) {
+                rte_pktmbuf_free(mbuf_send[i]);
             }
         }
     }
@@ -667,7 +482,7 @@ int lcore_tx(void *arg) {
         }
         const bool have_tx_data = eth_tx(port_index, port_id);
         if (!have_tx_data) {
-            usleep(1000 * 1);
+            usleep(1000 * 10);
         }
         if (debug) {
             if (loop_times % (1000 * 1000 * 10) == 0) {
@@ -699,7 +514,7 @@ int lcore_misc_rx_tx() {
             }
         }
         if (all_port_idle) {
-            usleep(1000 * 1);
+            usleep(1000 * 10);
         }
     }
 
@@ -790,13 +605,13 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
 
     atomic_store(&running, true);
 
-    const uint8_t nb_ports = rte_eth_dev_count();
-    for (int i = 0; i < nb_ports; i++) {
+    uint64_t p;
+    RTE_ETH_FOREACH_DEV(p) {
         char dev_name[RTE_DEV_NAME_MAX_LEN];
-        rte_eth_dev_get_name_by_port(i, dev_name);
-        printf("port number: %d, port pci: %s, ", i, dev_name);
+        rte_eth_dev_get_name_by_port(p, dev_name);
+        printf("port number: %lu, port pci: %s, ", p, dev_name);
         struct ether_addr dev_eth_addr = {0};
-        rte_eth_macaddr_get(i, &dev_eth_addr);
+        rte_eth_macaddr_get(p, &dev_eth_addr);
         printf("mac address: %02X:%02X:%02X:%02X:%02X:%02X\n",
                dev_eth_addr.addr_bytes[0],
                dev_eth_addr.addr_bytes[1],
@@ -832,34 +647,28 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
             rte_exit(EXIT_FAILURE, "port init failed, port: %u\n", port_id_list[i]);
         }
         // 分配环状缓冲区内存
-        port_ring_buffer[i].mem_send_head = rte_malloc("send_ring_buffer", ring_buffer_size, 0);
-        if (port_ring_buffer[i].mem_send_head == NULL) {
+        port_ring_buffer[i].send_ring_mem = rte_malloc("send_ring_buffer", ring_buffer_size, CACHE_LINE_SIZE);
+        port_ring_buffer[i].send_ring_buffer = ring_buffer_create(port_ring_buffer[i].send_ring_mem, ring_buffer_size);
+        if (port_ring_buffer[i].send_ring_buffer == NULL) {
             rte_exit(EXIT_FAILURE, "send ring buffer create failed\n");
         }
-        port_ring_buffer[i].mem_send_cur = NULL;
-        port_ring_buffer[i].mem_recv_head = rte_malloc("recv_ring_buffer", ring_buffer_size, 0);
-        if (port_ring_buffer[i].mem_recv_head == NULL) {
+        port_ring_buffer[i].recv_ring_mem = rte_malloc("recv_ring_buffer", ring_buffer_size, CACHE_LINE_SIZE);
+        port_ring_buffer[i].recv_ring_buffer = ring_buffer_create(port_ring_buffer[i].recv_ring_mem, ring_buffer_size);
+        if (port_ring_buffer[i].recv_ring_buffer == NULL) {
             rte_exit(EXIT_FAILURE, "recv ring buffer create failed\n");
         }
-        port_ring_buffer[i].mem_recv_cur = NULL;
-        port_ring_buffer[i].send_pos_pointer = port_ring_buffer[i].mem_send_head;
-        port_ring_buffer[i].recv_pos_pointer = port_ring_buffer[i].mem_recv_head;
-        port_ring_buffer[i].size = ring_buffer_size;
     }
     // kni分配环状缓冲区内存
-    kni_ring_buffer.mem_send_head = rte_malloc("send_ring_buffer", ring_buffer_size, 0);
-    if (kni_ring_buffer.mem_send_head == NULL) {
+    kni_ring_buffer.send_ring_mem = rte_malloc("send_ring_buffer", ring_buffer_size, CACHE_LINE_SIZE);
+    kni_ring_buffer.send_ring_buffer = ring_buffer_create(kni_ring_buffer.send_ring_mem, ring_buffer_size);
+    if (kni_ring_buffer.send_ring_buffer == NULL) {
         rte_exit(EXIT_FAILURE, "send ring buffer create failed\n");
     }
-    kni_ring_buffer.mem_send_cur = NULL;
-    kni_ring_buffer.mem_recv_head = rte_malloc("recv_ring_buffer", ring_buffer_size, 0);
-    if (kni_ring_buffer.mem_recv_head == NULL) {
+    kni_ring_buffer.recv_ring_mem = rte_malloc("recv_ring_buffer", ring_buffer_size, CACHE_LINE_SIZE);
+    kni_ring_buffer.recv_ring_buffer = ring_buffer_create(kni_ring_buffer.recv_ring_mem, ring_buffer_size);
+    if (kni_ring_buffer.recv_ring_buffer == NULL) {
         rte_exit(EXIT_FAILURE, "recv ring buffer create failed\n");
     }
-    kni_ring_buffer.mem_recv_cur = NULL;
-    kni_ring_buffer.send_pos_pointer = kni_ring_buffer.mem_send_head;
-    kni_ring_buffer.recv_pos_pointer = kni_ring_buffer.mem_recv_head;
-    kni_ring_buffer.size = ring_buffer_size;
     printf("\n");
 
     rte_kni_init(1);
@@ -888,9 +697,15 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
     }
     for (int i = 0; i < port_count; i++) {
         rte_eth_dev_stop(port_id_list[i]);
-        rte_free(port_ring_buffer[i].mem_send_head);
-        rte_free(port_ring_buffer[i].mem_recv_head);
+        rte_free(port_ring_buffer[i].send_ring_mem);
+        rte_free(port_ring_buffer[i].recv_ring_mem);
+        ring_buffer_destroy(port_ring_buffer[i].send_ring_buffer);
+        ring_buffer_destroy(port_ring_buffer[i].recv_ring_buffer);
     }
+    rte_free(kni_ring_buffer.send_ring_mem);
+    rte_free(kni_ring_buffer.recv_ring_mem);
+    ring_buffer_destroy(kni_ring_buffer.send_ring_buffer);
+    ring_buffer_destroy(kni_ring_buffer.recv_ring_buffer);
     free(port_id_list);
     free(port_ring_buffer);
     free(port_old_stats);

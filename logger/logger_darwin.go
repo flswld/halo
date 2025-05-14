@@ -3,6 +3,10 @@
 
 package logger
 
+import (
+	"strconv"
+)
+
 /*
 #include <pthread.h>
 
@@ -13,7 +17,6 @@ static unsigned long long thread_id() {
 }
 */
 import "C"
-import "strconv"
 
 func (l *Logger) getThreadId() (threadId string) {
 	return strconv.FormatUint(uint64(C.thread_id()), 10)

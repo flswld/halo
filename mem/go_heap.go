@@ -5,16 +5,16 @@ import (
 	"unsafe"
 )
 
-type _type uint8
-
-//go:linkname mallocgc runtime.mallocgc
-func mallocgc(size uintptr, typ *_type, needzero bool) unsafe.Pointer
-
 type GoHeap struct{}
 
 func NewGoHeap() GoHeap {
 	return struct{}{}
 }
+
+type _type struct{}
+
+//go:linkname mallocgc runtime.mallocgc
+func mallocgc(size uintptr, typ *_type, needzero bool) unsafe.Pointer
 
 func (h GoHeap) Malloc(size uint64) unsafe.Pointer {
 	p := mallocgc(uintptr(size), nil, true)

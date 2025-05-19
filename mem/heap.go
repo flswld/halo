@@ -50,12 +50,18 @@ func SizeOf[T any]() uint64 {
 	return uint64(unsafe.Sizeof(t))
 }
 
-func Offset(p unsafe.Pointer, offset uint64) unsafe.Pointer {
-	return unsafe.Pointer(uintptr(p) + uintptr(offset))
+func Offset(p unsafe.Pointer, offset int64) unsafe.Pointer {
+	if offset > 0 {
+		return unsafe.Pointer(uintptr(p) + uintptr(offset))
+	} else if offset < 0 {
+		return unsafe.Pointer(uintptr(p) - uintptr(-offset))
+	} else {
+		return p
+	}
 }
 
-func OffsetType[T any](t *T, offset uint64) *T {
-	return (*T)(Offset(unsafe.Pointer(t), offset*SizeOf[T]()))
+func OffsetType[T any](t *T, offset int64) *T {
+	return (*T)(Offset(unsafe.Pointer(t), offset*int64(SizeOf[T]())))
 }
 
 //go:linkname memmove runtime.memmove

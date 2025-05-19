@@ -17,7 +17,7 @@ func TestStaticHeap(t *testing.T) {
 			panic("???")
 		}
 		for i := 0; i < 1*MB; i++ {
-			v := (*uint8)(Offset(ptr, uint64(i)))
+			v := (*uint8)(Offset(ptr, int64(i)))
 			*v = 0xFF
 		}
 		ptrList[i] = ptr
@@ -25,7 +25,7 @@ func TestStaticHeap(t *testing.T) {
 	time.Sleep(time.Second * 5)
 	for _, ptr := range ptrList {
 		for i := 0; i < 1*MB; i++ {
-			v := (*uint8)(Offset(ptr, uint64(i)))
+			v := (*uint8)(Offset(ptr, int64(i)))
 			if *v != 0xFF {
 				panic("???")
 			}

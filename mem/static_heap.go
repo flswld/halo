@@ -45,7 +45,13 @@ type StaticHeap struct {
 }
 
 func NewStaticHeap(memory unsafe.Pointer, size uint64) *StaticHeap {
+	if memory == nil {
+		return nil
+	}
 	headerSize := SizeOf[StaticHeap]()
+	if size < headerSize {
+		return nil
+	}
 	h := (*StaticHeap)(memory)
 	b := (*block)(unsafe.Pointer(uintptr(memory) + uintptr(headerSize)))
 	b.header.setSize(size - headerSize)

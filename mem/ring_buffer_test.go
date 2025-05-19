@@ -11,8 +11,8 @@ import (
 )
 
 func TestRingBuffer(t *testing.T) {
-	mem := new(CHeap).AlignedMalloc(1 * MB)
-	rb := RingBufferCreate(mem, 1*MB)
+	mem := new(CHeap).AlignedMalloc(SizeOf[RingBuffer]() + 1*MB)
+	rb := RingBufferCreate(mem, uint32(SizeOf[RingBuffer]()+1*MB))
 
 	var stop atomic.Bool
 

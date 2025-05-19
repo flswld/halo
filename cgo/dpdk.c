@@ -37,7 +37,8 @@ const char *VERSION = "1.0.0";
 #define BURST_SIZE 32
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
 
-_Atomic bool dpdk_start = false;
+_Atomic
+bool dpdk_start = false;
 
 int ring_buffer_size = 0;
 bool debug = false;
@@ -60,7 +61,8 @@ struct rte_eth_stats *port_old_stats = NULL;
 static struct rte_eth_conf port_conf_default = {0};
 static struct rte_kni *kni;
 struct rte_mempool *mbuf_pool = NULL;
-_Atomic bool running = false;
+_Atomic
+bool running = false;
 
 ring_buffer_t *cgo_port_send_ring_buffer(const int port_index) {
     return port_ring_buffer[port_index].send_ring_buffer;

@@ -7,6 +7,10 @@ import (
 )
 
 func (i *NetIf) RxUdp(ipv4Payload []byte, ipv4SrcAddr []byte) {
+	if i.CheckSumDisable {
+		ipv4Payload[6] = 0x00
+		ipv4Payload[7] = 0x00
+	}
 	udpPayload, udpSrcPort, udpDstPort, err := protocol.ParseUdpPkt(ipv4Payload, ipv4SrcAddr, i.IpAddr)
 	if err != nil {
 		Log(fmt.Sprintf("parse udp packet error: %v\n", err))
@@ -15,6 +19,9 @@ func (i *NetIf) RxUdp(ipv4Payload []byte, ipv4SrcAddr []byte) {
 	if i.HandleUdp != nil {
 		i.HandleUdp(udpPayload, udpSrcPort, udpDstPort, ipv4SrcAddr)
 		return
+	}
+	if udpDstPort == DhcpClientPort || udpDstPort == DhcpServerPort {
+		i.RxDhcp(udpPayload, udpSrcPort, udpDstPort, ipv4SrcAddr)
 	}
 }
 

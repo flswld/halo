@@ -28,7 +28,7 @@ func Log(msg string) {
 }
 
 type Config struct {
-	DpdkCpuCoreList []int    // dpdk使用的核心编号列表 主线程第一个核心 杂项线程第二个核心 每个网卡两个核心
+	DpdkCpuCoreList []int    // dpdk使用的核心编号列表 主线程第一个核心 每个网卡两个核心
 	DpdkMemChanNum  int      // dpdk内存通道数
 	RingBufferSize  int      // 环状缓冲区大小
 	PortIdList      []int    // 使用的网卡id列表
@@ -37,6 +37,12 @@ type Config struct {
 	DebugLog        bool     // 收发包调试日志
 	IdleSleep       bool     // 空闲睡眠 降低cpu占用
 	SingleCore      bool     // 单核模式 只使用cpu0
+	KniEnabled      bool
+}
+
+type ring_buffer struct {
+	send_ring_buffer *C.ring_buffer_t
+	recv_ring_buffer *C.ring_buffer_t
 }
 
 var (
@@ -53,7 +59,7 @@ func Run(config *Config) {
 	conf = config
 	// 配置参数检查
 	if !conf.SingleCore {
-		if len(conf.DpdkCpuCoreList) < 2+len(conf.PortIdList)*2 {
+		if len(conf.DpdkCpuCoreList) < 1+len(conf.PortIdList)*2 {
 			panic("cpu core num not enough")
 		}
 	} else {
@@ -74,7 +80,7 @@ func Run(config *Config) {
 	go run_dpdk()
 	// 等待DPDK启动完成
 	for {
-		if C.dpdk_start == C.bool(true) {
+		if C.running == C.bool(true) {
 			break
 		}
 		time.Sleep(time.Second * 1)
@@ -86,13 +92,16 @@ func Run(config *Config) {
 		port_ring_buffer[port_index].recv_ring_buffer = C.cgo_port_recv_ring_buffer(C.int(port_index))
 		port_pkt_rx_buf[port_index] = make([]byte, 1514)
 	}
-	kni_ring_buffer.send_ring_buffer = C.cgo_kni_send_ring_buffer()
-	kni_ring_buffer.recv_ring_buffer = C.cgo_kni_recv_ring_buffer()
-	kni_pkt_rx_buf = make([]byte, 1514)
+	if conf.KniEnabled {
+		kni_ring_buffer.send_ring_buffer = C.cgo_kni_send_ring_buffer()
+		kni_ring_buffer.recv_ring_buffer = C.cgo_kni_recv_ring_buffer()
+		kni_pkt_rx_buf = make([]byte, 1514)
+		go kni_handle()
+	}
+	running.Store(true)
 	if conf.StatsLog {
 		go print_port_stats(conf.PortIdList)
 	}
-	running.Store(true)
 }
 
 // Exit 停止dpdk
@@ -112,8 +121,8 @@ func EthRxPkt(port_index int) (pkt []byte) {
 	pkt_rx_buf := port_pkt_rx_buf[port_index]
 	pkt_len := uint16(0)
 	buffer := &(port_ring_buffer[port_index])
-	read_recv_mem(buffer, pkt_rx_buf, &pkt_len)
-	if pkt_len == 0 {
+	ok := mem.ReadPacket((*mem.RingBuffer)(unsafe.Pointer(buffer.recv_ring_buffer)), pkt_rx_buf, &pkt_len)
+	if !ok {
 		if conf.IdleSleep {
 			time.Sleep(time.Millisecond * 10)
 		}
@@ -131,7 +140,7 @@ func EthRxPkt(port_index int) (pkt []byte) {
 func EthTxPkt(port_index int, pkt []byte) {
 	pkt_len := len(pkt)
 	buffer := &(port_ring_buffer[port_index])
-	write_send_mem(buffer, pkt, uint16(pkt_len))
+	mem.WritePacket((*mem.RingBuffer)(unsafe.Pointer(buffer.send_ring_buffer)), pkt, uint16(pkt_len))
 	if conf.DebugLog {
 		Log(fmt.Sprintf("[eth tx pkt] port_index: %v, len: %v, data: %02x\n", port_index, pkt_len, pkt))
 	}
@@ -139,11 +148,14 @@ func EthTxPkt(port_index int, pkt []byte) {
 
 // KniRxPkt KNI网卡收包
 func KniRxPkt() (pkt []byte) {
+	if !conf.KniEnabled {
+		return nil
+	}
 	pkt_rx_buf := kni_pkt_rx_buf
 	pkt_len := uint16(0)
 	buffer := &(kni_ring_buffer)
-	read_recv_mem(buffer, pkt_rx_buf, &pkt_len)
-	if pkt_len == 0 {
+	ok := mem.ReadPacket((*mem.RingBuffer)(unsafe.Pointer(buffer.recv_ring_buffer)), pkt_rx_buf, &pkt_len)
+	if !ok {
 		if conf.IdleSleep {
 			time.Sleep(time.Millisecond * 10)
 		}
@@ -159,9 +171,12 @@ func KniRxPkt() (pkt []byte) {
 
 // KniTxPkt KNI网卡发包
 func KniTxPkt(pkt []byte) {
+	if !conf.KniEnabled {
+		return
+	}
 	pkt_len := len(pkt)
 	buffer := &(kni_ring_buffer)
-	write_send_mem(buffer, pkt, uint16(pkt_len))
+	mem.WritePacket((*mem.RingBuffer)(unsafe.Pointer(buffer.send_ring_buffer)), pkt, uint16(pkt_len))
 	if conf.DebugLog {
 		Log(fmt.Sprintf("[kni tx pkt] len: %v, data: %02x\n", pkt_len, pkt))
 	}
@@ -175,12 +190,24 @@ func print_port_stats(port_index_list []int) {
 			ticker.Stop()
 			break
 		}
-		<-ticker.C
 		for _, port_index := range port_index_list {
 			var msg [1 * mem.KB]C.char
 			C.cgo_print_stats(C.int(port_index), (*C.char)(&msg[0]))
 			Log(C.GoString((*C.char)(&msg[0])))
 		}
+		<-ticker.C
+	}
+}
+
+func kni_handle() {
+	ticker := time.NewTicker(time.Millisecond * 100)
+	for {
+		if !running.Load() {
+			ticker.Stop()
+			break
+		}
+		C.cgo_kni_handle()
+		<-ticker.C
 	}
 }
 
@@ -236,26 +263,9 @@ func run_dpdk() {
 	config.debug_log = C.bool(conf.DebugLog)
 	config.idle_sleep = C.bool(conf.IdleSleep)
 	config.single_core = C.bool(conf.SingleCore)
+	config.kni_enabled = C.bool(conf.KniEnabled)
 	C.cgo_dpdk_main(&config)
 	C.free(unsafe.Pointer(config.eal_args))
 	C.free(unsafe.Pointer(config.cpu_core_list))
 	C.free(unsafe.Pointer(config.port_id_list))
-}
-
-type ring_buffer struct {
-	send_ring_buffer *C.ring_buffer_t
-	recv_ring_buffer *C.ring_buffer_t
-}
-
-// 写入发送缓冲区
-func write_send_mem(buffer *ring_buffer, data []uint8, len uint16) {
-	mem.WritePacket((*mem.RingBuffer)(unsafe.Pointer(buffer.send_ring_buffer)), data, len)
-}
-
-// 读取接收缓冲区
-func read_recv_mem(buffer *ring_buffer, data []uint8, len *uint16) {
-	ok := mem.ReadPacket((*mem.RingBuffer)(unsafe.Pointer(buffer.recv_ring_buffer)), data, len)
-	if !ok {
-		*len = 0
-	}
 }

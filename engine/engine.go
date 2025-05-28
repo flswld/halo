@@ -38,9 +38,13 @@ type NetIfConfig struct {
 	NatEnable           bool                         // 网络地址转换
 	NatType             int                          // 网络地址转换类型
 	NatPortMappingTable []*NatPortMappingEntryConfig // 网络地址转换端口映射表
-	EthRxFunc           func() (pkt []byte)          // 网卡收包方法
-	EthTxFunc           func(pkt []byte)             // 网卡发包方法
-	BindCpuCore         int                          // 绑定的cpu核心
+	DnsServerAddr       string
+	DhcpServerEnable    bool
+	DhcpClientEnable    bool
+	CheckSumDisable     bool
+	EthRxFunc           func() (pkt []byte) // 网卡收包方法
+	EthTxFunc           func(pkt []byte)    // 网卡发包方法
+	BindCpuCore         int                 // 绑定的cpu核心
 }
 
 // NatPortMappingEntryConfig NAT端口映射配置
@@ -62,28 +66,35 @@ type RoutingEntryConfig struct {
 
 // NetIf 网卡
 type NetIf struct {
-	Name                string                      // 接口名
-	MacAddr             []byte                      // mac地址
-	IpAddr              []byte                      // ip地址
-	NetworkMask         []byte                      // 子网掩码
-	EthRxFunc           func() (pkt []byte)         // 网卡收包方法
-	EthTxFunc           func(pkt []byte)            // 网卡发包方法
-	EthTxBuffer         []byte                      // 网卡发包缓冲区
-	EthTxLock           cpu.SpinLock                // 网卡发包锁
-	LoChan              chan []byte                 // 本地回环管道
-	Engine              *Engine                     // 归属Engine指针
-	ArpCacheTable       map[uint32][]byte           // arp缓存表 key:ip value:mac
-	ArpCacheTableLock   sync.RWMutex                // arp缓存表锁
-	NatEnable           bool                        // 是否开启nat
-	NatType             int                         // nat类型
-	NatWanFlowTable     map[NatWanFlowHash]*NatFlow // wan口回程包nat流映射表
-	NatFlowTable        map[NatFlowHash]*NatFlow    // nat流表
-	NatPortAlloc        map[uint32]*PortAlloc       // nat端口分配表 key:目的ip value:端口分配信息
-	NatPortMappingTable []*NatPortMappingEntry      // 网络地址转换端口映射表
-	NatTableLock        sync.RWMutex                // nat表锁
-	BindCpuCore         int                         // 绑定的cpu核心
-	HandleUdp           func(payload []byte, srcPort uint16, dstPort uint16, srcAddr []byte)
-	HandleTcp           func(payload []byte, srcPort uint16, dstPort uint16, seqNum uint32, ackNum uint32, flags uint8, srcAddr []byte)
+	Name                    string                      // 接口名
+	MacAddr                 []byte                      // mac地址
+	IpAddr                  []byte                      // ip地址
+	NetworkMask             []byte                      // 子网掩码
+	EthRxFunc               func() (pkt []byte)         // 网卡收包方法
+	EthTxFunc               func(pkt []byte)            // 网卡发包方法
+	EthTxBuffer             []byte                      // 网卡发包缓冲区
+	EthTxLock               cpu.SpinLock                // 网卡发包锁
+	LoChan                  chan []byte                 // 本地回环管道
+	Engine                  *Engine                     // 归属Engine指针
+	ArpCacheTable           map[uint32][]byte           // arp缓存表 key:ip value:mac
+	ArpCacheTableLock       sync.RWMutex                // arp缓存表锁
+	NatEnable               bool                        // 是否开启nat
+	NatType                 int                         // nat类型
+	NatWanFlowTable         map[NatWanFlowHash]*NatFlow // wan口回程包nat流映射表
+	NatFlowTable            map[NatFlowHash]*NatFlow    // nat流表
+	NatPortAlloc            map[uint32]*PortAlloc       // nat端口分配表 key:目的ip value:端口分配信息
+	NatPortMappingTable     []*NatPortMappingEntry      // 网络地址转换端口映射表
+	NatTableLock            sync.RWMutex                // nat表锁
+	DnsServerAddr           []byte
+	DhcpServerEnable        bool
+	DhcpLeaseMap            map[uint32]*DhcpLease
+	DhcpLock                sync.RWMutex
+	DhcpClientEnable        bool
+	DhcpClientTransactionId []byte
+	CheckSumDisable         bool
+	BindCpuCore             int // 绑定的cpu核心
+	HandleUdp               func(payload []byte, srcPort uint16, dstPort uint16, srcAddr []byte)
+	HandleTcp               func(payload []byte, srcPort uint16, dstPort uint16, seqNum uint32, ackNum uint32, flags uint8, srcAddr []byte)
 }
 
 // Engine 协议栈
@@ -110,34 +121,53 @@ func InitEngine(config *Config) (*Engine, error) {
 		if err != nil {
 			return nil, err
 		}
-		ipAddr, err := protocol.ParseIpAddr(netIfConfig.IpAddr)
-		if err != nil {
-			return nil, err
+		ipAddr := []byte{0x00, 0x00, 0x00, 0x00}
+		if netIfConfig.IpAddr != "" {
+			ipAddr, err = protocol.ParseIpAddr(netIfConfig.IpAddr)
+			if err != nil {
+				return nil, err
+			}
 		}
-		networkMask, err := protocol.ParseIpAddr(netIfConfig.NetworkMask)
-		if err != nil {
-			return nil, err
+		networkMask := []byte{0x00, 0x00, 0x00, 0x00}
+		if netIfConfig.NetworkMask != "" {
+			networkMask, err = protocol.ParseIpAddr(netIfConfig.NetworkMask)
+			if err != nil {
+				return nil, err
+			}
+		}
+		dnsServerAddr := []byte{0x00, 0x00, 0x00, 0x00}
+		if netIfConfig.DnsServerAddr != "" {
+			dnsServerAddr, err = protocol.ParseIpAddr(netIfConfig.DnsServerAddr)
+			if err != nil {
+				return nil, err
+			}
 		}
 		netIf := &NetIf{
-			Name:                netIfConfig.Name,
-			MacAddr:             macAddr,
-			IpAddr:              ipAddr,
-			NetworkMask:         networkMask,
-			EthRxFunc:           netIfConfig.EthRxFunc,
-			EthTxFunc:           netIfConfig.EthTxFunc,
-			EthTxBuffer:         make([]byte, 0, 1514),
-			LoChan:              make(chan []byte, 1024),
-			Engine:              r,
-			ArpCacheTable:       make(map[uint32][]byte),
-			NatEnable:           netIfConfig.NatEnable,
-			NatType:             netIfConfig.NatType,
-			NatWanFlowTable:     make(map[NatWanFlowHash]*NatFlow),
-			NatFlowTable:        make(map[NatFlowHash]*NatFlow),
-			NatPortAlloc:        make(map[uint32]*PortAlloc),
-			NatPortMappingTable: make([]*NatPortMappingEntry, 0),
-			BindCpuCore:         netIfConfig.BindCpuCore,
-			HandleUdp:           nil,
-			HandleTcp:           nil,
+			Name:                    netIfConfig.Name,
+			MacAddr:                 macAddr,
+			IpAddr:                  ipAddr,
+			NetworkMask:             networkMask,
+			EthRxFunc:               netIfConfig.EthRxFunc,
+			EthTxFunc:               netIfConfig.EthTxFunc,
+			EthTxBuffer:             make([]byte, 0, 1514),
+			LoChan:                  make(chan []byte, 1024),
+			Engine:                  r,
+			ArpCacheTable:           make(map[uint32][]byte),
+			NatEnable:               netIfConfig.NatEnable,
+			NatType:                 netIfConfig.NatType,
+			NatWanFlowTable:         make(map[NatWanFlowHash]*NatFlow),
+			NatFlowTable:            make(map[NatFlowHash]*NatFlow),
+			NatPortAlloc:            make(map[uint32]*PortAlloc),
+			NatPortMappingTable:     make([]*NatPortMappingEntry, 0),
+			DnsServerAddr:           dnsServerAddr,
+			DhcpServerEnable:        netIfConfig.DhcpServerEnable,
+			DhcpLeaseMap:            make(map[uint32]*DhcpLease),
+			DhcpClientEnable:        netIfConfig.DhcpClientEnable,
+			DhcpClientTransactionId: nil,
+			CheckSumDisable:         netIfConfig.CheckSumDisable,
+			BindCpuCore:             netIfConfig.BindCpuCore,
+			HandleUdp:               nil,
+			HandleTcp:               nil,
 		}
 		for _, natPortMappingEntryConfig := range netIfConfig.NatPortMappingTable {
 			wanIpAddr, err := protocol.ParseIpAddr(natPortMappingEntryConfig.WanIpAddr)
@@ -181,6 +211,9 @@ func InitEngine(config *Config) (*Engine, error) {
 	}
 	// 直连路由
 	for _, netIf := range r.NetIfMap {
+		if netIf.DhcpClientEnable {
+			continue
+		}
 		dstIpAddrU := protocol.IpAddrToU(netIf.IpAddr) & protocol.IpAddrToU(netIf.NetworkMask)
 		dstIpAddr := protocol.UToIpAddr(dstIpAddrU)
 		r.RouteTable.AddRoute(&RouteEntry{
@@ -196,11 +229,18 @@ func InitEngine(config *Config) (*Engine, error) {
 
 func (e *Engine) RunEngine() {
 	for _, netIf := range e.NetIfMap {
+		if netIf.DhcpClientEnable {
+			netIf.DhcpDiscover()
+		} else {
+			netIf.SendFreeArp()
+		}
 		go netIf.PacketHandle()
 		if netIf.NatEnable {
 			go netIf.NatTableClear()
 		}
-		netIf.SendFreeArp()
+		if netIf.DhcpServerEnable {
+			go netIf.DhcpLeaseClear()
+		}
 	}
 }
 
@@ -457,6 +497,24 @@ func (i *NetIf) NatTableClear() {
 			}
 		}
 		i.NatTableLock.Unlock()
+	}
+}
+
+func (i *NetIf) DhcpLeaseClear() {
+	ticker := time.NewTicker(time.Minute * 1)
+	for {
+		<-ticker.C
+		if i.Engine.Stop.Load() {
+			break
+		}
+		now := time.Now().Unix()
+		i.DhcpLock.Lock()
+		for ipAddrU, dhcpLease := range i.DhcpLeaseMap {
+			if now > dhcpLease.ExpTime {
+				delete(i.DhcpLeaseMap, ipAddrU)
+			}
+		}
+		i.DhcpLock.Unlock()
 	}
 }
 

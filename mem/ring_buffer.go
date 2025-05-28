@@ -90,92 +90,88 @@ func RingBufferMapping(memory unsafe.Pointer, offset *int64) *RingBuffer {
 	return rb
 }
 
-func ringBufferFreeSpace(rb *RingBuffer) uint32 {
-	head := atomic.LoadUint64(&rb.head)
-	tail := atomic.LoadUint64(&rb.tail)
-	return rb.size - uint32(head-tail)
-}
-
-func ringBufferUsedSpace(rb *RingBuffer) uint32 {
-	head := atomic.LoadUint64(&rb.head)
-	tail := atomic.LoadUint64(&rb.tail)
-	return uint32(head - tail)
-}
-
-func WritePacketOffset(rb *RingBuffer, offset int64, data []uint8, len uint16) bool {
+func WritePacketWithOption(rb *RingBuffer, offset int64, fast bool, data []uint8, len uint16) bool {
 	if len == 0 || uint32(len) > rb.size/2 {
 		return false
 	}
-
+	head := uint64(0)
+	tail := uint64(0)
+	if fast {
+		head = rb.head
+		tail = rb.tail
+	} else {
+		head = atomic.LoadUint64(&rb.head)
+		tail = atomic.LoadUint64(&rb.tail)
+	}
+	freeSpace := rb.size - uint32(head-tail)
 	totalSize := uint32(2 + len)
 	totalSize = (totalSize + 3) & ^uint32(3)
-
-	if ringBufferFreeSpace(rb) < totalSize {
+	if freeSpace < totalSize {
 		return false
 	}
-
-	head := atomic.LoadUint64(&rb.head)
 	pos := uint32(head & uint64(rb.mask))
-
 	*(*uint16)(Offset(rb.buffer, offset+int64(pos))) = len
-
 	dataPos := (pos + 2) & rb.mask
 	spaceAfter := rb.size - dataPos
-
 	if spaceAfter >= uint32(len) {
 		MemCpy(Offset(rb.buffer, offset+int64(dataPos)), unsafe.Pointer(&data[0]), uint64(len))
 	} else {
 		MemCpy(Offset(rb.buffer, offset+int64(dataPos)), unsafe.Pointer(&data[0]), uint64(spaceAfter))
 		MemCpy(Offset(rb.buffer, offset), Offset(unsafe.Pointer(&data[0]), int64(spaceAfter)), uint64(uint32(len)-spaceAfter))
 	}
-
-	atomic.StoreUint64(&rb.head, head+uint64(totalSize))
-
+	if fast {
+		rb.head = head + uint64(totalSize)
+	} else {
+		atomic.StoreUint64(&rb.head, head+uint64(totalSize))
+	}
 	return true
 }
 
 func WritePacket(rb *RingBuffer, data []uint8, len uint16) bool {
-	return WritePacketOffset(rb, 0, data, len)
+	return WritePacketWithOption(rb, 0, false, data, len)
 }
 
-func ReadPacketOffset(rb *RingBuffer, offset int64, data []uint8, len *uint16) bool {
-	if ringBufferUsedSpace(rb) < 2 {
+func ReadPacketWithOption(rb *RingBuffer, offset int64, fast bool, data []uint8, len *uint16) bool {
+	head := uint64(0)
+	tail := uint64(0)
+	if fast {
+		head = rb.head
+		tail = rb.tail
+	} else {
+		head = atomic.LoadUint64(&rb.head)
+		tail = atomic.LoadUint64(&rb.tail)
+	}
+	usedSpace := uint32(head - tail)
+	if usedSpace < 2 {
 		return false
 	}
-
-	tail := atomic.LoadUint64(&rb.tail)
 	pos := uint32(tail & uint64(rb.mask))
-
 	packetLen := *(*uint16)(Offset(rb.buffer, offset+int64(pos)))
-
 	if packetLen == 0 || uint32(packetLen) > rb.size/2 {
 		return false
 	}
-
 	totalSize := uint32(2 + packetLen)
 	totalSize = (totalSize + 3) & ^uint32(3)
-
-	if ringBufferUsedSpace(rb) < totalSize {
+	if usedSpace < totalSize {
 		return false
 	}
-
 	dataPos := (pos + 2) & rb.mask
 	spaceAfter := rb.size - dataPos
-
 	if spaceAfter >= uint32(packetLen) {
 		MemCpy(unsafe.Pointer(&data[0]), Offset(rb.buffer, offset+int64(dataPos)), uint64(packetLen))
 	} else {
 		MemCpy(unsafe.Pointer(&data[0]), Offset(rb.buffer, offset+int64(dataPos)), uint64(spaceAfter))
 		MemCpy(Offset(unsafe.Pointer(&data[0]), int64(spaceAfter)), Offset(rb.buffer, offset), uint64(uint32(packetLen)-spaceAfter))
 	}
-
 	*len = packetLen
-
-	atomic.StoreUint64(&rb.tail, tail+uint64(totalSize))
-
+	if fast {
+		rb.tail = tail + uint64(totalSize)
+	} else {
+		atomic.StoreUint64(&rb.tail, tail+uint64(totalSize))
+	}
 	return true
 }
 
 func ReadPacket(rb *RingBuffer, data []uint8, len *uint16) bool {
-	return ReadPacketOffset(rb, 0, data, len)
+	return ReadPacketWithOption(rb, 0, false, data, len)
 }

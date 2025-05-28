@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/flswld/halo/cpu"
 )
@@ -39,13 +40,13 @@ func TestRingBuffer(t *testing.T) {
 	go func() {
 		cpu.BindCpuCore(1)
 		_data := make([]byte, 16)
-		_tt := time.Now()
+		_len := uint16(0)
 		_seq := uint64(1)
+		_tt := time.Now()
 		for {
 			if stop.Load() {
 				break
 			}
-			_len := uint16(0)
 			ReadPacket(rb, _data, &_len)
 			if _len == 0 {
 				continue
@@ -67,6 +68,76 @@ func TestRingBuffer(t *testing.T) {
 
 	time.Sleep(time.Second * 30)
 	stop.Store(true)
+	time.Sleep(time.Second)
+
+	RingBufferDestroy(rb)
+	new(CHeap).AlignedFree(mem)
+}
+
+type TestMsg struct {
+	Seq uint64
+}
+
+type SliceHeader struct {
+	Data uintptr
+	Len  int
+	Cap  int
+}
+
+func TestFastRingBuffer(t *testing.T) {
+	mem := new(CHeap).AlignedMalloc(SizeOf[RingBuffer]() + 1*MB)
+	rb := RingBufferCreate(mem, uint32(SizeOf[RingBuffer]()+1*MB))
+
+	var stop bool
+
+	go func() {
+		cpu.BindCpuCore(0)
+		msg := new(TestMsg)
+		msg.Seq = 1
+		msgLen := SizeOf[TestMsg]()
+		msgData := new(SliceHeader)
+		for {
+			if stop {
+				break
+			}
+			msgData.Data = uintptr(unsafe.Pointer(msg))
+			msgData.Len = int(msgLen)
+			msgData.Cap = int(msgLen)
+			ok := WritePacketWithOption(rb, 0, true, *(*[]uint8)(unsafe.Pointer(msgData)), uint16(msgLen))
+			if !ok {
+				continue
+			}
+			msg.Seq++
+		}
+	}()
+
+	go func() {
+		cpu.BindCpuCore(1)
+		msgData := make([]byte, 64)
+		_len := uint16(0)
+		seq := uint64(1)
+		_tt := time.Now()
+		for {
+			if stop {
+				break
+			}
+			ReadPacketWithOption(rb, 0, true, msgData, &_len)
+			if _len == 0 {
+				continue
+			}
+			msg := (*TestMsg)(unsafe.Pointer(&msgData[0]))
+			if msg.Seq&((1024*1024*8)-1) == 0 {
+				tt := time.Now()
+				ops := float64(msg.Seq-seq) / (tt.Sub(_tt).Seconds())
+				log.Printf("speed: %.0f op/s\n", ops)
+				_tt = tt
+				seq = msg.Seq
+			}
+		}
+	}()
+
+	time.Sleep(time.Second * 30)
+	stop = true
 	time.Sleep(time.Second)
 
 	RingBufferDestroy(rb)

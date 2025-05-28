@@ -13,7 +13,6 @@ typedef struct {
     uint64_t head ALIGNED; // 写入位置
     _Atomic
     uint64_t tail ALIGNED; // 读取位置
-
     uint32_t size; // 缓冲区总大小 必须为2的幂
     uint32_t mask; // 用于快速取模的掩码
     uint8_t *buffer; // 指向实际数据缓冲区的指针
@@ -93,22 +92,8 @@ ring_buffer_t *ring_buffer_mapping(void *memory, int64_t *offset) {
         }
     }
 
-    *offset = memory + sizeof(ring_buffer_t) - rb->buffer;
+    *offset = memory + sizeof(ring_buffer_t) - (void *) rb->buffer;
     return rb;
-}
-
-// 计算可用空间
-uint32_t ring_buffer_free_space(const ring_buffer_t *rb) {
-    const uint64_t head = atomic_load(&rb->head);
-    const uint64_t tail = atomic_load(&rb->tail);
-    return rb->size - (uint32_t) (head - tail);
-}
-
-// 计算已用空间
-uint32_t ring_buffer_used_space(const ring_buffer_t *rb) {
-    const uint64_t head = atomic_load(&rb->head);
-    const uint64_t tail = atomic_load(&rb->tail);
-    return head - tail;
 }
 
 // 写入数据包
@@ -116,35 +101,29 @@ bool write_packet_offset(ring_buffer_t *rb, const int64_t offset, const uint8_t 
     if (len == 0 || len > rb->size / 2) {
         return false;
     }
-
+    const uint64_t head = atomic_load(&rb->head);
+    const uint64_t tail = atomic_load(&rb->tail);
+    const uint32_t free_space = rb->size - (uint32_t) (head - tail);
     uint32_t total_size = sizeof(uint16_t) + len;
     // 4字节对齐
     total_size = total_size + 3 & ~3;
-
-    if (ring_buffer_free_space(rb) < total_size) {
+    if (free_space < total_size) {
         return false;
     }
-
-    const uint64_t head = atomic_load(&rb->head);
     const uint32_t pos = head & rb->mask;
-
     // 写入长度
     *(uint16_t *) (rb->buffer + offset + pos) = len;
-
     // 写入数据
     const uint32_t data_pos = pos + sizeof(uint16_t) & rb->mask;
     const uint32_t space_after = rb->size - data_pos;
-
     if (space_after >= len) {
         memcpy(rb->buffer + offset + data_pos, data, len);
     } else {
         memcpy(rb->buffer + offset + data_pos, data, space_after);
         memcpy(rb->buffer + offset, data + space_after, len - space_after);
     }
-
     // 更新head
     atomic_store(&rb->head, head + total_size);
-
     return true;
 }
 
@@ -154,44 +133,36 @@ bool write_packet(ring_buffer_t *rb, const uint8_t *data, const uint16_t len) {
 
 // 读取数据包
 bool read_packet_offset(ring_buffer_t *rb, const int64_t offset, uint8_t *data, uint16_t *len) {
-    if (ring_buffer_used_space(rb) < sizeof(uint16_t)) {
+    const uint64_t head = atomic_load(&rb->head);
+    const uint64_t tail = atomic_load(&rb->tail);
+    const uint32_t used_space = head - tail;
+    if (used_space < sizeof(uint16_t)) {
         return false;
     }
-
-    const uint64_t tail = atomic_load(&rb->tail);
     const uint32_t pos = tail & rb->mask;
-
     // 读取长度
     const uint16_t packet_len = *(uint16_t *) (rb->buffer + offset + pos);
-
     if (packet_len == 0 || packet_len > rb->size / 2) {
         return false;
     }
-
     uint32_t total_size = sizeof(uint16_t) + packet_len;
     // 4字节对齐
     total_size = total_size + 3 & ~3;
-
-    if (ring_buffer_used_space(rb) < total_size) {
+    if (used_space < total_size) {
         return false;
     }
-
     // 读取数据
     const uint32_t data_pos = pos + sizeof(uint16_t) & rb->mask;
     const uint32_t space_after = rb->size - data_pos;
-
     if (space_after >= packet_len) {
         memcpy(data, rb->buffer + offset + data_pos, packet_len);
     } else {
         memcpy(data, rb->buffer + offset + data_pos, space_after);
         memcpy(data + space_after, rb->buffer + offset, packet_len - space_after);
     }
-
     *len = packet_len;
-
     // 更新tail
     atomic_store(&rb->tail, tail + total_size);
-
     return true;
 }
 

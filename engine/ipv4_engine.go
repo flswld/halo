@@ -15,14 +15,17 @@ func (i *NetIf) RxIpv4(ethPayload []byte) {
 		return
 	}
 	if ipv4DstAddr[3] == 255 {
-		// 暂不处理ipv4广播包
+		if ipv4HeadProto == protocol.IPH_PROTO_UDP {
+			i.RxUdp(ipv4Payload, ipv4SrcAddr)
+		}
 		return
 	}
 	if !bytes.Equal(ipv4DstAddr, i.IpAddr) || i.NatEnable {
 		ok := i.Ipv4RouteForward(ethPayload, ipv4SrcAddr, ipv4DstAddr, ipv4HeadProto)
-		if ok {
-			return
+		if !ok && ipv4HeadProto == protocol.IPH_PROTO_ICMP {
+			i.RxIcmp(ipv4Payload, ipv4SrcAddr)
 		}
+		return
 	}
 	switch ipv4HeadProto {
 	case protocol.IPH_PROTO_ICMP:
@@ -43,24 +46,33 @@ func (i *NetIf) TxIpv4(ipv4Payload []byte, ipv4HeadProto uint8, ipv4DstAddr []by
 		return false
 	}
 	// 三层路由
-	nextHopIpAddr, outNetIfName := i.FindRoute(ipv4DstAddr)
-	if nextHopIpAddr == nil && outNetIfName == "" {
-		Log(fmt.Sprintf("no route found for: %v\n", ipv4DstAddr))
-		return false
-	}
-	outNetIf := i.Engine.NetIfMap[outNetIfName]
-	dstIpAddrU := protocol.IpAddrToU(ipv4DstAddr)
-	outNetIfIpAddrU := protocol.IpAddrToU(outNetIf.IpAddr)
-	if dstIpAddrU == outNetIfIpAddrU {
-		// 本地回环
-		_ipv4Pkt := make([]byte, len(ipv4Pkt))
-		copy(_ipv4Pkt, ipv4Pkt)
-		outNetIf.LoChan <- _ipv4Pkt
-		return true
+	var nextHopIpAddr []byte = nil
+	var outNetIf *NetIf = nil
+	if ipv4DstAddr[3] == 255 {
+		outNetIf = i
+	} else {
+		_nextHopIpAddr, outNetIfName := i.FindRoute(ipv4DstAddr)
+		if _nextHopIpAddr == nil && outNetIfName == "" {
+			Log(fmt.Sprintf("no route found for: %v\n", ipv4DstAddr))
+			return false
+		}
+		nextHopIpAddr = _nextHopIpAddr
+		outNetIf = i.Engine.NetIfMap[outNetIfName]
+		dstIpAddrU := protocol.IpAddrToU(ipv4DstAddr)
+		outNetIfIpAddrU := protocol.IpAddrToU(outNetIf.IpAddr)
+		if dstIpAddrU == outNetIfIpAddrU {
+			// 本地回环
+			_ipv4Pkt := make([]byte, len(ipv4Pkt))
+			copy(_ipv4Pkt, ipv4Pkt)
+			outNetIf.LoChan <- _ipv4Pkt
+			return true
+		}
 	}
 	// 二层封装
 	var ethDstMac []byte = nil
-	if nextHopIpAddr != nil {
+	if ipv4DstAddr[3] == 255 {
+		ethDstMac = []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+	} else if nextHopIpAddr != nil {
 		ethDstMac = outNetIf.GetArpCache(nextHopIpAddr)
 	} else {
 		ethDstMac = outNetIf.GetArpCache(ipv4DstAddr)

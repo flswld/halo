@@ -7,10 +7,6 @@ import (
 )
 
 func (i *NetIf) RxTcp(ipv4Payload []byte, ipv4SrcAddr []byte) {
-	if i.CheckSumDisable {
-		ipv4Payload[16] = 0x00
-		ipv4Payload[17] = 0x00
-	}
 	tcpPayload, tcpSrcPort, tcpDstPort, seqNum, ackNum, flags, err := protocol.ParseTcpPkt(ipv4Payload, ipv4SrcAddr, i.IpAddr)
 	if err != nil {
 		Log(fmt.Sprintf("parse tcp packet error: %v\n", err))

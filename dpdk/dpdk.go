@@ -28,16 +28,17 @@ func Log(msg string) {
 }
 
 type Config struct {
-	DpdkCpuCoreList []int    // dpdk使用的核心编号列表 主线程第一个核心 每个网卡两个核心
-	DpdkMemChanNum  int      // dpdk内存通道数
+	DpdkCpuCoreList []int // dpdk使用的核心编号列表 主线程第一个核心 每个网卡两个核心
+	DpdkMemChanNum  int   // dpdk内存通道数
+	PortIdList      []int // 使用的网卡id列表
+	QueueNum        int
 	RingBufferSize  int      // 环状缓冲区大小
-	PortIdList      []int    // 使用的网卡id列表
 	AfPacketDevList []string // 使用的AF_PACKET虚拟网卡列表
 	StatsLog        bool     // 收发包统计日志
 	DebugLog        bool     // 收发包调试日志
 	IdleSleep       bool     // 空闲睡眠 降低cpu占用
 	SingleCore      bool     // 单核模式 只使用cpu0
-	KniEnabled      bool
+	KniEnable       bool
 }
 
 type ring_buffer struct {
@@ -58,12 +59,16 @@ var (
 func Run(config *Config) {
 	conf = config
 	// 配置参数检查
+	if conf.QueueNum == 0 {
+		conf.QueueNum = 1
+	}
 	if !conf.SingleCore {
-		if len(conf.DpdkCpuCoreList) < 1+len(conf.PortIdList)*2 {
+		if len(conf.DpdkCpuCoreList) < 1+len(conf.PortIdList)*2*conf.QueueNum {
 			panic("cpu core num not enough")
 		}
 	} else {
 		conf.DpdkCpuCoreList = []int{0}
+		conf.QueueNum = 1
 	}
 	if conf.DpdkMemChanNum < 1 || conf.DpdkMemChanNum > 4 {
 		panic("dpdk mem chan num error")
@@ -85,14 +90,17 @@ func Run(config *Config) {
 		}
 		time.Sleep(time.Second * 1)
 	}
-	port_ring_buffer = make([]ring_buffer, len(conf.PortIdList))
-	port_pkt_rx_buf = make([][]byte, len(conf.PortIdList))
+	port_ring_buffer = make([]ring_buffer, len(conf.PortIdList)*conf.QueueNum)
+	port_pkt_rx_buf = make([][]byte, len(conf.PortIdList)*conf.QueueNum)
 	for port_index := range conf.PortIdList {
-		port_ring_buffer[port_index].send_ring_buffer = C.cgo_port_send_ring_buffer(C.int(port_index))
-		port_ring_buffer[port_index].recv_ring_buffer = C.cgo_port_recv_ring_buffer(C.int(port_index))
-		port_pkt_rx_buf[port_index] = make([]byte, 1514)
+		for queue_id := 0; queue_id < conf.QueueNum; queue_id++ {
+			i := port_index*conf.QueueNum + queue_id
+			port_ring_buffer[i].send_ring_buffer = C.cgo_port_send_ring_buffer(C.int(port_index), C.int(queue_id))
+			port_ring_buffer[i].recv_ring_buffer = C.cgo_port_recv_ring_buffer(C.int(port_index), C.int(queue_id))
+			port_pkt_rx_buf[i] = make([]byte, 1514)
+		}
 	}
-	if conf.KniEnabled {
+	if conf.KniEnable {
 		kni_ring_buffer.send_ring_buffer = C.cgo_kni_send_ring_buffer()
 		kni_ring_buffer.recv_ring_buffer = C.cgo_kni_recv_ring_buffer()
 		kni_pkt_rx_buf = make([]byte, 1514)
@@ -118,9 +126,19 @@ func Exit() {
 
 // EthRxPkt 网卡收包
 func EthRxPkt(port_index int) (pkt []byte) {
-	pkt_rx_buf := port_pkt_rx_buf[port_index]
+	return EthQueueRxPkt(port_index, 0)
+}
+
+// EthTxPkt 网卡发包
+func EthTxPkt(port_index int, pkt []byte) {
+	EthQueueTxPkt(port_index, 0, pkt)
+}
+
+// EthQueueRxPkt 网卡队列收包
+func EthQueueRxPkt(port_index int, queue_id int) (pkt []byte) {
+	pkt_rx_buf := port_pkt_rx_buf[port_index*conf.QueueNum+queue_id]
 	pkt_len := uint16(0)
-	buffer := &(port_ring_buffer[port_index])
+	buffer := &(port_ring_buffer[port_index*conf.QueueNum+queue_id])
 	ok := mem.ReadPacket((*mem.RingBuffer)(unsafe.Pointer(buffer.recv_ring_buffer)), pkt_rx_buf, &pkt_len)
 	if !ok {
 		if conf.IdleSleep {
@@ -136,10 +154,10 @@ func EthRxPkt(port_index int) (pkt []byte) {
 	return pkt
 }
 
-// EthTxPkt 网卡发包
-func EthTxPkt(port_index int, pkt []byte) {
+// EthQueueTxPkt 网卡队列发包
+func EthQueueTxPkt(port_index int, queue_id int, pkt []byte) {
 	pkt_len := len(pkt)
-	buffer := &(port_ring_buffer[port_index])
+	buffer := &(port_ring_buffer[port_index*conf.QueueNum+queue_id])
 	mem.WritePacket((*mem.RingBuffer)(unsafe.Pointer(buffer.send_ring_buffer)), pkt, uint16(pkt_len))
 	if conf.DebugLog {
 		Log(fmt.Sprintf("[eth tx pkt] port_index: %v, len: %v, data: %02x\n", port_index, pkt_len, pkt))
@@ -148,7 +166,7 @@ func EthTxPkt(port_index int, pkt []byte) {
 
 // KniRxPkt KNI网卡收包
 func KniRxPkt() (pkt []byte) {
-	if !conf.KniEnabled {
+	if !conf.KniEnable {
 		return nil
 	}
 	pkt_rx_buf := kni_pkt_rx_buf
@@ -171,7 +189,7 @@ func KniRxPkt() (pkt []byte) {
 
 // KniTxPkt KNI网卡发包
 func KniTxPkt(pkt []byte) {
-	if !conf.KniEnabled {
+	if !conf.KniEnable {
 		return
 	}
 	pkt_len := len(pkt)
@@ -259,11 +277,12 @@ func run_dpdk() {
 	config.eal_args = C.CString(build_eal_args())
 	config.cpu_core_list = C.CString(cpu_list_param)
 	config.port_id_list = C.CString(port_id_list_param)
+	config.queue_num = C.int(conf.QueueNum)
 	config.ring_buffer_size = C.int(conf.RingBufferSize)
 	config.debug_log = C.bool(conf.DebugLog)
 	config.idle_sleep = C.bool(conf.IdleSleep)
 	config.single_core = C.bool(conf.SingleCore)
-	config.kni_enabled = C.bool(conf.KniEnabled)
+	config.kni_enable = C.bool(conf.KniEnable)
 	C.cgo_dpdk_main(&config)
 	C.free(unsafe.Pointer(config.eal_args))
 	C.free(unsafe.Pointer(config.cpu_core_list))

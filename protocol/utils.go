@@ -5,6 +5,8 @@ import (
 	"strings"
 )
 
+var CheckSumDisable bool
+
 func GetCheckSum(data []byte) uint16 {
 	sum := uint32(0)
 	length := len(data)

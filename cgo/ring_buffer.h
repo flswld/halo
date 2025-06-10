@@ -133,6 +133,7 @@ bool write_packet(ring_buffer_t *rb, const uint8_t *data, const uint16_t len) {
 
 // 读取数据包
 bool read_packet_offset(ring_buffer_t *rb, const int64_t offset, uint8_t *data, uint16_t *len) {
+    *len = 0;
     const uint64_t head = atomic_load(&rb->head);
     const uint64_t tail = atomic_load(&rb->tail);
     const uint32_t used_space = head - tail;

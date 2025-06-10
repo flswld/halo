@@ -48,7 +48,7 @@ func ParseTcpPkt(pkt []byte, srcAddr []byte, dstAddr []byte) (payload []byte, sr
 	headerLen := int(pkt[12] >> 4)
 	flags = pkt[13]
 	// 检查校验和
-	if pkt[16] != 0x00 && pkt[17] != 0x00 {
+	if !CheckSumDisable {
 		totalLen := len(pkt)
 		fakeHeader := make([]byte, 0, 12)
 		fakeHeader = append(fakeHeader, srcAddr...)

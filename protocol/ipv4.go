@@ -68,8 +68,10 @@ func ParseIpv4Pkt(pkt []byte) (payload []byte, ipHeadProto uint8, srcAddr []byte
 		return nil, IPH_PROTO_UNKNOWN, nil, nil, errors.New("unknown ip protocol")
 	}
 	// 检查首部校验和
-	if GetCheckSum(pkt[0:20]) != 0 {
-		return nil, IPH_PROTO_UNKNOWN, nil, nil, errors.New("header check sum error")
+	if !CheckSumDisable {
+		if GetCheckSum(pkt[0:20]) != 0 {
+			return nil, IPH_PROTO_UNKNOWN, nil, nil, errors.New("header check sum error")
+		}
 	}
 	// 源地址
 	srcAddr = pkt[12:16]

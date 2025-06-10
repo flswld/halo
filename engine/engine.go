@@ -24,9 +24,10 @@ func Log(msg string) {
 
 // Config 协议栈配置
 type Config struct {
-	DebugLog     bool                  // 调试日志
-	NetIfList    []*NetIfConfig        // 网卡列表
-	RoutingTable []*RoutingEntryConfig // 路由表
+	DebugLog        bool                  // 调试日志
+	NetIfList       []*NetIfConfig        // 网卡列表
+	RoutingTable    []*RoutingEntryConfig // 路由表
+	CheckSumDisable bool
 }
 
 // NetIfConfig 网卡配置
@@ -41,7 +42,6 @@ type NetIfConfig struct {
 	DnsServerAddr       string
 	DhcpServerEnable    bool
 	DhcpClientEnable    bool
-	CheckSumDisable     bool
 	EthRxFunc           func() (pkt []byte) // 网卡收包方法
 	EthTxFunc           func(pkt []byte)    // 网卡发包方法
 	BindCpuCore         int                 // 绑定的cpu核心
@@ -91,7 +91,6 @@ type NetIf struct {
 	DhcpLock                sync.RWMutex
 	DhcpClientEnable        bool
 	DhcpClientTransactionId []byte
-	CheckSumDisable         bool
 	BindCpuCore             int // 绑定的cpu核心
 	HandleUdp               func(payload []byte, srcPort uint16, dstPort uint16, srcAddr []byte)
 	HandleTcp               func(payload []byte, srcPort uint16, dstPort uint16, seqNum uint32, ackNum uint32, flags uint8, srcAddr []byte)
@@ -164,7 +163,6 @@ func InitEngine(config *Config) (*Engine, error) {
 			DhcpLeaseMap:            make(map[uint32]*DhcpLease),
 			DhcpClientEnable:        netIfConfig.DhcpClientEnable,
 			DhcpClientTransactionId: nil,
-			CheckSumDisable:         netIfConfig.CheckSumDisable,
 			BindCpuCore:             netIfConfig.BindCpuCore,
 			HandleUdp:               nil,
 			HandleTcp:               nil,
@@ -222,6 +220,9 @@ func InitEngine(config *Config) (*Engine, error) {
 			NextHop:     nil,
 			NetIf:       netIf.Name,
 		})
+	}
+	if config.CheckSumDisable {
+		protocol.CheckSumDisable = true
 	}
 	protocol.SetRandIpHeaderId()
 	return r, nil

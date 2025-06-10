@@ -28,7 +28,7 @@ func ParseUdpPkt(pkt []byte, srcAddr []byte, dstAddr []byte) (payload []byte, sr
 	// 总长度
 	totalLen := int(binary.BigEndian.Uint16([]byte{pkt[4], pkt[5]}))
 	// 检查校验和
-	if pkt[6] != 0x00 && pkt[7] != 0x00 {
+	if !CheckSumDisable {
 		fakeHeader := make([]byte, 0, 12)
 		fakeHeader = append(fakeHeader, srcAddr...)
 		fakeHeader = append(fakeHeader, dstAddr...)

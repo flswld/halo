@@ -32,11 +32,12 @@ struct dpdk_config {
     char *eal_args;
     char *cpu_core_list;
     char *port_id_list;
+    int queue_num;
     int ring_buffer_size;
     bool debug_log;
     bool idle_sleep;
     bool single_core;
-    bool kni_enabled;
+    bool kni_enable;
 };
 
 struct ring_buffer {
@@ -46,31 +47,33 @@ struct ring_buffer {
     ring_buffer_t *recv_ring_buffer;
 };
 
-struct _rte_ether_addr {
+struct eth_macaddr {
     uint8_t addr_bytes[6];
 } __attribute__((__aligned__(2)));
+
+struct lcore_arg {
+    int port_index;
+    int queue_id;
+};
 
 _Atomic
 bool running = false;
 
+struct dpdk_config global_config = {0};
 int port_count = 0;
 uint16_t *port_id_list = NULL;
-
-bool debug_log = false;
-bool idle_sleep = false;
-
 struct ring_buffer *port_ring_buffer = NULL;
 struct ring_buffer kni_ring_buffer = {0};
 struct rte_mempool *mbuf_pool = NULL;
 struct rte_eth_stats *port_old_stats = NULL;
 static struct rte_kni *kni = NULL;
 
-ring_buffer_t *cgo_port_send_ring_buffer(const int port_index) {
-    return port_ring_buffer[port_index].send_ring_buffer;
+ring_buffer_t *cgo_port_send_ring_buffer(const int port_index, const int queue_id) {
+    return port_ring_buffer[port_index * global_config.queue_num + queue_id].send_ring_buffer;
 }
 
-ring_buffer_t *cgo_port_recv_ring_buffer(const int port_index) {
-    return port_ring_buffer[port_index].recv_ring_buffer;
+ring_buffer_t *cgo_port_recv_ring_buffer(const int port_index, const int queue_id) {
+    return port_ring_buffer[port_index * global_config.queue_num + queue_id].recv_ring_buffer;
 }
 
 ring_buffer_t *cgo_kni_send_ring_buffer() {
@@ -87,12 +90,7 @@ void cgo_print_stats(const int port_index, char *msg) {
     const struct rte_eth_stats old_stats = port_old_stats[port_index];
     struct rte_eth_stats new_stats = {0};
     rte_eth_stats_get(port_id, &new_stats);
-    sprintf(msg, "[rte_eth_stats]\tport:%2u | "
-            "rx:%10lu (pps) | "
-            "tx:%10lu (pps) | "
-            "drop:%10lu (pps) | "
-            "rx:%20lu (byte/s) | "
-            "tx:%20lu (byte/s)\n",
+    sprintf(msg, "[rte_eth_stats]\tport:%2u | rx:%10lu (pps) | tx:%10lu (pps) | drop:%10lu (pps) | rx:%20lu (byte/s) | tx:%20lu (byte/s)",
             port_id,
             new_stats.ipackets - old_stats.ipackets,
             new_stats.opackets - old_stats.opackets,
@@ -117,12 +115,15 @@ void cgo_exit_signal_handler(void) {
         rte_free(kni_ring_buffer.send_ring_mem);
         rte_free(kni_ring_buffer.recv_ring_mem);
     }
-    for (int i = 0; i < port_count; i++) {
-        rte_eth_dev_stop(port_id_list[i]);
-        ring_buffer_destroy(port_ring_buffer[i].send_ring_buffer);
-        ring_buffer_destroy(port_ring_buffer[i].recv_ring_buffer);
-        rte_free(port_ring_buffer[i].send_ring_mem);
-        rte_free(port_ring_buffer[i].recv_ring_mem);
+    for (int port_index = 0; port_index < port_count; port_index++) {
+        rte_eth_dev_stop(port_id_list[port_index]);
+        for (int queue_id = 0; queue_id < global_config.queue_num; queue_id++) {
+            const int i = port_index * global_config.queue_num + queue_id;
+            ring_buffer_destroy(port_ring_buffer[i].send_ring_buffer);
+            ring_buffer_destroy(port_ring_buffer[i].recv_ring_buffer);
+            rte_free(port_ring_buffer[i].send_ring_mem);
+            rte_free(port_ring_buffer[i].recv_ring_mem);
+        }
     }
     free(port_id_list);
     free(port_ring_buffer);
@@ -130,8 +131,6 @@ void cgo_exit_signal_handler(void) {
 
     port_count = 0;
     port_id_list = NULL;
-    debug_log = false;
-    idle_sleep = false;
     port_ring_buffer = NULL;
     memset(&kni_ring_buffer, 0x00, sizeof(struct ring_buffer));
     mbuf_pool = NULL;
@@ -145,7 +144,7 @@ void cgo_kni_handle(void) {
 }
 
 // 初始化网口 配置收发队列
-int port_init(uint16_t port_id) {
+int port_init(uint16_t port_id, const uint16_t queue_num) {
     struct rte_eth_conf port_conf = {0};
     port_conf.rxmode.max_rx_pkt_len = 1518;
 
@@ -155,10 +154,8 @@ int port_init(uint16_t port_id) {
         port_conf.txmode.offloads |= DEV_TX_OFFLOAD_MBUF_FAST_FREE;
     }
 
-    const uint16_t nb_rx_queues = 1;
-    const uint16_t nb_tx_queues = 1;
     // 配置设备
-    int ret = rte_eth_dev_configure(port_id, nb_rx_queues, nb_tx_queues, &port_conf);
+    int ret = rte_eth_dev_configure(port_id, queue_num, queue_num, &port_conf);
     if (ret != 0) {
         RTE_LOG(ERR, APP, "rte_eth_dev_configure failed\n");
         return ret;
@@ -167,7 +164,7 @@ int port_init(uint16_t port_id) {
     uint16_t nb_txd = TX_RING_SIZE;
     rte_eth_dev_adjust_nb_rx_tx_desc(port_id, &nb_rxd, &nb_txd);
     // 配置收包队列
-    for (uint16_t q = 0; q < nb_rx_queues; q++) {
+    for (uint16_t q = 0; q < queue_num; q++) {
         ret = rte_eth_rx_queue_setup(port_id, q, nb_rxd, rte_eth_dev_socket_id(port_id), NULL, mbuf_pool);
         if (ret < 0) {
             RTE_LOG(ERR, APP, "rte_eth_rx_queue_setup failed\n");
@@ -175,7 +172,7 @@ int port_init(uint16_t port_id) {
         }
     }
     // 配置发包队列
-    for (uint16_t q = 0; q < nb_tx_queues; q++) {
+    for (uint16_t q = 0; q < queue_num; q++) {
         ret = rte_eth_tx_queue_setup(port_id, q, nb_txd, rte_eth_dev_socket_id(port_id), NULL);
         if (ret < 0) {
             RTE_LOG(ERR, APP, "rte_eth_tx_queue_setup failed\n");
@@ -207,8 +204,7 @@ static int kni_config_network_if(const uint16_t port_id, const uint8_t if_up) {
 
 static int kni_config_mac_address(const uint16_t port_id, uint8_t mac_addr[]) {
     char mac[64];
-    sprintf(mac, "%02X:%02X:%02X:%02X:%02X:%02X",
-            mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+    sprintf(mac, "%02X:%02X:%02X:%02X:%02X:%02X", mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
     RTE_LOG(INFO, APP, "kni config mac address of port: %u, mac: %s\n", port_id, mac);
     return 0;
 }
@@ -250,10 +246,10 @@ int kni_init() {
     return 0;
 }
 
-static bool eth_rx(const int port_index, const uint16_t port_id) {
+static bool eth_rx(const int port_index, const uint16_t port_id, const uint16_t queue_id) {
     // 接收多个网卡数据帧
     struct rte_mbuf *mbuf_recv[BURST_SIZE];
-    const uint16_t nb_rx = rte_eth_rx_burst(port_id, 0, mbuf_recv, BURST_SIZE);
+    const uint16_t nb_rx = rte_eth_rx_burst(port_id, queue_id, mbuf_recv, BURST_SIZE);
     if (unlikely(nb_rx == 0)) {
         return false;
     }
@@ -263,8 +259,8 @@ static bool eth_rx(const int port_index, const uint16_t port_id) {
         const uint8_t *recv_data = rte_pktmbuf_mtod(mbuf_recv[i], uint8_t *);
         // 环状缓冲区数据发送
         const uint16_t recv_len = mbuf_recv[i]->data_len;
-        write_packet(port_ring_buffer[port_index].recv_ring_buffer, recv_data, recv_len);
-        if (unlikely(debug_log)) {
+        write_packet(port_ring_buffer[port_index * global_config.queue_num + queue_id].recv_ring_buffer, recv_data, recv_len);
+        if (unlikely(global_config.debug_log)) {
             // 打印网卡接收到的原始数据
             printf("[nic recv], port_index: %d, len: %d, data: ", port_index, mbuf_recv[i]->data_len);
             for (int j = 0; j < mbuf_recv[i]->data_len; j++) {
@@ -277,22 +273,26 @@ static bool eth_rx(const int port_index, const uint16_t port_id) {
     return true;
 }
 
-static bool eth_tx(const int port_index, const uint16_t port_id) {
+static bool eth_tx(const int port_index, const uint16_t port_id, const uint16_t queue_id) {
     // 环状缓冲区数据接收
     struct rte_mbuf *mbuf_send[BURST_SIZE];
     int mbuf_send_size = 0;
     for (int i = 0; i < BURST_SIZE; i++) {
         mbuf_send[i] = rte_pktmbuf_alloc(mbuf_pool);
-        uint8_t *send_data = (uint8_t *) rte_pktmbuf_append(mbuf_send[i], 1514);
+        if (unlikely(mbuf_send[i] == NULL)) {
+            break;
+        }
+        uint8_t *send_data = rte_pktmbuf_mtod(mbuf_send[i], uint8_t *);
         uint16_t send_len = 0;
-        const bool ok = read_packet(port_ring_buffer[port_index].send_ring_buffer, send_data, &send_len);
+        const bool ok = read_packet(port_ring_buffer[port_index * global_config.queue_num + queue_id].send_ring_buffer, send_data, &send_len);
         if (unlikely(!ok)) {
             rte_pktmbuf_free(mbuf_send[i]);
             break;
         }
-        rte_pktmbuf_trim(mbuf_send[i], 1514 - send_len);
+        mbuf_send[i]->pkt_len = send_len;
+        mbuf_send[i]->data_len = send_len;
         mbuf_send_size++;
-        if (unlikely(debug_log)) {
+        if (unlikely(global_config.debug_log)) {
             // 打印环状缓冲区数据
             printf("[ring recv], port_index: %d, len: %d, data: ", port_index, send_len);
             for (int j = 0; j < send_len; j++) {
@@ -306,7 +306,7 @@ static bool eth_tx(const int port_index, const uint16_t port_id) {
     }
 
     // 发送多个网卡数据帧
-    const uint16_t nb_tx = rte_eth_tx_burst(port_id, 0, mbuf_send, mbuf_send_size);
+    const uint16_t nb_tx = rte_eth_tx_burst(port_id, queue_id, mbuf_send, mbuf_send_size);
     if (unlikely(nb_tx < mbuf_send_size)) {
         // 把没发送成功的mbuf释放掉
         for (int i = nb_tx; i < mbuf_send_size; i++) {
@@ -317,13 +317,10 @@ static bool eth_tx(const int port_index, const uint16_t port_id) {
 }
 
 static bool kni_rx() {
-    if (!kni) {
-        return false;
-    }
     // KNI数据接收
     struct rte_mbuf *mbuf_recv[BURST_SIZE];
     const uint16_t nb_rx = rte_kni_rx_burst(kni, mbuf_recv, BURST_SIZE);
-    if (unlikely(nb_rx == 0)) {
+    if (nb_rx == 0) {
         return false;
     }
 
@@ -333,7 +330,7 @@ static bool kni_rx() {
         // KNI环状缓冲区数据发送
         const uint16_t recv_len = mbuf_recv[i]->data_len;
         write_packet(kni_ring_buffer.recv_ring_buffer, recv_data, recv_len);
-        if (unlikely(debug_log)) {
+        if (global_config.debug_log) {
             // 打印KNI接收到的原始数据
             printf("[kni recv], len: %d, data: ", mbuf_recv[i]->data_len);
             for (int j = 0; j < mbuf_recv[i]->data_len; j++) {
@@ -347,24 +344,25 @@ static bool kni_rx() {
 }
 
 static bool kni_tx() {
-    if (!kni) {
-        return false;
-    }
     // KNI环状缓冲区数据接收
     struct rte_mbuf *mbuf_send[BURST_SIZE];
     int mbuf_send_size = 0;
     for (int i = 0; i < BURST_SIZE; i++) {
         mbuf_send[i] = rte_pktmbuf_alloc(mbuf_pool);
-        uint8_t *send_data = (uint8_t *) rte_pktmbuf_append(mbuf_send[i], 1514);
+        if (mbuf_send[i] == NULL) {
+            break;
+        }
+        uint8_t *send_data = rte_pktmbuf_mtod(mbuf_send[i], uint8_t *);
         uint16_t send_len = 0;
         const bool ok = read_packet(kni_ring_buffer.send_ring_buffer, send_data, &send_len);
-        if (unlikely(!ok)) {
+        if (!ok) {
             rte_pktmbuf_free(mbuf_send[i]);
             break;
         }
-        rte_pktmbuf_trim(mbuf_send[i], 1514 - send_len);
+        mbuf_send[i]->pkt_len = send_len;
+        mbuf_send[i]->data_len = send_len;
         mbuf_send_size++;
-        if (unlikely(debug_log)) {
+        if (global_config.debug_log) {
             // 打印KNI环状缓冲区数据
             printf("[kni ring recv], len: %d, data: ", send_len);
             for (int j = 0; j < send_len; j++) {
@@ -373,13 +371,13 @@ static bool kni_tx() {
             printf("\n\n");
         }
     }
-    if (unlikely(mbuf_send_size == 0)) {
+    if (mbuf_send_size == 0) {
         return false;
     }
 
     // KNI数据发送
     const uint16_t nb_tx = rte_kni_tx_burst(kni, mbuf_send, mbuf_send_size);
-    if (unlikely(nb_tx < mbuf_send_size)) {
+    if (nb_tx < mbuf_send_size) {
         // 把没发送成功的mbuf释放掉
         for (int i = nb_tx; i < mbuf_send_size; i++) {
             rte_pktmbuf_free(mbuf_send[i]);
@@ -388,62 +386,69 @@ static bool kni_tx() {
     return true;
 }
 
-int lcore_rx(void *arg) {
+int lcore_rx(void *arg_ptr) {
     const unsigned int lcore_id = rte_lcore_id();
-    const int port_index = *(int *) arg;
-    free(arg);
+    const struct lcore_arg *arg = arg_ptr;
+    const int port_index = arg->port_index;
     const uint16_t port_id = port_id_list[port_index];
-    RTE_LOG(INFO, APP, "lcore_rx run in lcore: %u, port: %u\n", lcore_id, port_id);
+    const int queue_id = arg->queue_id;
+    RTE_LOG(INFO, APP, "lcore_rx run in lcore: %u, port: %u, queue: %u\n", lcore_id, port_id, queue_id);
 
     while (atomic_load(&running)) {
-        const bool rx_pkt = eth_rx(port_index, port_id);
-        const bool kni_rx_pkt = kni_rx();
-        if (unlikely(!rx_pkt && !kni_rx_pkt && idle_sleep)) {
+        const bool rx_pkt = eth_rx(port_index, port_id, queue_id);
+        if (unlikely(!rx_pkt && global_config.idle_sleep)) {
             // 无包时短暂睡眠节省CPU资源
             usleep(1000 * 10);
         }
     }
 
-    RTE_LOG(INFO, APP, "lcore_rx exit in lcore: %u, port: %u\n", lcore_id, port_id);
+    RTE_LOG(INFO, APP, "lcore_rx exit in lcore: %u, port: %u, queue: %u\n", lcore_id, port_id, queue_id);
     return 0;
 }
 
-int lcore_tx(void *arg) {
+int lcore_tx(void *arg_ptr) {
     const unsigned int lcore_id = rte_lcore_id();
-    const int port_index = *(int *) arg;
-    free(arg);
+    const struct lcore_arg *arg = arg_ptr;
+    const int port_index = arg->port_index;
     const uint16_t port_id = port_id_list[port_index];
-    RTE_LOG(INFO, APP, "lcore_tx run in lcore: %u, port: %u\n", lcore_id, port_id);
+    const int queue_id = arg->queue_id;
+    RTE_LOG(INFO, APP, "lcore_tx run in lcore: %u, port: %u, queue: %u\n", lcore_id, port_id, queue_id);
 
     while (atomic_load(&running)) {
-        const bool tx_pkt = eth_tx(port_index, port_id);
-        const bool kni_tx_pkt = kni_tx();
-        if (unlikely(!tx_pkt && !kni_tx_pkt && idle_sleep)) {
+        const bool tx_pkt = eth_tx(port_index, port_id, queue_id);
+        if (unlikely(!tx_pkt && global_config.idle_sleep)) {
             // 无包时短暂睡眠节省CPU资源
             usleep(1000 * 10);
         }
     }
 
-    RTE_LOG(INFO, APP, "lcore_tx exit in lcore: %u, port: %u\n", lcore_id, port_id);
+    RTE_LOG(INFO, APP, "lcore_tx exit in lcore: %u, port: %u, queue: %u\n", lcore_id, port_id, queue_id);
     return 0;
 }
 
-int lcore_rx_tx() {
+int lcore_rx_tx(const bool handle_eth, const bool handle_kni) {
     const unsigned int lcore_id = rte_lcore_id();
     RTE_LOG(INFO, APP, "lcore_rx_tx run in lcore: %u\n", lcore_id);
 
     while (atomic_load(&running)) {
         bool no_pkt = true;
-        for (int i = 0; i < port_count; i++) {
-            const bool rx_pkt = eth_rx(i, port_id_list[i]);
-            const bool tx_pkt = eth_tx(i, port_id_list[i]);
+        if (handle_eth) {
+            for (int port_index = 0; port_index < port_count; port_index++) {
+                const bool rx_pkt = eth_rx(port_index, port_id_list[port_index], 0);
+                const bool tx_pkt = eth_tx(port_index, port_id_list[port_index], 0);
+                if (rx_pkt || tx_pkt) {
+                    no_pkt = false;
+                }
+            }
+        }
+        if (handle_kni) {
             const bool kni_rx_pkt = kni_rx();
             const bool kni_tx_pkt = kni_tx();
-            if (likely(rx_pkt || tx_pkt || kni_rx_pkt || kni_tx_pkt)) {
+            if (kni_rx_pkt || kni_tx_pkt) {
                 no_pkt = false;
             }
         }
-        if (unlikely(no_pkt && idle_sleep)) {
+        if (no_pkt && global_config.idle_sleep) {
             // 无包时短暂睡眠节省CPU资源
             usleep(1000 * 10);
         }
@@ -489,12 +494,14 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
     printf("eal args: %s\n", config->eal_args);
     printf("cpu core list: %s\n", config->cpu_core_list);
     printf("port id list: %s\n", config->port_id_list);
+    printf("queue num: %d\n", config->queue_num);
     printf("ring buffer size: %d\n", config->ring_buffer_size);
     printf("debug log: %d\n", config->debug_log);
     printf("idle sleep: %d\n", config->idle_sleep);
     printf("single core: %d\n", config->single_core);
-    printf("kni enabled: %d\n", config->kni_enabled);
+    printf("kni enable: %d\n", config->kni_enable);
     printf("\n");
+    global_config = *config;
 
     // 初始化DPDK
     atomic_store(&running, false);
@@ -513,13 +520,11 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
     int cpu_core_list[128];
     parse_args(config->cpu_core_list, &cpu_core_count, &cpu_core_value);
     for (int i = 0; i < cpu_core_count; i++) {
-        cpu_core_list[i] = strtol(cpu_core_value[i], NULL, 10);
+        cpu_core_list[i] = (int) strtol(cpu_core_value[i], NULL, 10);
         free(cpu_core_value[i]);
     }
     free(cpu_core_value);
 
-    debug_log = config->debug_log;
-    idle_sleep = config->idle_sleep;
     const uint32_t ring_buffer_size = config->ring_buffer_size + sizeof(ring_buffer_t);
 
     uint64_t p;
@@ -527,16 +532,22 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
         char dev_name[RTE_DEV_NAME_MAX_LEN];
         rte_eth_dev_get_name_by_port(p, dev_name);
         printf("port number: %lu, port pci: %s, ", p, dev_name);
-        struct _rte_ether_addr dev_eth_addr = {0};
+        struct eth_macaddr dev_eth_addr = {0};
         rte_eth_macaddr_get(p, &dev_eth_addr);
         const uint8_t *mac_addr = dev_eth_addr.addr_bytes;
-        printf("mac address: %02X:%02X:%02X:%02X:%02X:%02X\n",
-               mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+        printf("mac address: %02X:%02X:%02X:%02X:%02X:%02X\n", mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
     }
 
     // 申请mbuf内存池
-    const int socket_id = rte_socket_id();
-    mbuf_pool = rte_pktmbuf_pool_create("mbuf_pool", NUM_MBUFS, MBUF_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE, socket_id);
+    const int socket_id = (int) rte_socket_id();
+    mbuf_pool = rte_pktmbuf_pool_create(
+        "mbuf_pool",
+        NUM_MBUFS * config->queue_num,
+        MBUF_CACHE_SIZE,
+        0,
+        RTE_MBUF_DEFAULT_BUF_SIZE,
+        socket_id
+    );
     if (!mbuf_pool) {
         rte_exit(EXIT_FAILURE, "mbuf pool create failed\n");
     }
@@ -551,31 +562,34 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
     }
     free(port_id_value);
 
-    port_ring_buffer = (struct ring_buffer *) malloc(sizeof(struct ring_buffer) * port_count);
-    memset(port_ring_buffer, 0x00, sizeof(struct ring_buffer) * port_count);
+    port_ring_buffer = (struct ring_buffer *) malloc(sizeof(struct ring_buffer) * port_count * config->queue_num);
+    memset(port_ring_buffer, 0x00, sizeof(struct ring_buffer) * port_count * config->queue_num);
     port_old_stats = (struct rte_eth_stats *) malloc(sizeof(struct rte_eth_stats) * port_count);
     memset(port_old_stats, 0x00, sizeof(struct rte_eth_stats) * port_count);
-    for (int i = 0; i < port_count; i++) {
+    for (int port_index = 0; port_index < port_count; port_index++) {
         // 网口初始化
-        if (port_init(port_id_list[i]) != 0) {
-            rte_exit(EXIT_FAILURE, "port init failed, port: %u\n", port_id_list[i]);
+        if (port_init(port_id_list[port_index], config->queue_num) != 0) {
+            rte_exit(EXIT_FAILURE, "port init failed, port: %u\n", port_id_list[port_index]);
         }
-        // 分配环状缓冲区内存
-        port_ring_buffer[i].send_ring_mem = rte_malloc("send_ring_buffer", ring_buffer_size, CACHE_LINE_SIZE);
-        port_ring_buffer[i].send_ring_buffer = ring_buffer_create(port_ring_buffer[i].send_ring_mem, ring_buffer_size);
-        if (!port_ring_buffer[i].send_ring_buffer) {
-            rte_exit(EXIT_FAILURE, "send ring buffer create failed\n");
-        }
-        port_ring_buffer[i].recv_ring_mem = rte_malloc("recv_ring_buffer", ring_buffer_size, CACHE_LINE_SIZE);
-        port_ring_buffer[i].recv_ring_buffer = ring_buffer_create(port_ring_buffer[i].recv_ring_mem, ring_buffer_size);
-        if (!port_ring_buffer[i].recv_ring_buffer) {
-            rte_exit(EXIT_FAILURE, "recv ring buffer create failed\n");
+        for (int queue_id = 0; queue_id < config->queue_num; queue_id++) {
+            const int i = port_index * config->queue_num + queue_id;
+            // 分配环状缓冲区内存
+            port_ring_buffer[i].send_ring_mem = rte_malloc("send_ring_buffer", ring_buffer_size, CACHE_LINE_SIZE);
+            port_ring_buffer[i].send_ring_buffer = ring_buffer_create(port_ring_buffer[i].send_ring_mem, ring_buffer_size);
+            if (!port_ring_buffer[i].send_ring_buffer) {
+                rte_exit(EXIT_FAILURE, "send ring buffer create failed\n");
+            }
+            port_ring_buffer[i].recv_ring_mem = rte_malloc("recv_ring_buffer", ring_buffer_size, CACHE_LINE_SIZE);
+            port_ring_buffer[i].recv_ring_buffer = ring_buffer_create(port_ring_buffer[i].recv_ring_mem, ring_buffer_size);
+            if (!port_ring_buffer[i].recv_ring_buffer) {
+                rte_exit(EXIT_FAILURE, "recv ring buffer create failed\n");
+            }
         }
     }
 
     printf("\n");
 
-    if (config->kni_enabled) {
+    if (config->kni_enable) {
         // kni分配环状缓冲区内存
         kni_ring_buffer.send_ring_mem = rte_malloc("send_ring_buffer", ring_buffer_size, CACHE_LINE_SIZE);
         kni_ring_buffer.send_ring_buffer = ring_buffer_create(kni_ring_buffer.send_ring_mem, ring_buffer_size);
@@ -594,17 +608,20 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
     // 线程核心绑定 循环处理数据包
     atomic_store(&running, true);
     if (config->single_core) {
-        lcore_rx_tx();
+        lcore_rx_tx(true, config->kni_enable);
     } else {
-        for (int i = 0; i < port_count; i++) {
-            int *arg = malloc(sizeof(int));
-            *arg = i;
-            rte_eal_remote_launch(lcore_tx, arg, cpu_core_list[i * 2 + 1 + 0]);
-            rte_eal_remote_launch(lcore_rx, arg, cpu_core_list[i * 2 + 1 + 1]);
+        struct lcore_arg arg_list[128] = {0};
+        for (int port_index = 0; port_index < port_count; port_index++) {
+            for (int queue_id = 0; queue_id < config->queue_num; queue_id++) {
+                const int arg_index = port_index * config->queue_num + queue_id;
+                arg_list[arg_index].port_index = port_index;
+                arg_list[arg_index].queue_id = queue_id;
+                const int cpu_core_index = 1 + port_index * config->queue_num * 2 + queue_id;
+                rte_eal_remote_launch(lcore_rx, arg_list + arg_index, cpu_core_list[cpu_core_index + 0]);
+                rte_eal_remote_launch(lcore_tx, arg_list + arg_index, cpu_core_list[cpu_core_index + config->queue_num]);
+            }
         }
-        while (atomic_load(&running)) {
-            usleep(1000 * 1000);
-        }
+        lcore_rx_tx(false, config->kni_enable);
     }
 
     return 0;

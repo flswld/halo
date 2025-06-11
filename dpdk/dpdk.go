@@ -28,17 +28,17 @@ func Log(msg string) {
 }
 
 type Config struct {
-	DpdkCpuCoreList []int // dpdk使用的核心编号列表 主线程第一个核心 每个网卡两个核心
-	DpdkMemChanNum  int   // dpdk内存通道数
-	PortIdList      []int // 使用的网卡id列表
-	QueueNum        int
+	DpdkCpuCoreList []int    // dpdk使用的核心编号列表 主线程第一个核心 每个网卡队列一个核心
+	DpdkMemChanNum  int      // dpdk内存通道数
+	PortIdList      []int    // 使用的网卡id列表
+	QueueNum        int      // 启用的网卡队列数
 	RingBufferSize  int      // 环状缓冲区大小
 	AfPacketDevList []string // 使用的AF_PACKET虚拟网卡列表
 	StatsLog        bool     // 收发包统计日志
 	DebugLog        bool     // 收发包调试日志
 	IdleSleep       bool     // 空闲睡眠 降低cpu占用
 	SingleCore      bool     // 单核模式 只使用cpu0
-	KniEnable       bool
+	KniEnable       bool     // 开启kni内核网卡
 }
 
 type ring_buffer struct {
@@ -59,8 +59,14 @@ var (
 func Run(config *Config) {
 	conf = config
 	// 配置参数检查
+	if conf.DpdkMemChanNum == 0 {
+		conf.DpdkMemChanNum = 1
+	}
 	if conf.QueueNum == 0 {
 		conf.QueueNum = 1
+	}
+	if conf.RingBufferSize == 0 {
+		conf.RingBufferSize = 128 * mem.MB
 	}
 	if !conf.SingleCore {
 		if len(conf.DpdkCpuCoreList) < 1+len(conf.PortIdList)*2*conf.QueueNum {
@@ -75,9 +81,6 @@ func Run(config *Config) {
 	}
 	if len(conf.PortIdList) == 0 {
 		panic("no port can use")
-	}
-	if conf.RingBufferSize == 0 {
-		conf.RingBufferSize = 128 * mem.MB
 	}
 	if conf.RingBufferSize&(conf.RingBufferSize-1) != 0 {
 		panic("ring buffer size error")
@@ -217,6 +220,7 @@ func print_port_stats(port_index_list []int) {
 	}
 }
 
+// 处理kni内核网卡数据包
 func kni_handle() {
 	ticker := time.NewTicker(time.Millisecond * 100)
 	for {

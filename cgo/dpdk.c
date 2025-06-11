@@ -68,23 +68,27 @@ struct rte_mempool *mbuf_pool = NULL;
 struct rte_eth_stats *port_old_stats = NULL;
 static struct rte_kni *kni = NULL;
 
+// 获取网卡发包环状缓冲区
 ring_buffer_t *cgo_port_send_ring_buffer(const int port_index, const int queue_id) {
     return port_ring_buffer[port_index * global_config.queue_num + queue_id].send_ring_buffer;
 }
 
+// 获取网卡收包环状缓冲区
 ring_buffer_t *cgo_port_recv_ring_buffer(const int port_index, const int queue_id) {
     return port_ring_buffer[port_index * global_config.queue_num + queue_id].recv_ring_buffer;
 }
 
+// 获取KNI发包环状缓冲区
 ring_buffer_t *cgo_kni_send_ring_buffer() {
     return kni_ring_buffer.send_ring_buffer;
 }
 
+// 获取KNI收包环状缓冲区
 ring_buffer_t *cgo_kni_recv_ring_buffer() {
     return kni_ring_buffer.recv_ring_buffer;
 }
 
-// 打印收发包统计信息
+// 打印网卡收发包统计信息
 void cgo_print_stats(const int port_index, char *msg) {
     const uint16_t port_id = port_id_list[port_index];
     const struct rte_eth_stats old_stats = port_old_stats[port_index];
@@ -106,7 +110,7 @@ void cgo_exit_signal_handler(void) {
     atomic_store(&running, false);
     rte_eal_mp_wait_lcore();
 
-    if (kni) {
+    if (global_config.kni_enable) {
         if (rte_kni_release(kni)) {
             RTE_LOG(ERR, APP, "fail to release kni\n");
         }
@@ -143,11 +147,9 @@ void cgo_kni_handle(void) {
     rte_kni_handle_request(kni);
 }
 
-// 初始化网口 配置收发队列
 int port_init(uint16_t port_id, const uint16_t queue_num) {
     struct rte_eth_conf port_conf = {0};
     port_conf.rxmode.max_rx_pkt_len = 1518;
-
     struct rte_eth_dev_info dev_info = {0};
     rte_eth_dev_info_get(port_id, &dev_info);
     if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE) {
@@ -160,20 +162,20 @@ int port_init(uint16_t port_id, const uint16_t queue_num) {
         RTE_LOG(ERR, APP, "rte_eth_dev_configure failed\n");
         return ret;
     }
-    uint16_t nb_rxd = RX_RING_SIZE;
-    uint16_t nb_txd = TX_RING_SIZE;
-    rte_eth_dev_adjust_nb_rx_tx_desc(port_id, &nb_rxd, &nb_txd);
+    uint16_t nb_rx_desc = RX_RING_SIZE;
+    uint16_t nb_tx_desc = TX_RING_SIZE;
+    rte_eth_dev_adjust_nb_rx_tx_desc(port_id, &nb_rx_desc, &nb_tx_desc);
     // 配置收包队列
-    for (uint16_t q = 0; q < queue_num; q++) {
-        ret = rte_eth_rx_queue_setup(port_id, q, nb_rxd, rte_eth_dev_socket_id(port_id), NULL, mbuf_pool);
+    for (uint16_t queue_id = 0; queue_id < queue_num; queue_id++) {
+        ret = rte_eth_rx_queue_setup(port_id, queue_id, nb_rx_desc, rte_eth_dev_socket_id(port_id), NULL, mbuf_pool);
         if (ret < 0) {
             RTE_LOG(ERR, APP, "rte_eth_rx_queue_setup failed\n");
             return ret;
         }
     }
     // 配置发包队列
-    for (uint16_t q = 0; q < queue_num; q++) {
-        ret = rte_eth_tx_queue_setup(port_id, q, nb_txd, rte_eth_dev_socket_id(port_id), NULL);
+    for (uint16_t queue_id = 0; queue_id < queue_num; queue_id++) {
+        ret = rte_eth_tx_queue_setup(port_id, queue_id, nb_tx_desc, rte_eth_dev_socket_id(port_id), NULL);
         if (ret < 0) {
             RTE_LOG(ERR, APP, "rte_eth_tx_queue_setup failed\n");
             return ret;
@@ -567,7 +569,7 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
     port_old_stats = (struct rte_eth_stats *) malloc(sizeof(struct rte_eth_stats) * port_count);
     memset(port_old_stats, 0x00, sizeof(struct rte_eth_stats) * port_count);
     for (int port_index = 0; port_index < port_count; port_index++) {
-        // 网口初始化
+        // 网卡初始化
         if (port_init(port_id_list[port_index], config->queue_num) != 0) {
             rte_exit(EXIT_FAILURE, "port init failed, port: %u\n", port_id_list[port_index]);
         }
@@ -590,7 +592,7 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
     printf("\n");
 
     if (config->kni_enable) {
-        // kni分配环状缓冲区内存
+        // KNI分配环状缓冲区内存
         kni_ring_buffer.send_ring_mem = rte_malloc("send_ring_buffer", ring_buffer_size, CACHE_LINE_SIZE);
         kni_ring_buffer.send_ring_buffer = ring_buffer_create(kni_ring_buffer.send_ring_mem, ring_buffer_size);
         if (!kni_ring_buffer.send_ring_buffer) {

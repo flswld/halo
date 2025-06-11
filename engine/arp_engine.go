@@ -22,9 +22,9 @@ func (i *NetIf) GetArpCache(ipAddr []byte) []byte {
 		return nil
 	}
 	ipAddrU := protocol.IpAddrToU(ipAddr)
-	i.ArpCacheTableLock.RLock()
+	i.ArpLock.RLock()
 	macAddr, exist := i.ArpCacheTable[ipAddrU]
-	i.ArpCacheTableLock.RUnlock()
+	i.ArpLock.RUnlock()
 	if !exist {
 		// 不存在则发起ARP询问并返回空
 		arpPkt := make([]byte, 0, 28)
@@ -43,9 +43,9 @@ func (i *NetIf) SetArpCache(ipAddr []byte, macAddr []byte) {
 	ipAddrU := protocol.IpAddrToU(ipAddr)
 	_macAddr := make([]byte, 6)
 	copy(_macAddr, macAddr)
-	i.ArpCacheTableLock.Lock()
+	i.ArpLock.Lock()
 	i.ArpCacheTable[ipAddrU] = _macAddr
-	i.ArpCacheTableLock.Unlock()
+	i.ArpLock.Unlock()
 }
 
 func (i *NetIf) HandleArp(ethPayload []byte, ethSrcMac []byte) {

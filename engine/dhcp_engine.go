@@ -202,7 +202,7 @@ func BuildDhcpPkt(pkt []byte, transactionId []byte, yourIpAddr []byte, clientMac
 
 func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, ipv4SrcAddr []byte) {
 	if udpSrcPort == DhcpClientPort && udpDstPort == DhcpServerPort {
-		if !i.DhcpServerEnable {
+		if !i.Config.DhcpServerEnable {
 			return
 		}
 		transactionId, _, clientMacAddr, dhcpOptionMap, err := ParseDhcpPkt(udpPayload)
@@ -316,7 +316,7 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 		default:
 		}
 	} else if udpSrcPort == DhcpServerPort && udpDstPort == DhcpClientPort {
-		if !i.DhcpClientEnable {
+		if !i.Config.DhcpClientEnable {
 			return
 		}
 		if protocol.IpAddrToU(i.IpAddr) != 0 {
@@ -359,7 +359,7 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 					DstIpAddr:   []byte{0x00, 0x00, 0x00, 0x00},
 					NetworkMask: []byte{0x00, 0x00, 0x00, 0x00},
 					NextHop:     nextHop,
-					NetIf:       i.Name,
+					NetIf:       i.Config.Name,
 				})
 				dstIpAddrU := protocol.IpAddrToU(i.IpAddr) & protocol.IpAddrToU(i.NetworkMask)
 				dstIpAddr := protocol.UToIpAddr(dstIpAddrU)
@@ -367,7 +367,7 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 					DstIpAddr:   dstIpAddr,
 					NetworkMask: i.NetworkMask,
 					NextHop:     nil,
-					NetIf:       i.Name,
+					NetIf:       i.Config.Name,
 				})
 				Log(fmt.Sprintf("dhcp client get router: %v\n", optionRouter.IpAddr))
 			}
@@ -376,7 +376,7 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 				copy(i.DnsServerAddr, optionDomainNameServer.IpAddr)
 				Log(fmt.Sprintf("dhcp client get dns: %v\n", optionDomainNameServer.IpAddr))
 				for _, netIf := range i.Engine.NetIfMap {
-					if !netIf.DhcpServerEnable {
+					if !netIf.Config.DhcpServerEnable {
 						continue
 					}
 					copy(netIf.DnsServerAddr, optionDomainNameServer.IpAddr)
@@ -412,4 +412,22 @@ func (i *NetIf) DhcpDiscover() {
 		DhcpOptionClientIdentifier:     {Type: DhcpOptionClientIdentifier, MacAddr: i.MacAddr},
 		DhcpOptionParameterRequestList: {Type: DhcpOptionParameterRequestList},
 	})
+}
+
+func (i *NetIf) DhcpLeaseClear() {
+	ticker := time.NewTicker(time.Minute * 1)
+	for {
+		<-ticker.C
+		if i.Engine.Stop.Load() {
+			break
+		}
+		now := time.Now().Unix()
+		i.DhcpLock.Lock()
+		for ipAddrU, dhcpLease := range i.DhcpLeaseMap {
+			if now > dhcpLease.ExpTime {
+				delete(i.DhcpLeaseMap, ipAddrU)
+			}
+		}
+		i.DhcpLock.Unlock()
+	}
 }

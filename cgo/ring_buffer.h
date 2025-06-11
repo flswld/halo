@@ -96,7 +96,7 @@ ring_buffer_t *ring_buffer_mapping(void *memory, int64_t *offset) {
     return rb;
 }
 
-// 写入数据包
+// 偏移写入数据包
 bool write_packet_offset(ring_buffer_t *rb, const int64_t offset, const uint8_t *data, const uint16_t len) {
     if (len == 0 || len > rb->size / 2) {
         return false;
@@ -127,11 +127,12 @@ bool write_packet_offset(ring_buffer_t *rb, const int64_t offset, const uint8_t 
     return true;
 }
 
+// 写入数据包
 bool write_packet(ring_buffer_t *rb, const uint8_t *data, const uint16_t len) {
     return write_packet_offset(rb, 0, data, len);
 }
 
-// 读取数据包
+// 偏移读取数据包
 bool read_packet_offset(ring_buffer_t *rb, const int64_t offset, uint8_t *data, uint16_t *len) {
     *len = 0;
     const uint64_t head = atomic_load(&rb->head);
@@ -167,6 +168,7 @@ bool read_packet_offset(ring_buffer_t *rb, const int64_t offset, uint8_t *data, 
     return true;
 }
 
+// 读取数据包
 bool read_packet(ring_buffer_t *rb, uint8_t *data, uint16_t *len) {
     return read_packet_offset(rb, 0, data, len);
 }

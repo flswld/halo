@@ -8,8 +8,8 @@ import (
 )
 
 func (i *NetIf) RxEthernet(ethFrm []byte) {
-	if i.Engine.DebugLog {
-		Log(fmt.Sprintf("rx eth frm, if: %v, len: %v, data: %02x\n", i.Name, len(ethFrm), ethFrm))
+	if i.Engine.Config.DebugLog {
+		Log(fmt.Sprintf("rx eth frm, if: %v, len: %v, data: %02x\n", i.Config.Name, len(ethFrm), ethFrm))
 	}
 	ethPayload, ethDstMac, ethSrcMac, ethProto, err := protocol.ParseEthFrm(ethFrm)
 	if err != nil {
@@ -37,9 +37,9 @@ func (i *NetIf) TxEthernet(ethPayload []byte, ethDstMac []byte, ethProto uint16)
 		Log(fmt.Sprintf("build ethernet frame error: %v\n", err))
 		return false
 	}
-	if i.Engine.DebugLog {
-		Log(fmt.Sprintf("tx eth frm, if: %v, len: %v, data: %02x\n", i.Name, len(ethFrm), ethFrm))
+	if i.Engine.Config.DebugLog {
+		Log(fmt.Sprintf("tx eth frm, if: %v, len: %v, data: %02x\n", i.Config.Name, len(ethFrm), ethFrm))
 	}
-	i.EthTxFunc(ethFrm)
+	i.Config.EthTxFunc(ethFrm)
 	return true
 }

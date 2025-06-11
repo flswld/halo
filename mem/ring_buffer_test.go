@@ -11,7 +11,7 @@ import (
 	"github.com/flswld/halo/cpu"
 )
 
-func TestRingBuffer(t *testing.T) {
+func TestRingBufferData(t *testing.T) {
 	mem := new(CHeap).AlignedMalloc(SizeOf[RingBuffer]() + 1*MB)
 	rb := RingBufferCreate(mem, uint32(SizeOf[RingBuffer]()+1*MB))
 
@@ -56,7 +56,7 @@ func TestRingBuffer(t *testing.T) {
 				panic("???")
 			}
 			seq := binary.BigEndian.Uint64(data[0:8])
-			if seq&((1024*1024*8)-1) == 0 {
+			if seq%(1024*1024*8) == 0 {
 				tt := time.Now()
 				ops := float64(seq-_seq) / (tt.Sub(_tt).Seconds())
 				log.Printf("speed: %.0f op/s\n", ops)
@@ -78,17 +78,11 @@ type TestMsg struct {
 	Seq uint64
 }
 
-type SliceHeader struct {
-	Data uintptr
-	Len  int
-	Cap  int
-}
-
-func TestFastRingBuffer(t *testing.T) {
+func TestRingBufferStruct(t *testing.T) {
 	mem := new(CHeap).AlignedMalloc(SizeOf[RingBuffer]() + 1*MB)
 	rb := RingBufferCreate(mem, uint32(SizeOf[RingBuffer]()+1*MB))
 
-	var stop bool
+	var stop atomic.Bool
 
 	go func() {
 		cpu.BindCpuCore(0)
@@ -97,13 +91,13 @@ func TestFastRingBuffer(t *testing.T) {
 		msgLen := SizeOf[TestMsg]()
 		msgData := new(SliceHeader)
 		for {
-			if stop {
+			if stop.Load() {
 				break
 			}
 			msgData.Data = uintptr(unsafe.Pointer(msg))
 			msgData.Len = int(msgLen)
 			msgData.Cap = int(msgLen)
-			ok := WritePacketWithOption(rb, 0, true, *(*[]uint8)(unsafe.Pointer(msgData)), uint16(msgLen))
+			ok := WritePacket(rb, *(*[]uint8)(unsafe.Pointer(msgData)), uint16(msgLen))
 			if !ok {
 				continue
 			}
@@ -118,15 +112,15 @@ func TestFastRingBuffer(t *testing.T) {
 		seq := uint64(1)
 		_tt := time.Now()
 		for {
-			if stop {
+			if stop.Load() {
 				break
 			}
-			ReadPacketWithOption(rb, 0, true, msgData, &_len)
+			ReadPacket(rb, msgData, &_len)
 			if _len == 0 {
 				continue
 			}
 			msg := (*TestMsg)(unsafe.Pointer(&msgData[0]))
-			if msg.Seq&((1024*1024*8)-1) == 0 {
+			if msg.Seq%(1024*1024*8) == 0 {
 				tt := time.Now()
 				ops := float64(msg.Seq-seq) / (tt.Sub(_tt).Seconds())
 				log.Printf("speed: %.0f op/s\n", ops)
@@ -137,9 +131,64 @@ func TestFastRingBuffer(t *testing.T) {
 	}()
 
 	time.Sleep(time.Second * 30)
-	stop = true
+	stop.Store(true)
 	time.Sleep(time.Second)
 
 	RingBufferDestroy(rb)
 	new(CHeap).AlignedFree(mem)
+}
+
+func TestRingBufferShmWrite(t *testing.T) {
+	mem := GetShareMem("RingBuffer", SizeOf[RingBuffer]()+1*MB)
+	offset := int64(0)
+	rb := RingBufferMapping(mem, &offset)
+	if rb == nil {
+		rb = RingBufferCreate(mem, uint32(SizeOf[RingBuffer]()+1*MB))
+	}
+	data := make([]byte, 16)
+	for i := 8; i <= 15; i++ {
+		data[i] = 0xff
+	}
+	seq := uint64(1)
+	cpu.BindCpuCore(0)
+	for {
+		binary.BigEndian.PutUint64(data[0:8], seq)
+		ok := WritePacketOffset(rb, offset, data, 16)
+		if !ok {
+			continue
+		}
+		seq++
+	}
+}
+
+func TestRingBufferShmRead(t *testing.T) {
+	mem := GetShareMem("RingBuffer", SizeOf[RingBuffer]()+1*MB)
+	offset := int64(0)
+	rb := RingBufferMapping(mem, &offset)
+	if rb == nil {
+		rb = RingBufferCreate(mem, uint32(SizeOf[RingBuffer]()+1*MB))
+	}
+	_data := make([]byte, 16)
+	_len := uint16(0)
+	_seq := uint64(1)
+	_tt := time.Now()
+	cpu.BindCpuCore(1)
+	for {
+		ReadPacketOffset(rb, offset, _data, &_len)
+		if _len == 0 {
+			continue
+		}
+		data := _data[0:_len]
+		if _len != 16 || data[15] != 0xff {
+			panic("???")
+		}
+		seq := binary.BigEndian.Uint64(data[0:8])
+		if seq%(1024*1024*8) == 0 {
+			tt := time.Now()
+			ops := float64(seq-_seq) / (tt.Sub(_tt).Seconds())
+			log.Printf("speed: %.0f op/s\n", ops)
+			_tt = tt
+			_seq = seq
+		}
+	}
 }

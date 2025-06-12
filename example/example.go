@@ -156,6 +156,7 @@ func EthernetRouter() {
 				EthTxFunc: func(pkt []byte) {
 					dpdk.EthTxPkt(1, pkt)
 				},
+				BindCpuCore: -1,
 			},
 			{
 				Name:             "lan0",
@@ -170,6 +171,7 @@ func EthernetRouter() {
 				EthTxFunc: func(pkt []byte) {
 					dpdk.KniTxPkt(pkt)
 				},
+				BindCpuCore: -1,
 			},
 		},
 		// 路由表

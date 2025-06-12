@@ -245,7 +245,6 @@ func (l *Logger) doLog() {
 				logData = logBuf.Bytes()
 			} else {
 				logData = *logInfo.Msg
-				logData = append(logData, lineFeed...)
 			}
 			l.writeLog(logData, logInfo.Tag, logInfo.Time)
 			putBuf(logInfo.Msg)

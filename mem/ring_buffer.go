@@ -121,6 +121,7 @@ func WritePacket(rb *RingBuffer, data []uint8, len uint16) bool {
 }
 
 func ReadPacketOffset(rb *RingBuffer, offset int64, data []uint8, len *uint16) bool {
+	*len = 0
 	head := atomic.LoadUint64(&rb.head)
 	tail := atomic.LoadUint64(&rb.tail)
 	usedSpace := uint32(head - tail)

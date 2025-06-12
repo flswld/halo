@@ -30,7 +30,7 @@ func (i *NetIf) RxEthernet(ethFrm []byte) {
 
 func (i *NetIf) TxEthernet(ethPayload []byte, ethDstMac []byte, ethProto uint16) bool {
 	i.EthTxLock.Lock()
-	defer i.EthTxLock.UnLock()
+	defer i.EthTxLock.Unlock()
 	i.EthTxBuffer = i.EthTxBuffer[0:0]
 	ethFrm, err := protocol.BuildEthFrm(i.EthTxBuffer, ethPayload, ethDstMac, i.MacAddr, ethProto)
 	if err != nil {

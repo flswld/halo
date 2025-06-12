@@ -12,8 +12,7 @@ import (
 	"github.com/flswld/halo/mem"
 )
 
-// #cgo CFLAGS: -msse4.2
-// #cgo LDFLAGS: -Wl,--whole-archive -ldpdk -Wl,--no-whole-archive -ldl -pthread -lnuma -lm
+// #cgo pkg-config: libdpdk
 // #include "../cgo/dpdk.c"
 import "C"
 

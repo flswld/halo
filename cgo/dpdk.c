@@ -94,7 +94,7 @@ void cgo_print_stats(const int port_index, char *msg) {
     const struct rte_eth_stats old_stats = port_old_stats[port_index];
     struct rte_eth_stats new_stats = {0};
     rte_eth_stats_get(port_id, &new_stats);
-    sprintf(msg, "[rte_eth_stats]\tport:%2u | rx:%10lu (pps) | tx:%10lu (pps) | drop:%10lu (pps) | rx:%20lu (byte/s) | tx:%20lu (byte/s)",
+    sprintf(msg, "[rte_eth_stats]\tport:%2u | rx:%10lu (pps) | tx:%10lu (pps) | drop:%10lu (pps) | rx:%20lu (byte/s) | tx:%20lu (byte/s)\n",
             port_id,
             new_stats.ipackets - old_stats.ipackets,
             new_stats.opackets - old_stats.opackets,
@@ -120,7 +120,9 @@ void cgo_exit_signal_handler(void) {
         rte_free(kni_ring_buffer.recv_ring_mem);
     }
     for (int port_index = 0; port_index < port_count; port_index++) {
-        rte_eth_dev_stop(port_id_list[port_index]);
+        const uint16_t port_id = port_id_list[port_index];
+        rte_eth_dev_stop(port_id);
+        rte_eth_dev_close(port_id);
         for (int queue_id = 0; queue_id < global_config.queue_num; queue_id++) {
             const int i = port_index * global_config.queue_num + queue_id;
             ring_buffer_destroy(port_ring_buffer[i].send_ring_buffer);
@@ -155,6 +157,7 @@ int port_init(uint16_t port_id, const uint16_t queue_num) {
     if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE) {
         port_conf.txmode.offloads |= DEV_TX_OFFLOAD_MBUF_FAST_FREE;
     }
+    RTE_LOG(INFO, APP, "port: %u, queue: %u, rx offloads: %lu, tx offloads: %lu\n", port_id, queue_num, port_conf.rxmode.offloads, port_conf.txmode.offloads);
 
     // 配置设备
     int ret = rte_eth_dev_configure(port_id, queue_num, queue_num, &port_conf);
@@ -436,8 +439,9 @@ int lcore_rx_tx(const bool handle_eth, const bool handle_kni) {
         bool no_pkt = true;
         if (handle_eth) {
             for (int port_index = 0; port_index < port_count; port_index++) {
-                const bool rx_pkt = eth_rx(port_index, port_id_list[port_index], 0);
-                const bool tx_pkt = eth_tx(port_index, port_id_list[port_index], 0);
+                const uint16_t port_id = port_id_list[port_index];
+                const bool rx_pkt = eth_rx(port_index, port_id, 0);
+                const bool tx_pkt = eth_tx(port_index, port_id, 0);
                 if (rx_pkt || tx_pkt) {
                     no_pkt = false;
                 }
@@ -510,7 +514,7 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
     int argc = 0;
     char **argv = NULL;
     parse_args(config->eal_args, &argc, &argv);
-    const int ret = rte_eal_init(argc, argv);
+    int ret = rte_eal_init(argc, argv);
     free(argv);
     if (ret < 0) {
         rte_exit(EXIT_FAILURE, "eal init failed\n");
@@ -529,31 +533,6 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
 
     const uint32_t ring_buffer_size = config->ring_buffer_size + sizeof(ring_buffer_t);
 
-    uint64_t p;
-    RTE_ETH_FOREACH_DEV(p) {
-        char dev_name[RTE_DEV_NAME_MAX_LEN];
-        rte_eth_dev_get_name_by_port(p, dev_name);
-        printf("port number: %lu, port pci: %s, ", p, dev_name);
-        struct eth_macaddr dev_eth_addr = {0};
-        rte_eth_macaddr_get(p, &dev_eth_addr);
-        const uint8_t *mac_addr = dev_eth_addr.addr_bytes;
-        printf("mac address: %02X:%02X:%02X:%02X:%02X:%02X\n", mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
-    }
-
-    // 申请mbuf内存池
-    const int socket_id = (int) rte_socket_id();
-    mbuf_pool = rte_pktmbuf_pool_create(
-        "mbuf_pool",
-        NUM_MBUFS * config->queue_num,
-        MBUF_CACHE_SIZE,
-        0,
-        RTE_MBUF_DEFAULT_BUF_SIZE,
-        socket_id
-    );
-    if (!mbuf_pool) {
-        rte_exit(EXIT_FAILURE, "mbuf pool create failed\n");
-    }
-
     char **port_id_value = NULL;
     parse_args(config->port_id_list, &port_count, &port_id_value);
     port_id_list = (uint16_t *) malloc(sizeof(uint16_t) * port_count);
@@ -564,14 +543,30 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
     }
     free(port_id_value);
 
+    // 申请mbuf内存池
+    const int socket_id = (int) rte_socket_id();
+    mbuf_pool = rte_pktmbuf_pool_create(
+        "mbuf_pool",
+        NUM_MBUFS * port_count * config->queue_num,
+        MBUF_CACHE_SIZE,
+        0,
+        RTE_MBUF_DEFAULT_BUF_SIZE,
+        socket_id
+    );
+    if (!mbuf_pool) {
+        rte_exit(EXIT_FAILURE, "mbuf pool create failed\n");
+    }
+
     port_ring_buffer = (struct ring_buffer *) malloc(sizeof(struct ring_buffer) * port_count * config->queue_num);
     memset(port_ring_buffer, 0x00, sizeof(struct ring_buffer) * port_count * config->queue_num);
     port_old_stats = (struct rte_eth_stats *) malloc(sizeof(struct rte_eth_stats) * port_count);
     memset(port_old_stats, 0x00, sizeof(struct rte_eth_stats) * port_count);
     for (int port_index = 0; port_index < port_count; port_index++) {
         // 网卡初始化
-        if (port_init(port_id_list[port_index], config->queue_num) != 0) {
-            rte_exit(EXIT_FAILURE, "port init failed, port: %u\n", port_id_list[port_index]);
+        const uint16_t port_id = port_id_list[port_index];
+        ret = port_init(port_id, config->queue_num);
+        if (ret != 0) {
+            rte_exit(EXIT_FAILURE, "port init failed, port: %u\n", port_id);
         }
         for (int queue_id = 0; queue_id < config->queue_num; queue_id++) {
             const int i = port_index * config->queue_num + queue_id;

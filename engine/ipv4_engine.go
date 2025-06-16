@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"fmt"
+	"hash/fnv"
 	"sync"
 	"time"
 
@@ -199,9 +200,9 @@ type RouteTable struct {
 
 // TrieNode 路由树节点
 type TrieNode struct {
-	Route *RouteEntry // 路由信息
-	Left  *TrieNode   // 左节点
-	Right *TrieNode   // 右节点
+	RouteList []*RouteEntry // 路由信息
+	Left      *TrieNode     // 左节点
+	Right     *TrieNode     // 右节点
 }
 
 // RouteEntry 路由条目
@@ -248,17 +249,30 @@ func (r *RouteTable) UpdateRoute(oldRoute *RouteEntry, newRoute *RouteEntry) {
 			node = node.Right
 		}
 	}
-	node.Route = newRoute
+	newRouteList := make([]*RouteEntry, 0, len(node.RouteList))
+	for _, routeEntry := range node.RouteList {
+		if protocol.IpAddrToU(routeEntry.DstIpAddr) == protocol.IpAddrToU(oldRoute.DstIpAddr) &&
+			protocol.IpAddrToU(routeEntry.NetworkMask) == protocol.IpAddrToU(oldRoute.NetworkMask) &&
+			protocol.IpAddrToU(routeEntry.NextHop) == protocol.IpAddrToU(oldRoute.NextHop) &&
+			routeEntry.NetIf == oldRoute.NetIf {
+			continue
+		}
+		newRouteList = append(newRouteList, routeEntry)
+	}
+	if newRoute != nil {
+		newRouteList = append(newRouteList, newRoute)
+	}
+	node.RouteList = newRouteList
 }
 
 func (r *RouteTable) FindRoute(ip []byte) *RouteEntry {
 	r.Lock.RLock()
 	defer r.Lock.RUnlock()
 	node := r.Root
-	var lastMatch *RouteEntry
+	var lastMatch []*RouteEntry
 	for i := 0; i < 32; i++ {
-		if node.Route != nil {
-			lastMatch = node.Route
+		if node.RouteList != nil {
+			lastMatch = node.RouteList
 		}
 		bit := (ip[i/8] >> (7 - uint(i%8))) & 1
 		if bit == 0 {
@@ -273,44 +287,45 @@ func (r *RouteTable) FindRoute(ip []byte) *RouteEntry {
 			node = node.Right
 		}
 	}
-	if node.Route != nil {
-		lastMatch = node.Route
+	if node.RouteList != nil {
+		lastMatch = node.RouteList
 	}
-	return lastMatch
+	h := fnv.New32a()
+	_, _ = h.Write(ip)
+	return lastMatch[h.Sum32()%uint32(len(lastMatch))]
 }
 
 func (r *RouteTable) ListRoute() []*RouteEntry {
 	r.Lock.RLock()
 	defer r.Lock.RUnlock()
-	return r._ForNode(r.Root)
+	return r.foreachNode(r.Root)
 }
 
-func (r *RouteTable) _ForNode(node *TrieNode) []*RouteEntry {
+func (r *RouteTable) foreachNode(node *TrieNode) []*RouteEntry {
 	if node == nil {
 		return nil
 	}
 	result := make([]*RouteEntry, 0)
-	if node.Route != nil {
-		result = append(result, node.Route)
+	if node.RouteList != nil {
+		result = append(result, node.RouteList...)
 	}
-	routeList := r._ForNode(node.Left)
+	routeList := r.foreachNode(node.Left)
 	for _, route := range routeList {
 		result = append(result, route)
 	}
-	routeList = r._ForNode(node.Right)
+	routeList = r.foreachNode(node.Right)
 	for _, route := range routeList {
 		result = append(result, route)
 	}
 	return result
 }
 
-func (i *NetIf) FindRoute(ipv4DstAddr []byte) (nextHopIpAddr []byte, outNetIfName string) {
+func (i *NetIf) FindRoute(ipv4DstAddr []byte) ([]byte, string) {
 	route := i.Engine.RouteTable.FindRoute(ipv4DstAddr)
-	if route != nil {
-		nextHopIpAddr = route.NextHop
-		outNetIfName = route.NetIf
+	if route == nil {
+		return nil, ""
 	}
-	return nextHopIpAddr, outNetIfName
+	return route.NextHop, route.NetIf
 }
 
 // NAT类型

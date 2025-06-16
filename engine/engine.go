@@ -236,20 +236,20 @@ func (e *Engine) StopEngine() {
 }
 
 func (i *NetIf) PacketHandle() {
-	if i.Config.BindCpuCore > 0 {
+	if i.Config.BindCpuCore >= 0 {
 		cpu.BindCpuCore(i.Config.BindCpuCore)
 	}
 	n := 0
 	for {
+		if i.Engine.Stop.Load() {
+			break
+		}
 		ethFrm := i.Config.EthRxFunc()
 		if ethFrm != nil {
 			i.RxEthernet(ethFrm)
 		}
 		n++
 		if n%100 == 0 {
-			if i.Engine.Stop.Load() {
-				break
-			}
 			select {
 			case ipv4Pkt := <-i.LoChan:
 				ipv4Payload, ipv4HeadProto, ipv4SrcAddr, ipv4DstAddr, err := protocol.ParseIpv4Pkt(ipv4Pkt)

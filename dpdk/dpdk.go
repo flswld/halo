@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -54,7 +55,7 @@ var (
 	running          atomic.Bool
 )
 
-// Run 启动dpdk
+// Run 启动DPDK
 func Run(config *Config) {
 	conf = config
 	// 配置参数检查
@@ -114,7 +115,7 @@ func Run(config *Config) {
 	}
 }
 
-// Exit 停止dpdk
+// Exit 停止DPDK
 func Exit() {
 	running.Store(false)
 	C.cgo_exit_signal_handler()
@@ -146,7 +147,7 @@ func EthQueueRxPkt(port_index int, queue_id int) (pkt []byte) {
 		if conf.IdleSleep {
 			time.Sleep(time.Millisecond * 10)
 		}
-		// 单个cpu核心轮询
+		// 单个CPU核心轮询
 		return nil
 	}
 	pkt = pkt_rx_buf[:pkt_len]
@@ -206,34 +207,41 @@ func KniTxPkt(pkt []byte) {
 func print_port_stats(port_index_list []int) {
 	ticker := time.NewTicker(time.Second)
 	for {
+		<-ticker.C
 		if !running.Load() {
 			ticker.Stop()
 			break
 		}
 		for _, port_index := range port_index_list {
+			var pinner runtime.Pinner
 			var msg [1 * mem.KB]C.char
-			C.cgo_print_stats(C.int(port_index), (*C.char)(&msg[0]))
-			Log(C.GoString((*C.char)(&msg[0])))
+			pinner.Pin(&msg[0])
+			C.cgo_print_stats(C.int(port_index), &msg[0])
+			pinner.Unpin()
+			Log(C.GoString(&msg[0]))
 		}
-		<-ticker.C
 	}
 }
 
-// 处理kni内核网卡数据包
+// 处理KNI内核网卡数据包
 func kni_handle() {
 	ticker := time.NewTicker(time.Millisecond * 100)
 	for {
+		<-ticker.C
 		if !running.Load() {
 			ticker.Stop()
 			break
 		}
 		C.cgo_kni_handle()
-		<-ticker.C
 	}
 }
 
-// 构建dpdk eal参数
-func build_eal_args() string {
+// 构建EAL参数
+func build_eal_arg() (int, []*C.char) {
+	eal_argc := 0
+	eal_argv := make([]*C.char, 0)
+	eal_argc++
+	eal_argv = append(eal_argv, C.CString(os.Args[0]))
 	cpu_list_param := ""
 	for i, v := range conf.DpdkCpuCoreList {
 		cpu_list_param += strconv.Itoa(v)
@@ -241,45 +249,49 @@ func build_eal_args() string {
 			cpu_list_param += ","
 		}
 	}
-	arg_list := []string{
-		os.Args[0],
-		"-l", cpu_list_param,
-		"-n", strconv.Itoa(conf.DpdkMemChanNum),
+	eal_argc++
+	eal_argv = append(eal_argv, C.CString("-l"))
+	eal_argc++
+	eal_argv = append(eal_argv, C.CString(cpu_list_param))
+	eal_argc++
+	eal_argv = append(eal_argv, C.CString("-n"))
+	eal_argc++
+	eal_argv = append(eal_argv, C.CString(strconv.Itoa(conf.DpdkMemChanNum)))
+	for i, v := range conf.AfPacketDevList {
+		eal_argc++
+		eal_argv = append(eal_argv, C.CString("--vdev=net_af_packet"+strconv.Itoa(i)+",iface="+v))
 	}
-	for index, af_packet_dev := range conf.AfPacketDevList {
-		arg_list = append(arg_list, "--vdev=net_af_packet"+strconv.Itoa(index)+",iface="+af_packet_dev)
-	}
-	arg_list = append(arg_list, "--")
-	args := ""
-	for i, v := range arg_list {
-		args += v
-		if i < len(arg_list)-1 {
-			args += " "
-		}
-	}
-	return args
+	eal_argc++
+	eal_argv = append(eal_argv, C.CString("--"))
+	return eal_argc, eal_argv
 }
 
-// 运行dpdk
+// 运行DPDK
 func run_dpdk() {
-	cpu_list_param := ""
-	for i, v := range conf.DpdkCpuCoreList {
-		cpu_list_param += strconv.Itoa(v)
-		if i < len(conf.DpdkCpuCoreList)-1 {
-			cpu_list_param += " "
-		}
-	}
-	port_id_list_param := ""
-	for i, v := range conf.PortIdList {
-		port_id_list_param += strconv.Itoa(v)
-		if i < len(conf.PortIdList)-1 {
-			port_id_list_param += " "
-		}
-	}
+	var pinner runtime.Pinner
 	var config C.struct_dpdk_config
-	config.eal_args = C.CString(build_eal_args())
-	config.cpu_core_list = C.CString(cpu_list_param)
-	config.port_id_list = C.CString(port_id_list_param)
+	eal_argc, eal_argv := build_eal_arg()
+	config.eal_argc = C.int(eal_argc)
+	var _eal_argv [128]*C.char
+	for i, v := range eal_argv {
+		_eal_argv[i] = v
+	}
+	pinner.Pin(&_eal_argv[0])
+	config.eal_argv = &_eal_argv[0]
+	config.cpu_core_num = C.int(len(conf.DpdkCpuCoreList))
+	var _cpu_core_list [128]C.int
+	for i, v := range conf.DpdkCpuCoreList {
+		_cpu_core_list[i] = C.int(v)
+	}
+	pinner.Pin(&_cpu_core_list[0])
+	config.cpu_core_list = &_cpu_core_list[0]
+	config.port_num = C.int(len(conf.PortIdList))
+	var _port_list [128]C.int
+	for i, v := range conf.PortIdList {
+		_port_list[i] = C.int(v)
+	}
+	pinner.Pin(&_port_list[0])
+	config.port_list = &_port_list[0]
 	config.queue_num = C.int(conf.QueueNum)
 	config.ring_buffer_size = C.int(conf.RingBufferSize)
 	config.debug_log = C.bool(conf.DebugLog)
@@ -287,7 +299,8 @@ func run_dpdk() {
 	config.single_core = C.bool(conf.SingleCore)
 	config.kni_enable = C.bool(conf.KniEnable)
 	C.cgo_dpdk_main(&config)
-	C.free(unsafe.Pointer(config.eal_args))
-	C.free(unsafe.Pointer(config.cpu_core_list))
-	C.free(unsafe.Pointer(config.port_id_list))
+	for _, arg := range eal_argv {
+		C.free(unsafe.Pointer(arg))
+	}
+	pinner.Unpin()
 }

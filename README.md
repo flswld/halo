@@ -2,9 +2,9 @@
 
 ## Golang高性能轻量级网络包收发框架
 
-* 使用环状内存缓冲区避免频繁CGO调用
 * 网卡单个队列发包性能可超过10Mpps
-* 路由模式下提供针对IP报文的自由抓包/丢包/改包/发包功能
+* 完整的路由器协议栈实现
+* 全平台开箱即用的工具包：`logger(日志)`、`cpu(协程绑核/自旋锁)`、`mem(内存分配器/环状缓冲区)`、`hashmap/list(自定义内存分配器)`
 
 ### dpdk环境搭建
 
@@ -13,14 +13,15 @@
 
 # 安装dpdk
 cd /root
-wget https://fast.dpdk.org/rel/dpdk-18.11.11.tar.xz
-tar -xvf dpdk-18.11.11.tar.xz
-cd dpdk-stable-18.11.11
+wget https://fast.dpdk.org/rel/dpdk-20.11.10.tar.gz
+tar -zxvf dpdk-20.11.10.tar.gz
+cd dpdk-stable-20.11.10
 # 添加环境变量
-export RTE_SDK="/root/dpdk-stable-18.11.11"
+export RTE_SDK="/root/dpdk-stable-20.11.10"
 # 编译DPDK
 meson build
 cd build
+meson configure -Denable_kmods=true
 ninja
 ninja install
 ldconfig
@@ -31,7 +32,7 @@ insmod $RTE_SDK/build/kernel/linux/igb_uio/igb_uio.ko
 ifconfig eth0 down
 $RTE_SDK/usertools/dpdk-devbind.py --bind=igb_uio eth0
 
-# VFIO Aliyun适用 参考链接:https://help.aliyun.com/document_detail/310880.htm
+# VFIO
 vim /etc/default/grub
 # "GRUB_CMDLINE_LINUX" 追加 "intel_iommu=on"
 update-grub2
@@ -77,7 +78,7 @@ func DirectDpdk() {
 		PortIdList:      []int{0, 1},                      // 使用的网卡id列表
 		QueueNum:        2,                                // 启用的网卡队列数
 		RingBufferSize:  128 * mem.MB,                     // 环状缓冲区大小
-		AfPacketDevList: nil,                              // 使用的AF_PACKET虚拟网卡列表
+		AfPacketDevList: nil,                              // 使用的af_packet虚拟网卡列表
 		StatsLog:        true,                             // 收发包统计日志
 		DebugLog:        false,                            // 收发包调试日志
 		IdleSleep:       false,                            // 空闲睡眠 降低cpu占用
@@ -85,7 +86,7 @@ func DirectDpdk() {
 		KniEnable:       false,                            // 开启kni内核网卡
 	})
 
-	// 通过EthRxPkt和EthTxPkt方法发送接收原始以太网报文
+	// 通过EthQueueRxPkt和EthQueueTxPkt方法发送接收原始以太网报文
 	var exit atomic.Bool
 	go func() {
 		cpu.BindCpuCore(9)
@@ -248,7 +249,7 @@ func EthernetRouter() {
 	e.Ipv4PktFwdHook = func(raw []byte, dir int) (drop bool, mod []byte) {
 		payload, _, srcAddr, dstAddr, err := protocol.ParseIpv4Pkt(raw)
 		if err == nil {
-			logger.Debug("[IPV4 ROUTE FWD] src: %v -> dst: %v, len: %v\n", srcAddr, dstAddr, len(payload))
+			logger.Debug("[IPV4 ROUTE FWD] src: %v -> dst: %v, len: %v", srcAddr, dstAddr, len(payload))
 		}
 		return false, raw
 	}
@@ -273,4 +274,5 @@ func EthernetRouter() {
 - [X] NAT功能
 - [X] 网卡多队列支持
 - [X] DHCP功能
+- [ ] PPPOE功能
 - [ ] IPV6支持

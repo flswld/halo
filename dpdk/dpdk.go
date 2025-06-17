@@ -33,7 +33,7 @@ type Config struct {
 	PortIdList      []int    // 使用的网卡id列表
 	QueueNum        int      // 启用的网卡队列数
 	RingBufferSize  int      // 环状缓冲区大小
-	AfPacketDevList []string // 使用的AF_PACKET虚拟网卡列表
+	AfPacketDevList []string // 使用的af_packet虚拟网卡列表
 	StatsLog        bool     // 收发包统计日志
 	DebugLog        bool     // 收发包调试日志
 	IdleSleep       bool     // 空闲睡眠 降低cpu占用
@@ -204,7 +204,7 @@ func KniTxPkt(pkt []byte) {
 }
 
 // 打印网卡收发包统计信息
-func print_port_stats(port_index_list []int) {
+func print_port_stats(port_list []int) {
 	ticker := time.NewTicker(time.Second)
 	for {
 		<-ticker.C
@@ -212,7 +212,7 @@ func print_port_stats(port_index_list []int) {
 			ticker.Stop()
 			break
 		}
-		for _, port_index := range port_index_list {
+		for port_index := range port_list {
 			var pinner runtime.Pinner
 			var msg [1 * mem.KB]C.char
 			pinner.Pin(&msg[0])

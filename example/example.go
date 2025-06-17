@@ -23,7 +23,7 @@ func DirectDpdk() {
 		PortIdList:      []int{0, 1},                      // 使用的网卡id列表
 		QueueNum:        2,                                // 启用的网卡队列数
 		RingBufferSize:  128 * mem.MB,                     // 环状缓冲区大小
-		AfPacketDevList: nil,                              // 使用的AF_PACKET虚拟网卡列表
+		AfPacketDevList: nil,                              // 使用的af_packet虚拟网卡列表
 		StatsLog:        true,                             // 收发包统计日志
 		DebugLog:        false,                            // 收发包调试日志
 		IdleSleep:       false,                            // 空闲睡眠 降低cpu占用
@@ -31,7 +31,7 @@ func DirectDpdk() {
 		KniEnable:       false,                            // 开启kni内核网卡
 	})
 
-	// 通过EthRxPkt和EthTxPkt方法发送接收原始以太网报文
+	// 通过EthQueueRxPkt和EthQueueTxPkt方法发送接收原始以太网报文
 	var exit atomic.Bool
 	go func() {
 		cpu.BindCpuCore(9)
@@ -194,7 +194,7 @@ func EthernetRouter() {
 	e.Ipv4PktFwdHook = func(raw []byte, dir int) (drop bool, mod []byte) {
 		payload, _, srcAddr, dstAddr, err := protocol.ParseIpv4Pkt(raw)
 		if err == nil {
-			logger.Debug("[IPV4 ROUTE FWD] src: %v -> dst: %v, len: %v\n", srcAddr, dstAddr, len(payload))
+			logger.Debug("[IPV4 ROUTE FWD] src: %v -> dst: %v, len: %v", srcAddr, dstAddr, len(payload))
 		}
 		return false, raw
 	}

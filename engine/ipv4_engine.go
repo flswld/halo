@@ -290,6 +290,9 @@ func (r *RouteTable) FindRoute(ip []byte) *RouteEntry {
 	if node.RouteList != nil {
 		lastMatch = node.RouteList
 	}
+	if lastMatch == nil {
+		return nil
+	}
 	h := fnv.New32a()
 	_, _ = h.Write(ip)
 	return lastMatch[h.Sum32()%uint32(len(lastMatch))]

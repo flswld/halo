@@ -27,11 +27,14 @@ func GetCheckSum(data []byte) uint16 {
 }
 
 func IpAddrToU(ipAddr []byte) uint32 {
+	if len(ipAddr) != 4 {
+		return 0
+	}
 	ipAddrU := uint32(0)
-	ipAddrU += uint32(ipAddr[0]) << 24
-	ipAddrU += uint32(ipAddr[1]) << 16
-	ipAddrU += uint32(ipAddr[2]) << 8
-	ipAddrU += uint32(ipAddr[3]) << 0
+	ipAddrU |= uint32(ipAddr[0]) << 24
+	ipAddrU |= uint32(ipAddr[1]) << 16
+	ipAddrU |= uint32(ipAddr[2]) << 8
+	ipAddrU |= uint32(ipAddr[3]) << 0
 	return ipAddrU
 }
 

@@ -36,6 +36,9 @@ const (
 	DhcpOptionRenewalTimeValue     = 58
 	DhcpOptionRebindingTimeValue   = 59
 	DhcpOptionClientIdentifier     = 61
+
+	DhcpBootMsgTypeRequest = 1
+	DhcpBootMsgTypeReply   = 2
 )
 
 var (
@@ -169,7 +172,7 @@ func ParseDhcpPkt(pkt []byte) (transactionId []byte, yourIpAddr []byte, clientMa
 	return transactionId, yourIpAddr, clientMacAddr, dhcpOptionMap, nil
 }
 
-func BuildDhcpPkt(pkt []byte, transactionId []byte, yourIpAddr []byte, clientMacAddr []byte, dhcpOptionMap map[uint8]*DhcpOption) ([]byte, error) {
+func BuildDhcpPkt(pkt []byte, dhcpBootMsgType uint8, transactionId []byte, yourIpAddr []byte, clientMacAddr []byte, dhcpOptionMap map[uint8]*DhcpOption) ([]byte, error) {
 	if pkt == nil {
 		pkt = make([]byte, 0, 240)
 	}
@@ -182,7 +185,7 @@ func BuildDhcpPkt(pkt []byte, transactionId []byte, yourIpAddr []byte, clientMac
 	if len(clientMacAddr) != 6 {
 		return nil, errors.New("client mac addr len is not 6 bytes")
 	}
-	pkt = append(pkt, 0x02, 0x01, 0x06, 0x00)
+	pkt = append(pkt, dhcpBootMsgType, 0x01, 0x06, 0x00)
 	pkt = append(pkt, transactionId...)
 	pkt = append(pkt, 0x00, 0x00)
 	pkt = append(pkt, 0x80, 0x00)
@@ -276,6 +279,15 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 				return
 			}
 			reqIpAddrU := protocol.IpAddrToU(optionReqIpAddr.IpAddr)
+			selfIpAddrU := protocol.IpAddrToU(i.IpAddr)
+			networkMaskU := protocol.IpAddrToU(i.NetworkMask)
+			if selfIpAddrU&networkMaskU != reqIpAddrU&networkMaskU {
+				i.TxDhcp(DhcpServerPort, DhcpClientPort, transactionId, []byte{0x00, 0x00, 0x00, 0x00}, clientMacAddr, map[uint8]*DhcpOption{
+					DhcpOptionMsgType:          {Type: DhcpOptionMsgType, MsgType: DhcpOptionMsgTypeNak},
+					DhcpOptionServerIdentifier: {Type: DhcpOptionServerIdentifier, ServerIpAddr: i.IpAddr},
+				})
+				return
+			}
 			dhcpLease := i.DhcpLeaseMap[reqIpAddrU]
 			if dhcpLease != nil && !bytes.Equal(dhcpLease.MacAddr, clientMacAddr) {
 				i.TxDhcp(DhcpServerPort, DhcpClientPort, transactionId, []byte{0x00, 0x00, 0x00, 0x00}, clientMacAddr, map[uint8]*DhcpOption{
@@ -385,12 +397,17 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 			i.SendFreeArp()
 		default:
 		}
-	} else {
 	}
 }
 
 func (i *NetIf) TxDhcp(udpSrcPort uint16, udpDstPort uint16, transactionId []byte, yourIpAddr []byte, clientMacAddr []byte, dhcpOptionMap map[uint8]*DhcpOption) bool {
-	dhcpPkt, err := BuildDhcpPkt(nil, transactionId, yourIpAddr, clientMacAddr, dhcpOptionMap)
+	dhcpBootMsgType := uint8(0)
+	if udpSrcPort == DhcpClientPort && udpDstPort == DhcpServerPort {
+		dhcpBootMsgType = DhcpBootMsgTypeRequest
+	} else if udpSrcPort == DhcpServerPort && udpDstPort == DhcpClientPort {
+		dhcpBootMsgType = DhcpBootMsgTypeReply
+	}
+	dhcpPkt, err := BuildDhcpPkt(nil, dhcpBootMsgType, transactionId, yourIpAddr, clientMacAddr, dhcpOptionMap)
 	if err != nil {
 		Log(fmt.Sprintf("build dhcp packet error: %v\n", err))
 		return false

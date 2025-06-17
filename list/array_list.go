@@ -45,7 +45,7 @@ func (a *ArrayList[T]) Add(value T) {
 		a.data = data
 		a.cap *= 2
 	}
-	p := mem.OffsetType[T](a.data, uint64(a.len))
+	p := mem.OffsetType[T](a.data, int64(a.len))
 	*p = value
 	a.len++
 }
@@ -54,7 +54,7 @@ func (a *ArrayList[T]) Set(index int, value T) {
 	if index >= a.len {
 		return
 	}
-	p := mem.OffsetType[T](a.data, uint64(index))
+	p := mem.OffsetType[T](a.data, int64(index))
 	*p = value
 }
 
@@ -63,7 +63,7 @@ func (a *ArrayList[T]) Get(index int) T {
 		var t T
 		return t
 	}
-	p := mem.OffsetType[T](a.data, uint64(index))
+	p := mem.OffsetType[T](a.data, int64(index))
 	return *p
 }
 

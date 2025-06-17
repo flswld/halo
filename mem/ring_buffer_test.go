@@ -12,8 +12,8 @@ import (
 )
 
 func TestRingBufferData(t *testing.T) {
-	mem := new(CHeap).AlignedMalloc(SizeOf[RingBuffer]() + 1*MB)
-	rb := RingBufferCreate(mem, uint32(SizeOf[RingBuffer]()+1*MB))
+	memory := new(CHeap).AlignedMalloc(SizeOf[RingBuffer]() + 1*MB)
+	rb := RingBufferCreate(memory, uint32(SizeOf[RingBuffer]()+1*MB))
 
 	var stop atomic.Bool
 
@@ -71,7 +71,7 @@ func TestRingBufferData(t *testing.T) {
 	time.Sleep(time.Second)
 
 	RingBufferDestroy(rb)
-	new(CHeap).AlignedFree(mem)
+	new(CHeap).AlignedFree(memory)
 }
 
 type TestMsg struct {
@@ -79,8 +79,8 @@ type TestMsg struct {
 }
 
 func TestRingBufferStruct(t *testing.T) {
-	mem := new(CHeap).AlignedMalloc(SizeOf[RingBuffer]() + 1*MB)
-	rb := RingBufferCreate(mem, uint32(SizeOf[RingBuffer]()+1*MB))
+	memory := new(CHeap).AlignedMalloc(SizeOf[RingBuffer]() + 1*MB)
+	rb := RingBufferCreate(memory, uint32(SizeOf[RingBuffer]()+1*MB))
 
 	var stop atomic.Bool
 
@@ -135,15 +135,15 @@ func TestRingBufferStruct(t *testing.T) {
 	time.Sleep(time.Second)
 
 	RingBufferDestroy(rb)
-	new(CHeap).AlignedFree(mem)
+	new(CHeap).AlignedFree(memory)
 }
 
 func TestRingBufferShmWrite(t *testing.T) {
-	mem := GetShareMem("RingBuffer", SizeOf[RingBuffer]()+1*MB)
+	memory := GetShareMem("RingBuffer", SizeOf[RingBuffer]()+1*MB)
 	offset := int64(0)
-	rb := RingBufferMapping(mem, &offset)
+	rb := RingBufferMapping(memory, &offset)
 	if rb == nil {
-		rb = RingBufferCreate(mem, uint32(SizeOf[RingBuffer]()+1*MB))
+		rb = RingBufferCreate(memory, uint32(SizeOf[RingBuffer]()+1*MB))
 	}
 	data := make([]byte, 16)
 	for i := 8; i <= 15; i++ {
@@ -162,11 +162,11 @@ func TestRingBufferShmWrite(t *testing.T) {
 }
 
 func TestRingBufferShmRead(t *testing.T) {
-	mem := GetShareMem("RingBuffer", SizeOf[RingBuffer]()+1*MB)
+	memory := GetShareMem("RingBuffer", SizeOf[RingBuffer]()+1*MB)
 	offset := int64(0)
-	rb := RingBufferMapping(mem, &offset)
+	rb := RingBufferMapping(memory, &offset)
 	if rb == nil {
-		rb = RingBufferCreate(mem, uint32(SizeOf[RingBuffer]()+1*MB))
+		rb = RingBufferCreate(memory, uint32(SizeOf[RingBuffer]()+1*MB))
 	}
 	_data := make([]byte, 16)
 	_len := uint16(0)

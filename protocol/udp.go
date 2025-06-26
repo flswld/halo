@@ -28,7 +28,7 @@ func ParseUdpPkt(pkt []byte, srcAddr []byte, dstAddr []byte) (payload []byte, sr
 	// 总长度
 	totalLen := int(binary.BigEndian.Uint16([]byte{pkt[4], pkt[5]}))
 	// 检查校验和
-	if !CheckSumDisable {
+	if CheckSumEnable {
 		fakeHeader := make([]byte, 0, 12)
 		fakeHeader = append(fakeHeader, srcAddr...)
 		fakeHeader = append(fakeHeader, dstAddr...)
@@ -65,18 +65,23 @@ func BuildUdpPkt(pkt []byte, payload []byte, srcPort uint16, dstPort uint16, src
 	// 上层数据
 	pkt = append(pkt, payload...)
 	// 计算校验和
-	fakeHeader := make([]byte, 0, 12)
-	fakeHeader = append(fakeHeader, srcAddr...)
-	fakeHeader = append(fakeHeader, dstAddr...)
-	// 保留字节0x00+UDP协议号0x11
-	fakeHeader = append(fakeHeader, 0x00, 0x11)
-	// UDP报文总长度
-	fakeHeader = append(fakeHeader, byte(udpPktLen>>8), byte(udpPktLen))
-	sumData := make([]byte, 0, 12+1500)
-	sumData = append(sumData, fakeHeader...)
-	sumData = append(sumData, pkt...)
-	sum := GetCheckSum(sumData)
-	pkt[6] = byte(sum >> 8)
-	pkt[7] = byte(sum)
+	if CheckSumEnable {
+		fakeHeader := make([]byte, 0, 12)
+		fakeHeader = append(fakeHeader, srcAddr...)
+		fakeHeader = append(fakeHeader, dstAddr...)
+		// 保留字节0x00+UDP协议号0x11
+		fakeHeader = append(fakeHeader, 0x00, 0x11)
+		// UDP报文总长度
+		fakeHeader = append(fakeHeader, byte(udpPktLen>>8), byte(udpPktLen))
+		sumData := make([]byte, 0, 12+1500)
+		sumData = append(sumData, fakeHeader...)
+		sumData = append(sumData, pkt...)
+		sum := GetCheckSum(sumData)
+		pkt[6] = byte(sum >> 8)
+		pkt[7] = byte(sum)
+	} else {
+		pkt[6] = 0x00
+		pkt[7] = 0x00
+	}
 	return pkt, nil
 }

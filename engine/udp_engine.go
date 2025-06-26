@@ -16,9 +16,6 @@ func (i *NetIf) RxUdp(ipv4Payload []byte, ipv4SrcAddr []byte) {
 		i.HandleUdp(udpPayload, udpSrcPort, udpDstPort, ipv4SrcAddr)
 		return
 	}
-	if udpDstPort == DhcpClientPort || udpDstPort == DhcpServerPort {
-		i.RxDhcp(udpPayload, udpSrcPort, udpDstPort, ipv4SrcAddr)
-	}
 }
 
 func (i *NetIf) TxUdp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, ipv4DstAddr []byte) bool {
@@ -29,4 +26,15 @@ func (i *NetIf) TxUdp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, i
 		return false
 	}
 	return i.TxIpv4(udpPkt, protocol.IPH_PROTO_UDP, ipv4DstAddr)
+}
+
+func (i *NetIf) RxUdpBroadcast(ipv4Payload []byte, ipv4SrcAddr []byte, ipv4DstAddr []byte) {
+	udpPayload, udpSrcPort, udpDstPort, err := protocol.ParseUdpPkt(ipv4Payload, ipv4SrcAddr, ipv4DstAddr)
+	if err != nil {
+		Log(fmt.Sprintf("parse udp packet error: %v\n", err))
+		return
+	}
+	if udpDstPort == DhcpClientPort || udpDstPort == DhcpServerPort {
+		i.RxDhcp(udpPayload, udpSrcPort, udpDstPort, ipv4SrcAddr)
+	}
 }

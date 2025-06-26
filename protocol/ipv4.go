@@ -68,7 +68,7 @@ func ParseIpv4Pkt(pkt []byte) (payload []byte, ipHeadProto uint8, srcAddr []byte
 		return nil, IPH_PROTO_UNKNOWN, nil, nil, errors.New("unknown ip protocol")
 	}
 	// 检查首部校验和
-	if !CheckSumDisable {
+	if CheckSumEnable {
 		if GetCheckSum(pkt[0:20]) != 0 {
 			return nil, IPH_PROTO_UNKNOWN, nil, nil, errors.New("header check sum error")
 		}
@@ -113,9 +113,14 @@ func BuildIpv4Pkt(pkt []byte, payload []byte, ipHeadProto uint8, srcAddr []byte,
 	// 目的地址
 	pkt = append(pkt, dstAddr...)
 	// 计算首部校验和
-	sum := GetCheckSum(pkt)
-	pkt[10] = byte(sum >> 8)
-	pkt[11] = byte(sum)
+	if CheckSumEnable {
+		sum := GetCheckSum(pkt)
+		pkt[10] = byte(sum >> 8)
+		pkt[11] = byte(sum)
+	} else {
+		pkt[10] = 0x00
+		pkt[11] = 0x00
+	}
 	// 上层数据
 	pkt = append(pkt, payload...)
 	return pkt, nil
@@ -133,6 +138,9 @@ func HandleIpv4PktTtl(pkt []byte) ([]byte, bool) {
 func ReCalcIpv4CheckSum(pkt []byte) []byte {
 	pkt[10] = 0x00
 	pkt[11] = 0x00
+	if !CheckSumEnable {
+		return pkt
+	}
 	sum := GetCheckSum(pkt[:20])
 	pkt[10] = byte(sum >> 8)
 	pkt[11] = byte(sum)
@@ -142,7 +150,7 @@ func ReCalcIpv4CheckSum(pkt []byte) []byte {
 func ReCalcIcmpCheckSum(pkt []byte) []byte {
 	pkt[22] = 0x00
 	pkt[23] = 0x00
-	sum := GetCheckSum(pkt)
+	sum := GetCheckSum(pkt[20:])
 	pkt[22] = byte(sum >> 8)
 	pkt[23] = byte(sum)
 	return pkt
@@ -151,6 +159,9 @@ func ReCalcIcmpCheckSum(pkt []byte) []byte {
 func ReCalcTcpCheckSum(pkt []byte) []byte {
 	pkt[36] = 0x00
 	pkt[37] = 0x00
+	if !CheckSumEnable {
+		return pkt
+	}
 	fakeHeader := make([]byte, 0, 12)
 	fakeHeader = append(fakeHeader, pkt[12:16]...)
 	fakeHeader = append(fakeHeader, pkt[16:20]...)
@@ -169,6 +180,9 @@ func ReCalcTcpCheckSum(pkt []byte) []byte {
 func ReCalcUdpCheckSum(pkt []byte) []byte {
 	pkt[26] = 0x00
 	pkt[27] = 0x00
+	if !CheckSumEnable {
+		return pkt
+	}
 	fakeHeader := make([]byte, 0, 12)
 	fakeHeader = append(fakeHeader, pkt[12:16]...)
 	fakeHeader = append(fakeHeader, pkt[16:20]...)

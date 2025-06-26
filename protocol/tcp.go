@@ -48,7 +48,7 @@ func ParseTcpPkt(pkt []byte, srcAddr []byte, dstAddr []byte) (payload []byte, sr
 	headerLen := int(pkt[12] >> 4)
 	flags = pkt[13]
 	// 检查校验和
-	if !CheckSumDisable {
+	if CheckSumEnable {
 		totalLen := len(pkt)
 		fakeHeader := make([]byte, 0, 12)
 		fakeHeader = append(fakeHeader, srcAddr...)
@@ -96,19 +96,24 @@ func BuildTcpPkt(pkt []byte, payload []byte, srcPort uint16, dstPort uint16, src
 	// 数据
 	pkt = append(pkt, payload...)
 	// 计算校验和
-	fakeHeader := make([]byte, 0, 12)
-	fakeHeader = append(fakeHeader, srcAddr...)
-	fakeHeader = append(fakeHeader, dstAddr...)
-	// 保留字节0x00+TCP协议号0x06
-	fakeHeader = append(fakeHeader, 0x00, 0x06)
-	// TCP报文总长度
-	totalLen := 20 + len(payload)
-	fakeHeader = append(fakeHeader, byte(totalLen>>8), byte(totalLen))
-	sumData := make([]byte, 0, 12+1500)
-	sumData = append(sumData, fakeHeader...)
-	sumData = append(sumData, pkt...)
-	sum := GetCheckSum(sumData)
-	pkt[16] = byte(sum >> 8)
-	pkt[17] = byte(sum)
+	if CheckSumEnable {
+		fakeHeader := make([]byte, 0, 12)
+		fakeHeader = append(fakeHeader, srcAddr...)
+		fakeHeader = append(fakeHeader, dstAddr...)
+		// 保留字节0x00+TCP协议号0x06
+		fakeHeader = append(fakeHeader, 0x00, 0x06)
+		// TCP报文总长度
+		totalLen := 20 + len(payload)
+		fakeHeader = append(fakeHeader, byte(totalLen>>8), byte(totalLen))
+		sumData := make([]byte, 0, 12+1500)
+		sumData = append(sumData, fakeHeader...)
+		sumData = append(sumData, pkt...)
+		sum := GetCheckSum(sumData)
+		pkt[16] = byte(sum >> 8)
+		pkt[17] = byte(sum)
+	} else {
+		pkt[16] = 0x00
+		pkt[17] = 0x00
+	}
 	return pkt, nil
 }

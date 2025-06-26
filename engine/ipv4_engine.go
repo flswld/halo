@@ -18,7 +18,7 @@ func (i *NetIf) RxIpv4(ethPayload []byte) {
 	}
 	if ipv4DstAddr[3] == 255 {
 		if ipv4HeadProto == protocol.IPH_PROTO_UDP {
-			i.RxUdp(ipv4Payload, ipv4SrcAddr)
+			i.RxUdpBroadcast(ipv4Payload, ipv4SrcAddr, ipv4DstAddr)
 		}
 		return
 	}

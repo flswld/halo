@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-var CheckSumEnable bool
+var CheckSumEnable = false
 
 func GetCheckSum(data []byte) uint16 {
 	sum := uint32(0)

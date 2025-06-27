@@ -24,10 +24,9 @@ func Log(msg string) {
 
 // Config 协议栈配置
 type Config struct {
-	DebugLog       bool                  // 调试日志
-	CheckSumEnable bool                  // 开启校验和检查
-	NetIfList      []*NetIfConfig        // 网卡列表
-	RoutingTable   []*RoutingEntryConfig // 路由表
+	DebugLog     bool                  // 调试日志
+	NetIfList    []*NetIfConfig        // 网卡列表
+	RoutingTable []*RoutingEntryConfig // 路由表
 }
 
 // NetIfConfig 网卡配置
@@ -201,9 +200,6 @@ func InitEngine(config *Config) (*Engine, error) {
 			NextHop:     nil,
 			NetIf:       netIf.Config.Name,
 		})
-	}
-	if config.CheckSumEnable {
-		protocol.CheckSumEnable = true
 	}
 	protocol.SetRandIpHeaderId()
 	return e, nil

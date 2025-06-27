@@ -338,8 +338,8 @@ func (s *UDPSession) uncork() {
 	}
 }
 
-// Close closes the connection.
-func (s *UDPSession) Close(e uint32) error {
+// CloseReason closes the connection.
+func (s *UDPSession) CloseReason(e uint32) error {
 	var once bool
 	s.dieOnce.Do(func() {
 		close(s.die)
@@ -375,6 +375,10 @@ func (s *UDPSession) Close(e uint32) error {
 	} else {
 		return io.ErrClosedPipe
 	}
+}
+
+func (s *UDPSession) Close() error {
+	return s.CloseReason(EnetClientClose)
 }
 
 // LocalAddr returns the local network address. The Addr returned is shared by all invocations of LocalAddr, so do not modify it.
@@ -780,7 +784,7 @@ func (l *Listener) enetHandle() {
 				if !exist {
 					continue
 				}
-				_ = conn.Close(enetNotify.EnetType)
+				_ = conn.CloseReason(enetNotify.EnetType)
 			case ConnEnetPing:
 				enet := &Enet{
 					Addr:      enetNotify.Addr,
@@ -928,6 +932,14 @@ func (l *Listener) AcceptKCP() (*UDPSession, error) {
 	case <-l.die:
 		return nil, io.ErrClosedPipe
 	}
+}
+
+func (l *Listener) Accept() (net.Conn, error) {
+	conn, err := l.AcceptKCP()
+	if err != nil {
+		return nil, err
+	}
+	return conn, nil
 }
 
 // SetDeadline sets the deadline associated with the listener. A zero time value disables the deadline.

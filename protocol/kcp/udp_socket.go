@@ -36,7 +36,7 @@ func (s *UDPSession) defaultRx() {
 						ConnType:  ConnEnetFin,
 						EnetType:  enetType,
 					})
-					_ = s.Close(enetType)
+					_ = s.CloseReason(enetType)
 					continue
 				}
 			}
@@ -137,7 +137,7 @@ func (s *UDPSession) rxChanConn() {
 						ConnType: ConnEnetFin,
 						EnetType: enetType,
 					})
-					_ = s.Close(enetType)
+					_ = s.CloseReason(enetType)
 					continue
 				}
 			}

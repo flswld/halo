@@ -58,6 +58,7 @@ _Atomic
 bool running = false;
 
 struct dpdk_config global_config = {0};
+struct rte_eth_conf *port_conf = NULL;
 struct ring_buffer *port_ring_buffer = NULL;
 struct ring_buffer kni_ring_buffer = {0};
 struct rte_mempool *mbuf_pool = NULL;
@@ -127,6 +128,8 @@ void cgo_exit_signal_handler(void) {
         }
     }
     memset(&global_config, 0x00, sizeof(struct dpdk_config));
+    free(port_conf);
+    port_conf = NULL;
     free(port_ring_buffer);
     port_ring_buffer = NULL;
     memset(&kni_ring_buffer, 0x00, sizeof(struct ring_buffer));
@@ -141,7 +144,7 @@ void cgo_kni_handle(void) {
     rte_kni_handle_request(kni);
 }
 
-int port_init(const uint16_t port_id, const uint16_t queue_num) {
+int port_init(const int port_index, const uint16_t port_id, const uint16_t queue_num) {
     // 配置设备
     struct rte_eth_dev_info dev_info;
     int ret = rte_eth_dev_info_get(port_id, &dev_info);
@@ -149,13 +152,12 @@ int port_init(const uint16_t port_id, const uint16_t queue_num) {
         RTE_LOG(ERR, APP, "rte_eth_dev_info_get failed\n");
         return ret;
     }
-    struct rte_eth_conf port_conf = {0};
-    port_conf.rxmode.max_rx_pkt_len = 1518;
-    port_conf.rxmode.offloads = dev_info.rx_offload_capa;
-    port_conf.txmode.offloads = dev_info.tx_offload_capa;
+    port_conf[port_index].rxmode.max_rx_pkt_len = 1518;
+    port_conf[port_index].rxmode.offloads = dev_info.rx_offload_capa;
+    port_conf[port_index].txmode.offloads = dev_info.tx_offload_capa;
     RTE_LOG(INFO, APP, "port init, port_id: %u, queue_num: %u, rx_offload_capa: %lu, tx_offload_capa: %lu\n",
             port_id, queue_num, dev_info.rx_offload_capa, dev_info.tx_offload_capa);
-    ret = rte_eth_dev_configure(port_id, queue_num, queue_num, &port_conf);
+    ret = rte_eth_dev_configure(port_id, queue_num, queue_num, port_conf + port_index);
     if (ret != 0) {
         RTE_LOG(ERR, APP, "rte_eth_dev_configure failed\n");
         return ret;
@@ -286,29 +288,37 @@ static bool eth_tx(const int port_index, const uint16_t port_id, const uint16_t 
             break;
         }
         struct rte_ether_hdr *ether_hdr = rte_pktmbuf_mtod(mbuf_send[i], struct rte_ether_hdr *);
+        // 校验和
         if (rte_be_to_cpu_16(ether_hdr->ether_type) == RTE_ETHER_TYPE_IPV4) {
             mbuf_send[i]->l2_len = sizeof(struct rte_ether_hdr);
             mbuf_send[i]->l3_len = sizeof(struct rte_ipv4_hdr);
             mbuf_send[i]->ol_flags = 0;
             mbuf_send[i]->ol_flags |= PKT_TX_IPV4;
-            mbuf_send[i]->ol_flags |= PKT_TX_IP_CKSUM;
             struct rte_ipv4_hdr *ipv4_hdr = (struct rte_ipv4_hdr *) ((uint8_t *) ether_hdr + sizeof(struct rte_ether_hdr));
             ipv4_hdr->hdr_checksum = 0;
-            switch (ipv4_hdr->next_proto_id) {
-                case 17:
+            if (port_conf[port_index].txmode.offloads == DEV_TX_OFFLOAD_IPV4_CKSUM) {
+                mbuf_send[i]->ol_flags |= PKT_TX_IP_CKSUM;
+            } else {
+                ipv4_hdr->hdr_checksum = rte_ipv4_cksum(ipv4_hdr);
+            }
+            if (ipv4_hdr->next_proto_id == IPPROTO_UDP) {
+                struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *) ((uint8_t *) ipv4_hdr + sizeof(struct rte_ipv4_hdr));
+                udp_hdr->dgram_cksum = 0;
+                if (port_conf[port_index].txmode.offloads == DEV_TX_OFFLOAD_UDP_CKSUM) {
                     mbuf_send[i]->ol_flags |= PKT_TX_UDP_CKSUM;
-                    struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *) ((uint8_t *) ipv4_hdr + sizeof(struct rte_ipv4_hdr));
-                    udp_hdr->dgram_cksum = 0;
                     udp_hdr->dgram_cksum = rte_ipv4_phdr_cksum(ipv4_hdr, mbuf_send[i]->ol_flags);
-                    break;
-                case 6:
+                } else {
+                    udp_hdr->dgram_cksum = rte_ipv4_udptcp_cksum(ipv4_hdr, udp_hdr);
+                }
+            } else if (ipv4_hdr->next_proto_id == IPPROTO_TCP) {
+                struct rte_tcp_hdr *tcp_hdr = (struct rte_tcp_hdr *) ((uint8_t *) ipv4_hdr + sizeof(struct rte_ipv4_hdr));
+                tcp_hdr->cksum = 0;
+                if (port_conf[port_index].txmode.offloads == DEV_TX_OFFLOAD_TCP_CKSUM) {
                     mbuf_send[i]->ol_flags |= PKT_TX_TCP_CKSUM;
-                    struct rte_tcp_hdr *tcp_hdr = (struct rte_tcp_hdr *) ((uint8_t *) ipv4_hdr + sizeof(struct rte_ipv4_hdr));
-                    tcp_hdr->cksum = 0;
                     tcp_hdr->cksum = rte_ipv4_phdr_cksum(ipv4_hdr, mbuf_send[i]->ol_flags);
-                    break;
-                default:
-                    break;
+                } else {
+                    tcp_hdr->cksum = rte_ipv4_udptcp_cksum(ipv4_hdr, tcp_hdr);
+                }
             }
         }
         mbuf_send[i]->pkt_len = send_len;
@@ -383,20 +393,19 @@ static bool kni_tx() {
             break;
         }
         struct rte_ether_hdr *ether_hdr = rte_pktmbuf_mtod(mbuf_send[i], struct rte_ether_hdr *);
+        // 校验和
         if (rte_be_to_cpu_16(ether_hdr->ether_type) == RTE_ETHER_TYPE_IPV4) {
             struct rte_ipv4_hdr *ipv4_hdr = (struct rte_ipv4_hdr *) ((uint8_t *) ether_hdr + sizeof(struct rte_ether_hdr));
+            ipv4_hdr->hdr_checksum = 0;
             ipv4_hdr->hdr_checksum = rte_ipv4_cksum(ipv4_hdr);
-            switch (ipv4_hdr->next_proto_id) {
-                case 17:
-                    struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *) ((uint8_t *) ipv4_hdr + sizeof(struct rte_ipv4_hdr));
-                    udp_hdr->dgram_cksum = rte_ipv4_udptcp_cksum(ipv4_hdr, udp_hdr);
-                    break;
-                case 6:
-                    struct rte_tcp_hdr *tcp_hdr = (struct rte_tcp_hdr *) ((uint8_t *) ipv4_hdr + sizeof(struct rte_ipv4_hdr));
-                    tcp_hdr->cksum = rte_ipv4_udptcp_cksum(ipv4_hdr, tcp_hdr);
-                    break;
-                default:
-                    break;
+            if (ipv4_hdr->next_proto_id == IPPROTO_UDP) {
+                struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *) ((uint8_t *) ipv4_hdr + sizeof(struct rte_ipv4_hdr));
+                udp_hdr->dgram_cksum = 0;
+                udp_hdr->dgram_cksum = rte_ipv4_udptcp_cksum(ipv4_hdr, udp_hdr);
+            } else if (ipv4_hdr->next_proto_id == IPPROTO_TCP) {
+                struct rte_tcp_hdr *tcp_hdr = (struct rte_tcp_hdr *) ((uint8_t *) ipv4_hdr + sizeof(struct rte_ipv4_hdr));
+                tcp_hdr->cksum = 0;
+                tcp_hdr->cksum = rte_ipv4_udptcp_cksum(ipv4_hdr, tcp_hdr);
             }
         }
         mbuf_send[i]->pkt_len = send_len;
@@ -564,9 +573,11 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
     }
 
     // 网卡初始化
+    port_conf = (struct rte_eth_conf *) malloc(sizeof(struct rte_eth_conf) * config->port_num);
+    memset(port_conf, 0x00, sizeof(struct rte_eth_conf) * config->port_num);
     for (int port_index = 0; port_index < config->port_num; port_index++) {
         const uint16_t port_id = config->port_list[port_index];
-        ret = port_init(port_id, config->queue_num);
+        ret = port_init(port_index, port_id, config->queue_num);
         if (ret != 0) {
             rte_exit(EXIT_FAILURE, "port init failed, port: %u\n", port_id);
         }

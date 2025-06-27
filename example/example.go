@@ -117,8 +117,7 @@ func EthernetRouter() {
 	// 初始化协议栈
 	engine.DefaultLogWriter = new(logger.LogWriter)
 	e, err := engine.InitEngine(&engine.Config{
-		DebugLog:       false, // 调试日志
-		CheckSumEnable: false, // 开启校验和检查
+		DebugLog: false, // 调试日志
 		// 网卡列表
 		NetIfList: []*engine.NetIfConfig{
 			{
@@ -403,7 +402,7 @@ func KcpServerClient() {
 			}
 		}
 		netIf.HandleUdp = nil
-		_ = conn.Close(kcp.EnetClientClose)
+		_ = conn.Close()
 	}
 
 	kcpClient := func(netIf *engine.NetIf) {
@@ -457,7 +456,7 @@ func KcpServerClient() {
 			log.Printf("kcp client recv data: %02x\n", buf)
 		}
 		netIf.HandleUdp = nil
-		_ = conn.Close(kcp.EnetClientClose)
+		_ = conn.Close()
 	}
 
 	// kcp协议栈测试

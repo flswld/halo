@@ -51,7 +51,7 @@ func (s *UDPSession) rx() {
 							ConnType:  ConnEnetFin,
 							EnetType:  enetType,
 						})
-						_ = s.Close(enetType)
+						_ = s.CloseReason(enetType)
 						continue
 					}
 				}

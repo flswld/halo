@@ -296,7 +296,7 @@ static bool eth_tx(const int port_index, const uint16_t port_id, const uint16_t 
             mbuf_send[i]->ol_flags |= PKT_TX_IPV4;
             struct rte_ipv4_hdr *ipv4_hdr = (struct rte_ipv4_hdr *) ((uint8_t *) ether_hdr + sizeof(struct rte_ether_hdr));
             ipv4_hdr->hdr_checksum = 0;
-            if (port_conf[port_index].txmode.offloads == DEV_TX_OFFLOAD_IPV4_CKSUM) {
+            if (port_conf[port_index].txmode.offloads & DEV_TX_OFFLOAD_IPV4_CKSUM) {
                 mbuf_send[i]->ol_flags |= PKT_TX_IP_CKSUM;
             } else {
                 ipv4_hdr->hdr_checksum = rte_ipv4_cksum(ipv4_hdr);
@@ -304,7 +304,7 @@ static bool eth_tx(const int port_index, const uint16_t port_id, const uint16_t 
             if (ipv4_hdr->next_proto_id == IPPROTO_UDP) {
                 struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *) ((uint8_t *) ipv4_hdr + sizeof(struct rte_ipv4_hdr));
                 udp_hdr->dgram_cksum = 0;
-                if (port_conf[port_index].txmode.offloads == DEV_TX_OFFLOAD_UDP_CKSUM) {
+                if (port_conf[port_index].txmode.offloads & DEV_TX_OFFLOAD_UDP_CKSUM) {
                     mbuf_send[i]->ol_flags |= PKT_TX_UDP_CKSUM;
                     udp_hdr->dgram_cksum = rte_ipv4_phdr_cksum(ipv4_hdr, mbuf_send[i]->ol_flags);
                 } else {
@@ -313,7 +313,7 @@ static bool eth_tx(const int port_index, const uint16_t port_id, const uint16_t 
             } else if (ipv4_hdr->next_proto_id == IPPROTO_TCP) {
                 struct rte_tcp_hdr *tcp_hdr = (struct rte_tcp_hdr *) ((uint8_t *) ipv4_hdr + sizeof(struct rte_ipv4_hdr));
                 tcp_hdr->cksum = 0;
-                if (port_conf[port_index].txmode.offloads == DEV_TX_OFFLOAD_TCP_CKSUM) {
+                if (port_conf[port_index].txmode.offloads & DEV_TX_OFFLOAD_TCP_CKSUM) {
                     mbuf_send[i]->ol_flags |= PKT_TX_TCP_CKSUM;
                     tcp_hdr->cksum = rte_ipv4_phdr_cksum(ipv4_hdr, mbuf_send[i]->ol_flags);
                 } else {

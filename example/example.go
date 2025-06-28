@@ -388,6 +388,7 @@ func KcpServerClient() {
 		conn.SetWriteDelay(false)
 		conn.SetWindowSize(256, 256)
 		conn.SetMtu(1200)
+		conn.SetNoDelay(1, 20, 1, 1)
 		for i := 0; i < 30; i++ {
 			buf := make([]byte, 1472)
 			size, err := conn.Read(buf)
@@ -441,6 +442,7 @@ func KcpServerClient() {
 		conn.SetWriteDelay(false)
 		conn.SetWindowSize(256, 256)
 		conn.SetMtu(1200)
+		conn.SetNoDelay(1, 20, 1, 1)
 		for {
 			time.Sleep(time.Second)
 			_, err = conn.Write([]byte{0x45, 0x67, 0x89, 0xab})

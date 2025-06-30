@@ -99,7 +99,7 @@ type (
 
 		mu sync.Mutex
 
-		isChanConn bool
+		isChanConn bool // 是否为管道连接模式
 	}
 
 	setReadBuffer interface {
@@ -240,6 +240,7 @@ func (s *UDPSession) Read(b []byte) (n int, err error) {
 	}
 }
 
+// GetMaxPayloadLen 获取最大载荷长度
 func (s *UDPSession) GetMaxPayloadLen() int {
 	return 256 * int(s.kcp.mss)
 }
@@ -338,8 +339,8 @@ func (s *UDPSession) uncork() {
 	}
 }
 
-// CloseReason closes the connection.
-func (s *UDPSession) CloseReason(e uint32) error {
+// CloseReason 关闭连接附带原因
+func (s *UDPSession) CloseReason(enetType uint32) error {
 	var once bool
 	s.dieOnce.Do(func() {
 		close(s.die)
@@ -349,7 +350,7 @@ func (s *UDPSession) CloseReason(e uint32) error {
 	if once {
 		enet := &Enet{
 			ConnType: ConnEnetFin,
-			EnetType: e,
+			EnetType: enetType,
 		}
 		if !s.isChanConn {
 			s.sendEnetNotifyToPeer(enet)
@@ -377,6 +378,7 @@ func (s *UDPSession) CloseReason(e uint32) error {
 	}
 }
 
+// Close closes the connection.
 func (s *UDPSession) Close() error {
 	return s.CloseReason(EnetClientClose)
 }
@@ -536,24 +538,11 @@ func (s *UDPSession) SetWriteBuffer(bytes int) error {
 }
 
 // post-processing for sending a packet from kcp core
-// steps:
-// 1. TxQueue
 func (s *UDPSession) output(buf []byte) {
-	var ecc [][]byte
-
-	// 1. TxQueue
 	var msg ipv4.Message
 	for i := 0; i < s.dup+1; i++ {
 		bts := xmitBuf.Get().([]byte)[:len(buf)]
 		copy(bts, buf)
-		msg.Buffers = [][]byte{bts}
-		msg.Addr = s.remote
-		s.txqueue = append(s.txqueue, msg)
-	}
-
-	for k := range ecc {
-		bts := xmitBuf.Get().([]byte)[:len(ecc[k])]
-		copy(bts, ecc[k])
 		msg.Buffers = [][]byte{bts}
 		msg.Addr = s.remote
 		s.txqueue = append(s.txqueue, msg)
@@ -578,8 +567,7 @@ func (s *UDPSession) update() {
 	}
 }
 
-// GetRawConv gets conversation id of a session
-// 获取KCP组合会话id
+// GetRawConv 获取KCP组合会话id
 func (s *UDPSession) GetRawConv() uint64 {
 	return s.kcp.conv
 }
@@ -702,15 +690,16 @@ type (
 		xconn           batchConn // for x/net
 		xconnWriteError error
 
-		enetNotifyChan           chan *Enet // Enet事件上报管道
-		sessionIdCounter         uint32
-		remoteAddrEnetSynMap     map[string]*EnetSyn
+		enetNotifyChan           chan *Enet          // Enet事件上报管道
+		sessionIdCounter         uint32              // 会话id自增计数器
+		remoteAddrEnetSynMap     map[string]*EnetSyn // 客户端Enet握手包集合
 		remoteAddrEnetSynMapLock sync.RWMutex
 
-		isChanConn bool
+		isChanConn bool // 是否为管道连接模式
 	}
 )
 
+// EnetSyn 客户端Enet握手包
 type EnetSyn struct {
 	sessionId  uint32
 	conv       uint32
@@ -718,6 +707,7 @@ type EnetSyn struct {
 	createTime uint32
 }
 
+// Enet事件处理
 func (l *Listener) enetHandle() {
 	ticker := time.NewTicker(time.Second)
 	defer func() {
@@ -728,6 +718,7 @@ func (l *Listener) enetHandle() {
 		case <-l.die:
 			return
 		case <-ticker.C:
+			// 定时清理超时的客户端Enet握手包
 			now := uint32(time.Now().Unix())
 			l.remoteAddrEnetSynMapLock.Lock()
 			for remoteAddr, enetSyn := range l.remoteAddrEnetSynMap {
@@ -737,6 +728,7 @@ func (l *Listener) enetHandle() {
 			}
 			l.remoteAddrEnetSynMapLock.Unlock()
 		case enetNotify := <-l.enetNotifyChan:
+			// Enet事件
 			switch enetNotify.ConnType {
 			case ConnEnetSyn:
 				if enetNotify.EnetType != EnetClientConnectKey {
@@ -934,6 +926,7 @@ func (l *Listener) AcceptKCP() (*UDPSession, error) {
 	}
 }
 
+// Accept implements net.Listener
 func (l *Listener) Accept() (net.Conn, error) {
 	conn, err := l.AcceptKCP()
 	if err != nil {
@@ -1125,36 +1118,39 @@ func NewConn(raddr string, conn net.PacketConn) (*UDPSession, error) {
 
 var errChanConnAlreadyClose = errors.New("chan conn already close")
 
+// ChanConnAddr 管道连接地址
 type ChanConnAddr struct {
 }
 
 func (a *ChanConnAddr) Network() string {
-	return "ChanConnAddr"
+	return "chan"
 }
 
 func (a *ChanConnAddr) String() string {
-	return "ChanConnAddr"
+	return "addr"
 }
 
 // ChanConn 管道连接
 type ChanConn struct {
-	RxChan    chan []byte
-	TxChan    chan []byte
-	IsClose   atomic.Bool
-	CloseOnce sync.Once
+	RxChan  chan []byte
+	TxChan  chan []byte
+	isClose atomic.Uint32
 }
 
 func (c *ChanConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
-	if c.IsClose.Load() {
-		return 0, &ChanConnAddr{}, errChanConnAlreadyClose
+	if c.isClose.Load() == 1 {
+		return 0, nil, errChanConnAlreadyClose
 	}
-	pkt := <-c.RxChan
+	pkt, ok := <-c.RxChan
+	if !ok {
+		return 0, nil, errChanConnAlreadyClose
+	}
 	copy(p, pkt)
 	return len(pkt), &ChanConnAddr{}, nil
 }
 
 func (c *ChanConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
-	if c.IsClose.Load() {
+	if c.isClose.Load() == 1 {
 		return 0, errChanConnAlreadyClose
 	}
 	pkt := make([]byte, len(p))
@@ -1164,11 +1160,11 @@ func (c *ChanConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 }
 
 func (c *ChanConn) Close() error {
-	c.CloseOnce.Do(func() {
-		close(c.RxChan)
-		close(c.TxChan)
-		c.IsClose.Store(true)
-	})
+	ok := c.isClose.CompareAndSwap(0, 1)
+	if !ok {
+		return errChanConnAlreadyClose
+	}
+	close(c.TxChan)
 	return nil
 }
 
@@ -1177,24 +1173,32 @@ func (c *ChanConn) LocalAddr() net.Addr {
 }
 
 func (c *ChanConn) SetDeadline(t time.Time) error {
-	return nil
+	return errInvalidOperation
 }
 
 func (c *ChanConn) SetReadDeadline(t time.Time) error {
-	return nil
+	return errInvalidOperation
 }
 
 func (c *ChanConn) SetWriteDeadline(t time.Time) error {
-	return nil
+	return errInvalidOperation
 }
 
 // ListenChanConn 监听管道连接
 func ListenChanConn(conn *ChanConn) (*Listener, error) {
+	if conn == nil || conn.RxChan == nil || conn.TxChan == nil {
+		return nil, errChanConnAlreadyClose
+	}
+	conn.isClose.Store(0)
 	return serveConn(conn, true)
 }
 
 // DialChanConn 发起管道连接
 func DialChanConn(conn *ChanConn) (*UDPSession, error) {
+	if conn == nil || conn.RxChan == nil || conn.TxChan == nil {
+		return nil, errChanConnAlreadyClose
+	}
+	conn.isClose.Store(0)
 	enet := &Enet{
 		SessionId: 0,
 		Conv:      0,

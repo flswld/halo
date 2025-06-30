@@ -262,7 +262,7 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 			if optionHostName != nil {
 				hostName = optionHostName.HostName
 			}
-			Log(fmt.Sprintf("dhcp server offer ip: %v, name: %v, mac: %v\n", clientIpAddr, hostName, clientMacAddr))
+			Log(fmt.Sprintf("dhcp server offer ip: %v, name: %v, mac: % 02x\n", clientIpAddr, hostName, clientMacAddr))
 			i.TxDhcp(DhcpServerPort, DhcpClientPort, transactionId, clientIpAddr, clientMacAddr, map[uint8]*DhcpOption{
 				DhcpOptionMsgType:            {Type: DhcpOptionMsgType, MsgType: DhcpOptionMsgTypeOffer},
 				DhcpOptionSubnetMask:         {Type: DhcpOptionSubnetMask, SubnetMask: i.NetworkMask},
@@ -307,7 +307,7 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 				ExpTime:  time.Now().Unix() + DhcpLeaseTime,
 				HostName: hostName,
 			}
-			Log(fmt.Sprintf("dhcp server ack ip: %v, name: %v, mac: %v\n", optionReqIpAddr.IpAddr, hostName, clientMacAddr))
+			Log(fmt.Sprintf("dhcp server ack ip: %v, name: %v, mac: % 02x\n", optionReqIpAddr.IpAddr, hostName, clientMacAddr))
 			i.TxDhcp(DhcpServerPort, DhcpClientPort, transactionId, optionReqIpAddr.IpAddr, clientMacAddr, map[uint8]*DhcpOption{
 				DhcpOptionMsgType:            {Type: DhcpOptionMsgType, MsgType: DhcpOptionMsgTypeAck},
 				DhcpOptionSubnetMask:         {Type: DhcpOptionSubnetMask, SubnetMask: i.NetworkMask},
@@ -322,7 +322,7 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 			ipv4SrcAddrU := protocol.IpAddrToU(ipv4SrcAddr)
 			dhcpLease := i.DhcpLeaseMap[ipv4SrcAddrU]
 			if dhcpLease != nil {
-				Log(fmt.Sprintf("dhcp server release ip: %v, name: %v, mac: %v\n", dhcpLease.IpAddr, dhcpLease.HostName, clientMacAddr))
+				Log(fmt.Sprintf("dhcp server release ip: %v, name: %v, mac: % 02x\n", dhcpLease.IpAddr, dhcpLease.HostName, clientMacAddr))
 				delete(i.DhcpLeaseMap, ipv4SrcAddrU)
 			}
 		default:

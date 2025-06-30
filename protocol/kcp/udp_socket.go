@@ -30,12 +30,6 @@ func (s *UDPSession) defaultRx() {
 					continue
 				}
 				if connType == ConnEnetFin {
-					s.defaultSendEnetNotifyToPeer(&Enet{
-						SessionId: s.GetSessionId(),
-						Conv:      s.GetConv(),
-						ConnType:  ConnEnetFin,
-						EnetType:  enetType,
-					})
 					_ = s.CloseReason(enetType)
 					continue
 				}
@@ -133,10 +127,6 @@ func (s *UDPSession) rxChanConn() {
 					continue
 				}
 				if connType == ConnEnetFin {
-					s.sendEnetNotifyToPeerChanConn(&Enet{
-						ConnType: ConnEnetFin,
-						EnetType: enetType,
-					})
 					_ = s.CloseReason(enetType)
 					continue
 				}

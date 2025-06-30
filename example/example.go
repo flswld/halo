@@ -1,7 +1,6 @@
 package example
 
 import (
-	"log"
 	"sync/atomic"
 	"time"
 
@@ -296,6 +295,9 @@ func DDoS() {
 
 // KcpServerClient KCP协议栈
 func KcpServerClient() {
+	logger.InitLogger(nil)
+	defer logger.CloseLogger()
+
 	// 启动dpdk
 	dpdk.Run(&dpdk.Config{
 		PortIdList: []int{0, 1},
@@ -348,6 +350,8 @@ func KcpServerClient() {
 	e1.RunEngine()
 	e2.RunEngine()
 
+	e1.GetNetIf("eth0").Ping([]byte{192, 168, 100, 200}, 1)
+
 	kcpServer := func(netIf *engine.NetIf) {
 		rxChan := make(chan []byte, 1024)
 		txChan := make(chan []byte, 1024)
@@ -355,9 +359,9 @@ func KcpServerClient() {
 			if dstPort != 22222 {
 				return
 			}
-			_payload := make([]byte, len(payload))
-			copy(_payload, payload)
-			rxChan <- _payload
+			pkt := make([]byte, len(payload))
+			copy(pkt, payload)
+			rxChan <- pkt
 		}
 		go func() {
 			for {
@@ -365,12 +369,7 @@ func KcpServerClient() {
 				if !ok {
 					break
 				}
-				for {
-					if netIf.TxUdp(pkt, 22222, 33333, []byte{192, 168, 100, 200}) {
-						break
-					}
-					time.Sleep(time.Second)
-				}
+				netIf.TxUdp(pkt, 22222, 33333, []byte{192, 168, 100, 200})
 			}
 		}()
 		listener, err := kcp.ListenChanConn(&kcp.ChanConn{
@@ -389,14 +388,14 @@ func KcpServerClient() {
 		conn.SetWindowSize(256, 256)
 		conn.SetMtu(1200)
 		conn.SetNoDelay(1, 20, 1, 1)
-		for i := 0; i < 30; i++ {
+		for {
 			buf := make([]byte, 1472)
 			size, err := conn.Read(buf)
 			if err != nil {
 				break
 			}
 			buf = buf[:size]
-			log.Printf("kcp server recv data: %02x\n", buf)
+			logger.Debug("kcp server recv data: %02x", buf)
 			_, err = conn.Write([]byte{0x01, 0x23, 0xcd, 0xef})
 			if err != nil {
 				break
@@ -413,9 +412,9 @@ func KcpServerClient() {
 			if dstPort != 33333 {
 				return
 			}
-			_payload := make([]byte, len(payload))
-			copy(_payload, payload)
-			rxChan <- _payload
+			pkt := make([]byte, len(payload))
+			copy(pkt, payload)
+			rxChan <- pkt
 		}
 		go func() {
 			for {
@@ -423,12 +422,7 @@ func KcpServerClient() {
 				if !ok {
 					break
 				}
-				for {
-					if netIf.TxUdp(pkt, 33333, 22222, []byte{192, 168, 100, 100}) {
-						break
-					}
-					time.Sleep(time.Second)
-				}
+				netIf.TxUdp(pkt, 33333, 22222, []byte{192, 168, 100, 100})
 			}
 		}()
 		conn, err := kcp.DialChanConn(&kcp.ChanConn{
@@ -443,7 +437,7 @@ func KcpServerClient() {
 		conn.SetWindowSize(256, 256)
 		conn.SetMtu(1200)
 		conn.SetNoDelay(1, 20, 1, 1)
-		for {
+		for i := 0; i < 30; i++ {
 			time.Sleep(time.Second)
 			_, err = conn.Write([]byte{0x45, 0x67, 0x89, 0xab})
 			if err != nil {
@@ -455,7 +449,7 @@ func KcpServerClient() {
 				break
 			}
 			buf = buf[:size]
-			log.Printf("kcp client recv data: %02x\n", buf)
+			logger.Debug("kcp client recv data: %02x", buf)
 		}
 		netIf.HandleUdp = nil
 		_ = conn.Close()

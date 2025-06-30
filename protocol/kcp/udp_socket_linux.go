@@ -45,12 +45,6 @@ func (s *UDPSession) rx() {
 						continue
 					}
 					if connType == ConnEnetFin {
-						s.sendEnetNotifyToPeer(&Enet{
-							SessionId: s.GetSessionId(),
-							Conv:      s.GetConv(),
-							ConnType:  ConnEnetFin,
-							EnetType:  enetType,
-						})
 						_ = s.CloseReason(enetType)
 						continue
 					}

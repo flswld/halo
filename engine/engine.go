@@ -245,27 +245,33 @@ func (i *NetIf) PacketHandle() {
 			i.RxEthernet(ethFrm)
 		}
 		n++
-		if n%100 == 0 {
-			select {
-			case ipv4Pkt := <-i.LoChan:
-				ipv4Payload, ipv4HeadProto, ipv4SrcAddr, ipv4DstAddr, err := protocol.ParseIpv4Pkt(ipv4Pkt)
-				if err != nil {
-					Log(fmt.Sprintf("parse ip packet error: %v\n", err))
-					continue
+		if n == 100-1 {
+			for {
+				if n == 0 {
+					break
 				}
-				if !bytes.Equal(ipv4DstAddr, i.IpAddr) {
-					continue
-				}
-				switch ipv4HeadProto {
-				case protocol.IPH_PROTO_ICMP:
-					i.RxIcmp(ipv4Payload, ipv4SrcAddr)
-				case protocol.IPH_PROTO_UDP:
-					i.RxUdp(ipv4Payload, ipv4SrcAddr)
-				case protocol.IPH_PROTO_TCP:
-					i.RxTcp(ipv4Payload, ipv4SrcAddr)
+				select {
+				case ipv4Pkt := <-i.LoChan:
+					ipv4Payload, ipv4HeadProto, ipv4SrcAddr, ipv4DstAddr, err := protocol.ParseIpv4Pkt(ipv4Pkt)
+					if err != nil {
+						Log(fmt.Sprintf("parse ip packet error: %v\n", err))
+						continue
+					}
+					if !bytes.Equal(ipv4DstAddr, i.IpAddr) {
+						continue
+					}
+					switch ipv4HeadProto {
+					case protocol.IPH_PROTO_ICMP:
+						i.RxIcmp(ipv4Payload, ipv4SrcAddr)
+					case protocol.IPH_PROTO_UDP:
+						i.RxUdp(ipv4Payload, ipv4SrcAddr)
+					case protocol.IPH_PROTO_TCP:
+						i.RxTcp(ipv4Payload, ipv4SrcAddr)
+					default:
+					}
 				default:
+					n = 0
 				}
-			default:
 			}
 		}
 	}

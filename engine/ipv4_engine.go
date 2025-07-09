@@ -2,11 +2,15 @@ package engine
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"hash/fnv"
 	"sync"
 	"time"
 
+	"github.com/flswld/halo/hashmap"
+	"github.com/flswld/halo/list"
+	"github.com/flswld/halo/mem"
 	"github.com/flswld/halo/protocol"
 )
 
@@ -72,19 +76,24 @@ func (i *NetIf) TxIpv4(ipv4Payload []byte, ipv4HeadProto uint8, ipv4DstAddr []by
 	}
 	// 二层封装
 	var ethDstMac []byte = nil
+	var arpCache *ArpCache = nil
 	if ipv4DstAddr[3] == 255 {
 		ethDstMac = []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 	} else if nextHopIpAddr != nil {
-		ethDstMac = outNetIf.GetArpCache(nextHopIpAddr)
+		arpCache = outNetIf.GetArpCache(nextHopIpAddr)
 	} else {
-		ethDstMac = outNetIf.GetArpCache(ipv4DstAddr)
+		arpCache = outNetIf.GetArpCache(ipv4DstAddr)
 	}
-	if ethDstMac == nil {
+	if ethDstMac != nil {
+		return outNetIf.TxEthernet(ipv4Pkt, ethDstMac, protocol.ETH_PROTO_IPV4)
+	} else if arpCache != nil {
+		return outNetIf.TxEthernet(ipv4Pkt, arpCache.MacAddr[:], protocol.ETH_PROTO_IPV4)
+	} else {
 		return false
 	}
-	return outNetIf.TxEthernet(ipv4Pkt, ethDstMac, protocol.ETH_PROTO_IPV4)
 }
 
+// 流方向
 const (
 	LanToWan = iota
 	WanToLan
@@ -157,13 +166,7 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr []byte, ipv4DstA
 		srcPort, dstPort := protocol.NatGetSrcDstPort(ethPayload)
 		natPortMappingEntry := outNetIf.CheckNatPortMapping(LanToWan, ipv4SrcAddr, srcPort, ipv4HeadProto)
 		if natPortMappingEntry == nil {
-			natFlow := outNetIf.NatGetFlowByHash(NatFlowHash{
-				RemoteIpAddr:  protocol.IpAddrToU(ipv4DstAddr),
-				RemotePort:    dstPort,
-				LanHostIpAddr: protocol.IpAddrToU(ipv4SrcAddr),
-				LanHostPort:   srcPort,
-				Ipv4HeadProto: ipv4HeadProto,
-			})
+			natFlow := outNetIf.NatGetFlowByHash(ipv4DstAddr, dstPort, ipv4SrcAddr, srcPort, ipv4HeadProto)
 			if natFlow == nil {
 				natFlow = outNetIf.NatAddFlow(ipv4SrcAddr, ipv4DstAddr, srcPort, dstPort, ipv4HeadProto)
 				if natFlow == nil {
@@ -178,17 +181,17 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr []byte, ipv4DstA
 		}
 	}
 	// 二层封装
-	var ethDstMac []byte = nil
+	var arpCache *ArpCache = nil
 	if nextHopIpAddr != nil {
-		ethDstMac = outNetIf.GetArpCache(nextHopIpAddr)
+		arpCache = outNetIf.GetArpCache(nextHopIpAddr)
 	} else {
-		ethDstMac = outNetIf.GetArpCache(ipv4DstAddr)
+		arpCache = outNetIf.GetArpCache(ipv4DstAddr)
 	}
-	if ethDstMac == nil {
+	if arpCache == nil {
 		// 二层地址查询失败
 		return true
 	}
-	outNetIf.TxEthernet(ethPayload, ethDstMac, protocol.ETH_PROTO_IPV4)
+	outNetIf.TxEthernet(ethPayload, arpCache.MacAddr[:], protocol.ETH_PROTO_IPV4)
 	return true
 }
 
@@ -308,19 +311,19 @@ func (r *RouteTable) foreachNode(node *TrieNode) []*RouteEntry {
 	if node == nil {
 		return nil
 	}
-	result := make([]*RouteEntry, 0)
+	ret := make([]*RouteEntry, 0)
 	if node.RouteList != nil {
-		result = append(result, node.RouteList...)
+		ret = append(ret, node.RouteList...)
 	}
 	routeList := r.foreachNode(node.Left)
 	for _, route := range routeList {
-		result = append(result, route)
+		ret = append(ret, route)
 	}
 	routeList = r.foreachNode(node.Right)
 	for _, route := range routeList {
-		result = append(result, route)
+		ret = append(ret, route)
 	}
-	return result
+	return ret
 }
 
 func (i *NetIf) FindRoute(ipv4DstAddr []byte) ([]byte, string) {
@@ -359,6 +362,16 @@ type NatFlowHash struct {
 	Ipv4HeadProto uint8  // ip头部协议
 }
 
+func (h NatFlowHash) GetHashCode() uint64 {
+	data := make([]byte, 13)
+	binary.LittleEndian.PutUint32(data[0:4], h.RemoteIpAddr)
+	binary.LittleEndian.PutUint16(data[4:6], h.RemotePort)
+	binary.LittleEndian.PutUint32(data[6:10], h.LanHostIpAddr)
+	binary.LittleEndian.PutUint16(data[10:12], h.LanHostPort)
+	data[12] = h.Ipv4HeadProto
+	return hashmap.GetHashCode(data)
+}
+
 // NatWanFlowHash WAN口NAT流摘要
 type NatWanFlowHash struct {
 	RemoteIpAddr  uint32 // 远程ip地址
@@ -366,6 +379,16 @@ type NatWanFlowHash struct {
 	WanIpAddr     uint32 // wan口ip地址
 	WanPort       uint16 // wan口端口
 	Ipv4HeadProto uint8  // ip头部协议
+}
+
+func (h NatWanFlowHash) GetHashCode() uint64 {
+	data := make([]byte, 13)
+	binary.LittleEndian.PutUint32(data[0:4], h.RemoteIpAddr)
+	binary.LittleEndian.PutUint16(data[4:6], h.RemotePort)
+	binary.LittleEndian.PutUint32(data[6:10], h.WanIpAddr)
+	binary.LittleEndian.PutUint16(data[10:12], h.WanPort)
+	data[12] = h.Ipv4HeadProto
+	return hashmap.GetHashCode(data)
 }
 
 // NatPortMappingEntry NAT端口映射条目
@@ -378,19 +401,30 @@ type NatPortMappingEntry struct {
 
 // PortAlloc 端口分配器
 type PortAlloc struct {
-	Lock          sync.RWMutex                // 锁
-	AllocPortMap  map[PortAllocSrcAddr]uint16 // 分配端口集合 key:源地址 value:端口
-	RemainPortMap map[uint16]struct{}         // 剩余端口集合 key:端口
+	PortList *list.ArrayList[uint16] // 端口列表
 }
 
-type PortAllocSrcAddr struct {
-	IpAddr uint32 // ip地址
-	Port   uint16 // 端口
-}
-
-func (i *NetIf) NatGetFlowByHash(natFlowHash NatFlowHash) *NatFlow {
+func (i *NetIf) NatGetFlowByHash(remoteIpAddr []byte, remotePort uint16, lanHostIpAddr []byte, lanHostPort uint16, ipv4HeadProto uint8) *NatFlow {
+	_remoteIpAddrU := uint32(0)
+	_remotePort := uint16(0)
+	if i.Config.NatType == NatTypeSymmetric {
+		_remoteIpAddrU = protocol.IpAddrToU(remoteIpAddr)
+		_remotePort = remotePort
+	} else if i.Config.NatType == NatTypeFullCone {
+		_remoteIpAddrU = 0
+		_remotePort = 0
+	}
+	if ipv4HeadProto == protocol.IPH_PROTO_ICMP {
+		_remotePort = 0
+	}
 	i.NatLock.RLock()
-	natFlow, exist := i.NatFlowTable[natFlowHash]
+	natFlow, exist := i.NatFlowTable.Get(NatFlowHash{
+		RemoteIpAddr:  _remoteIpAddrU,
+		RemotePort:    _remotePort,
+		LanHostIpAddr: protocol.IpAddrToU(lanHostIpAddr),
+		LanHostPort:   lanHostPort,
+		Ipv4HeadProto: ipv4HeadProto,
+	})
 	i.NatLock.RUnlock()
 	if !exist {
 		return nil
@@ -399,26 +433,26 @@ func (i *NetIf) NatGetFlowByHash(natFlowHash NatFlowHash) *NatFlow {
 }
 
 func (i *NetIf) NatGetFlowByWan(remoteIpAddr []byte, remotePort uint16, wanIpAddr []byte, wanPort uint16, ipv4HeadProto uint8) *NatFlow {
-	_remoteAddrU := uint32(0)
+	_remoteIpAddrU := uint32(0)
 	_remotePort := uint16(0)
 	if i.Config.NatType == NatTypeSymmetric {
-		_remoteAddrU = protocol.IpAddrToU(remoteIpAddr)
+		_remoteIpAddrU = protocol.IpAddrToU(remoteIpAddr)
 		_remotePort = remotePort
 	} else if i.Config.NatType == NatTypeFullCone {
-		_remoteAddrU = 0
+		_remoteIpAddrU = 0
 		_remotePort = 0
 	}
 	if ipv4HeadProto == protocol.IPH_PROTO_ICMP {
 		_remotePort = 0
 	}
 	i.NatLock.RLock()
-	natFlow, exist := i.NatWanFlowTable[NatWanFlowHash{
-		RemoteIpAddr:  _remoteAddrU,
+	natFlow, exist := i.NatWanFlowTable.Get(NatWanFlowHash{
+		RemoteIpAddr:  _remoteIpAddrU,
 		RemotePort:    _remotePort,
 		WanIpAddr:     protocol.IpAddrToU(wanIpAddr),
 		WanPort:       wanPort,
 		Ipv4HeadProto: ipv4HeadProto,
-	}]
+	})
 	i.NatLock.RUnlock()
 	if !exist {
 		return nil
@@ -426,86 +460,98 @@ func (i *NetIf) NatGetFlowByWan(remoteIpAddr []byte, remotePort uint16, wanIpAdd
 	return natFlow
 }
 
-func (i *NetIf) NatAddFlow(lanHostAddr []byte, remoteAddr []byte, lanHostPort uint16, remotePort uint16, ipv4HeadProto uint8) *NatFlow {
-	i.NatLock.Lock()
-	defer i.NatLock.Unlock()
-	_remoteAddrU := uint32(0)
+func (i *NetIf) NatAddFlow(lanHostIpAddr []byte, remoteIpAddr []byte, lanHostPort uint16, remotePort uint16, ipv4HeadProto uint8) *NatFlow {
+	if lanHostPort == 0 || remotePort == 0 {
+		return nil
+	}
+	_remoteIpAddrU := uint32(0)
 	_remotePort := uint16(0)
 	if i.Config.NatType == NatTypeSymmetric {
-		_remoteAddrU = protocol.IpAddrToU(remoteAddr)
+		_remoteIpAddrU = protocol.IpAddrToU(remoteIpAddr)
 		_remotePort = remotePort
 	} else if i.Config.NatType == NatTypeFullCone {
-		_remoteAddrU = 0
+		_remoteIpAddrU = 0
 		_remotePort = 0
 	}
 	if ipv4HeadProto == protocol.IPH_PROTO_ICMP {
 		_remotePort = 0
 	}
-	wanPort := uint16(0)
-	if lanHostPort != 0 {
-		// nat端口分配
-		portAlloc, exist := i.NatPortAlloc[_remoteAddrU]
-		if !exist {
-			portAlloc = &PortAlloc{
-				AllocPortMap:  make(map[PortAllocSrcAddr]uint16),
-				RemainPortMap: make(map[uint16]struct{}),
-			}
-			port := uint16(32768)
-			for {
-				portAlloc.RemainPortMap[port] = struct{}{}
-				port++
-				if port == 0 {
-					break
-				}
-			}
-			i.NatPortAlloc[_remoteAddrU] = portAlloc
+	i.NatLock.Lock()
+	defer i.NatLock.Unlock()
+	// nat端口分配
+	portAlloc, exist := i.NatPortAlloc.Get(IpAddrHash(_remoteIpAddrU))
+	if !exist {
+		portAlloc = mem.MallocType[PortAlloc](i.StaticHeap, 1)
+		if portAlloc == nil {
+			return nil
 		}
-		portAlloc.Lock.RLock()
-		wanPort, exist = portAlloc.AllocPortMap[PortAllocSrcAddr{IpAddr: protocol.IpAddrToU(lanHostAddr), Port: lanHostPort}]
-		portAlloc.Lock.RUnlock()
-		if !exist {
-			portAlloc.Lock.Lock()
-			if len(portAlloc.RemainPortMap) != 0 {
-				for port := range portAlloc.RemainPortMap {
-					wanPort = port
-					portAlloc.AllocPortMap[PortAllocSrcAddr{IpAddr: protocol.IpAddrToU(lanHostAddr), Port: lanHostPort}] = port
-					delete(portAlloc.RemainPortMap, port)
-					break
-				}
-			}
-			portAlloc.Lock.Unlock()
+		portAlloc.PortList = list.NewArrayListWithCap[uint16](i.StaticHeap, 32768)
+		if portAlloc.PortList == nil {
+			mem.FreeType[PortAlloc](i.StaticHeap, portAlloc)
+			return nil
 		}
-		if wanPort == 0 {
+		port := uint16(32768)
+		for {
+			portAlloc.PortList.Add(port)
+			port++
+			if port == 0 {
+				break
+			}
+		}
+		ok := i.NatPortAlloc.Set(IpAddrHash(_remoteIpAddrU), portAlloc)
+		if !ok {
+			portAlloc.PortList.Free()
+			mem.FreeType[PortAlloc](i.StaticHeap, portAlloc)
 			return nil
 		}
 	}
+	if portAlloc.PortList.Len() == 0 {
+		return nil
+	}
+	wanPort := portAlloc.PortList.Pop()
 	natFlowHash := NatFlowHash{
-		RemoteIpAddr:  _remoteAddrU,
+		RemoteIpAddr:  _remoteIpAddrU,
 		RemotePort:    _remotePort,
-		LanHostIpAddr: protocol.IpAddrToU(lanHostAddr),
+		LanHostIpAddr: protocol.IpAddrToU(lanHostIpAddr),
 		LanHostPort:   lanHostPort,
 		Ipv4HeadProto: ipv4HeadProto,
 	}
-	natFlow := &NatFlow{
-		NatFlowHash:   natFlowHash,
-		RemoteIpAddr:  _remoteAddrU,
-		RemotePort:    _remotePort,
-		WanIpAddr:     protocol.IpAddrToU(i.IpAddr),
-		WanPort:       wanPort,
-		LanHostIpAddr: protocol.IpAddrToU(lanHostAddr),
-		LanHostPort:   lanHostPort,
-		Ipv4HeadProto: ipv4HeadProto,
-		LastAliveTime: uint32(time.Now().Unix()),
+	var ok bool
+	natFlow := mem.MallocType[NatFlow](i.StaticHeap, 1)
+	if natFlow == nil {
+		goto add_port
 	}
-	i.NatFlowTable[natFlowHash] = natFlow
-	i.NatWanFlowTable[NatWanFlowHash{
-		RemoteIpAddr:  _remoteAddrU,
+	natFlow.NatFlowHash = natFlowHash
+	natFlow.RemoteIpAddr = _remoteIpAddrU
+	natFlow.RemotePort = _remotePort
+	natFlow.WanIpAddr = protocol.IpAddrToU(i.IpAddr)
+	natFlow.WanPort = wanPort
+	natFlow.LanHostIpAddr = protocol.IpAddrToU(lanHostIpAddr)
+	natFlow.LanHostPort = lanHostPort
+	natFlow.Ipv4HeadProto = ipv4HeadProto
+	natFlow.LastAliveTime = uint32(time.Now().Unix())
+	ok = i.NatFlowTable.Set(natFlowHash, natFlow)
+	if !ok {
+		goto add_port
+	}
+	ok = i.NatWanFlowTable.Set(NatWanFlowHash{
+		RemoteIpAddr:  _remoteIpAddrU,
 		RemotePort:    _remotePort,
 		WanIpAddr:     protocol.IpAddrToU(i.IpAddr),
 		WanPort:       wanPort,
 		Ipv4HeadProto: ipv4HeadProto,
-	}] = natFlow
+	}, natFlow)
+	if !ok {
+		goto add_port
+	}
 	return natFlow
+add_port:
+	portAlloc, exist = i.NatPortAlloc.Get(IpAddrHash(_remoteIpAddrU))
+	if !exist {
+		return nil
+	}
+	portAlloc.PortList.Add(wanPort)
+	return nil
 }
 
 func (i *NetIf) CheckNatPortMapping(dir int, ipAddr []byte, port uint16, ipv4HeadProto uint8) *NatPortMappingEntry {
@@ -534,6 +580,18 @@ func (i *NetIf) CheckNatPortMapping(dir int, ipAddr []byte, port uint16, ipv4Hea
 	return nil
 }
 
+func (i *NetIf) ListNat() []*NatFlow {
+	i.NatLock.Lock()
+	defer i.NatLock.Unlock()
+	ret := make([]*NatFlow, 0)
+	i.NatFlowTable.For(func(key NatFlowHash, value *NatFlow) (next bool) {
+		v := *value
+		ret = append(ret, &v)
+		return true
+	})
+	return ret
+}
+
 func (i *NetIf) NatTableClear() {
 	ticker := time.NewTicker(time.Minute * 1)
 	for {
@@ -543,25 +601,93 @@ func (i *NetIf) NatTableClear() {
 		}
 		now := uint32(time.Now().Unix())
 		i.NatLock.Lock()
-		for natFlowHash, natFlow := range i.NatFlowTable {
+		i.NatFlowTable.For(func(natFlowHash NatFlowHash, natFlow *NatFlow) (next bool) {
 			if now-natFlow.LastAliveTime > 60 {
-				delete(i.NatFlowTable, natFlowHash)
-				delete(i.NatWanFlowTable, NatWanFlowHash{
+				i.NatFlowTable.Del(natFlowHash)
+				i.NatWanFlowTable.Del(NatWanFlowHash{
 					RemoteIpAddr: natFlow.RemoteIpAddr,
 					RemotePort:   natFlow.RemotePort,
 					WanIpAddr:    natFlow.WanIpAddr,
 					WanPort:      natFlow.WanPort,
 				})
-				portAlloc := i.NatPortAlloc[natFlow.RemoteIpAddr]
-				if portAlloc == nil {
-					continue
+				mem.FreeType[NatFlow](i.StaticHeap, natFlow)
+				portAlloc, exist := i.NatPortAlloc.Get(IpAddrHash(natFlow.RemoteIpAddr))
+				if !exist {
+					return true
 				}
-				portAlloc.Lock.Lock()
-				delete(portAlloc.AllocPortMap, PortAllocSrcAddr{IpAddr: natFlow.LanHostIpAddr, Port: natFlow.LanHostPort})
-				portAlloc.RemainPortMap[natFlow.WanPort] = struct{}{}
-				portAlloc.Lock.Unlock()
+				portAlloc.PortList.Add(natFlow.WanPort)
+				if portAlloc.PortList.Len() == 32768 {
+					portAlloc.PortList.Free()
+					i.NatPortAlloc.Del(IpAddrHash(natFlow.RemoteIpAddr))
+					mem.FreeType[PortAlloc](i.StaticHeap, portAlloc)
+				}
 			}
-		}
+			return true
+		})
 		i.NatLock.Unlock()
+	}
+}
+
+func (i *NetIf) SendUdpPktByFlow(natFlowHash NatFlowHash, dir int, udpPayload []byte) {
+	natFlowHash.Ipv4HeadProto = protocol.IPH_PROTO_UDP
+	remoteIpAddr := protocol.UToIpAddr(natFlowHash.RemoteIpAddr)
+	lanHostIpAddr := protocol.UToIpAddr(natFlowHash.LanHostIpAddr)
+	natFlow := i.NatGetFlowByHash(
+		protocol.UToIpAddr(natFlowHash.RemoteIpAddr),
+		natFlowHash.RemotePort,
+		protocol.UToIpAddr(natFlowHash.LanHostIpAddr),
+		natFlowHash.LanHostPort,
+		natFlowHash.Ipv4HeadProto,
+	)
+	if natFlow == nil {
+		natFlow = i.NatAddFlow(lanHostIpAddr, remoteIpAddr, natFlowHash.LanHostPort, natFlowHash.RemotePort, natFlowHash.Ipv4HeadProto)
+		if natFlow == nil {
+			return
+		}
+	}
+	natFlow.LastAliveTime = uint32(time.Now().Unix())
+	switch dir {
+	case LanToWan:
+		udpPkt := make([]byte, 0, 1480)
+		udpPkt, err := protocol.BuildUdpPkt(udpPkt, udpPayload, natFlow.WanPort, natFlow.RemotePort, i.IpAddr, remoteIpAddr)
+		if err != nil {
+			return
+		}
+		ipv4Pkt := make([]byte, 0, 1500)
+		ipv4Pkt, err = protocol.BuildIpv4Pkt(ipv4Pkt, udpPkt, protocol.IPH_PROTO_UDP, i.IpAddr, remoteIpAddr)
+		if err != nil {
+			return
+		}
+		nextHopIpAddr, _ := i.FindRoute(remoteIpAddr)
+		if nextHopIpAddr == nil {
+			return
+		}
+		arpCache := i.GetArpCache(nextHopIpAddr)
+		if arpCache == nil {
+			return
+		}
+		i.TxEthernet(ipv4Pkt, arpCache.MacAddr[:], protocol.ETH_PROTO_IPV4)
+	case WanToLan:
+		udpPkt := make([]byte, 0, 1480)
+		udpPkt, err := protocol.BuildUdpPkt(udpPkt, udpPayload, natFlow.RemotePort, natFlow.LanHostPort, remoteIpAddr, lanHostIpAddr)
+		if err != nil {
+			return
+		}
+		ipv4Pkt := make([]byte, 0, 1500)
+		ipv4Pkt, err = protocol.BuildIpv4Pkt(ipv4Pkt, udpPkt, protocol.IPH_PROTO_UDP, remoteIpAddr, lanHostIpAddr)
+		if err != nil {
+			return
+		}
+		_, outNetIfName := i.FindRoute(lanHostIpAddr)
+		if outNetIfName == "" {
+			return
+		}
+		outNetIf := i.Engine.NetIfMap[outNetIfName]
+		arpCache := outNetIf.GetArpCache(lanHostIpAddr)
+		if arpCache == nil {
+			return
+		}
+		outNetIf.TxEthernet(ipv4Pkt, arpCache.MacAddr[:], protocol.ETH_PROTO_IPV4)
+	default:
 	}
 }

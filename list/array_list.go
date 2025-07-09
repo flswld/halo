@@ -2,6 +2,7 @@ package list
 
 import (
 	"encoding/json"
+	"errors"
 
 	"github.com/flswld/halo/mem"
 )
@@ -26,7 +27,14 @@ func NewArrayListWithCap[T any](heap mem.Heap, cap int) *ArrayList[T] {
 		cap = initCap
 	}
 	a := mem.MallocType[ArrayList[T]](heap, 1)
+	if a == nil {
+		return nil
+	}
 	a.data = mem.MallocType[T](heap, uint64(cap))
+	if a.data == nil {
+		mem.FreeType[ArrayList[T]](heap, a)
+		return nil
+	}
 	a.len = 0
 	a.cap = cap
 	a.heap = heap
@@ -37,9 +45,12 @@ func (a *ArrayList[T]) Len() int {
 	return a.len
 }
 
-func (a *ArrayList[T]) Add(value T) {
+func (a *ArrayList[T]) Add(value T) bool {
 	if a.len >= a.cap {
 		data := mem.MallocType[T](a.heap, uint64(a.cap*2))
+		if data == nil {
+			return false
+		}
 		mem.MemCpyType[T](data, a.data, uint64(a.cap))
 		mem.FreeType[T](a.heap, a.data)
 		a.data = data
@@ -48,6 +59,7 @@ func (a *ArrayList[T]) Add(value T) {
 	p := mem.OffsetType[T](a.data, int64(a.len))
 	*p = value
 	a.len++
+	return true
 }
 
 func (a *ArrayList[T]) Set(index int, value T) {
@@ -64,6 +76,16 @@ func (a *ArrayList[T]) Get(index int) T {
 		return t
 	}
 	p := mem.OffsetType[T](a.data, int64(index))
+	return *p
+}
+
+func (a *ArrayList[T]) Pop() T {
+	if a.len == 0 {
+		var t T
+		return t
+	}
+	p := mem.OffsetType[T](a.data, int64(a.len-1))
+	a.len--
 	return *p
 }
 
@@ -99,7 +121,10 @@ func (a *ArrayList[T]) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	for _, v := range aa {
-		a.Add(v)
+		ok := a.Add(v)
+		if !ok {
+			return errors.New("overflow")
+		}
 	}
 	return nil
 }

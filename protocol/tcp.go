@@ -86,7 +86,7 @@ func BuildTcpPkt(pkt []byte, payload []byte, srcPort uint16, dstPort uint16, src
 	// 确认号
 	pkt = append(pkt, byte(ackNum>>24), byte(ackNum>>16), byte(ackNum>>8), byte(ackNum))
 	// 数据偏移+保留+FLAGS为头部长度20字节的TCP包
-	pkt = append(pkt, 0x05, flags)
+	pkt = append(pkt, 0x50, flags)
 	// 窗口大小 256
 	pkt = append(pkt, 0x01, 0x00)
 	// 校验和(填充零)

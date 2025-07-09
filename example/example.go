@@ -353,23 +353,29 @@ func KcpServerClient() {
 	e1.GetNetIf("eth0").Ping([]byte{192, 168, 100, 200}, 1)
 
 	kcpServer := func(netIf *engine.NetIf) {
-		rxChan := make(chan []byte, 1024)
-		txChan := make(chan []byte, 1024)
-		netIf.HandleUdp = func(payload []byte, srcPort uint16, dstPort uint16, srcAddr []byte) {
-			if dstPort != 22222 {
-				return
-			}
+		rxChan := make(chan kcp.ChanConnMsg, 1024)
+		txChan := make(chan kcp.ChanConnMsg, 1024)
+		netIf.RecvUdp(22222, func(session engine.UdpSession, payload []byte) {
 			pkt := make([]byte, len(payload))
 			copy(pkt, payload)
-			rxChan <- pkt
-		}
+			rxChan <- kcp.ChanConnMsg{
+				Addr: kcp.ChanConnAddr{
+					Ip:   session.RemoteIp,
+					Port: session.RemotePort,
+				},
+				Pkt: pkt,
+			}
+		})
 		go func() {
 			for {
-				pkt, ok := <-txChan
+				msg, ok := <-txChan
 				if !ok {
 					break
 				}
-				netIf.TxUdp(pkt, 22222, 33333, []byte{192, 168, 100, 200})
+				netIf.SendUdp(22222, engine.UdpSession{
+					RemoteIp:   msg.Addr.Ip,
+					RemotePort: msg.Addr.Port,
+				}, msg.Pkt)
 			}
 		}()
 		listener, err := kcp.ListenChanConn(&kcp.ChanConn{
@@ -401,28 +407,33 @@ func KcpServerClient() {
 				break
 			}
 		}
-		netIf.HandleUdp = nil
 		_ = conn.Close()
 	}
 
 	kcpClient := func(netIf *engine.NetIf) {
-		rxChan := make(chan []byte, 1024)
-		txChan := make(chan []byte, 1024)
-		netIf.HandleUdp = func(payload []byte, srcPort uint16, dstPort uint16, srcAddr []byte) {
-			if dstPort != 33333 {
-				return
-			}
+		rxChan := make(chan kcp.ChanConnMsg, 1024)
+		txChan := make(chan kcp.ChanConnMsg, 1024)
+		netIf.RecvUdp(33333, func(session engine.UdpSession, payload []byte) {
 			pkt := make([]byte, len(payload))
 			copy(pkt, payload)
-			rxChan <- pkt
-		}
+			rxChan <- kcp.ChanConnMsg{
+				Addr: kcp.ChanConnAddr{
+					Ip:   session.RemoteIp,
+					Port: session.RemotePort,
+				},
+				Pkt: pkt,
+			}
+		})
 		go func() {
 			for {
-				pkt, ok := <-txChan
+				msg, ok := <-txChan
 				if !ok {
 					break
 				}
-				netIf.TxUdp(pkt, 33333, 22222, []byte{192, 168, 100, 100})
+				netIf.SendUdp(33333, engine.UdpSession{
+					RemoteIp:   msg.Addr.Ip,
+					RemotePort: msg.Addr.Port,
+				}, msg.Pkt)
 			}
 		}()
 		conn, err := kcp.DialChanConn(&kcp.ChanConn{
@@ -451,7 +462,6 @@ func KcpServerClient() {
 			buf = buf[:size]
 			logger.Debug("kcp client recv data: %02x", buf)
 		}
-		netIf.HandleUdp = nil
 		_ = conn.Close()
 	}
 

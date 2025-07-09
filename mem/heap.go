@@ -14,7 +14,8 @@ const (
 )
 
 var (
-	DefaultLogWriter io.Writer = nil
+	DefaultLogWriter    io.Writer = nil
+	MallocFreeFailPanic           = false
 )
 
 type Heap interface {
@@ -25,7 +26,7 @@ type Heap interface {
 
 func MallocType[T any](heap Heap, size uint64) *T {
 	p := (*T)(heap.Malloc(size * SizeOf[T]()))
-	if p == nil {
+	if MallocFreeFailPanic && p == nil {
 		panic("malloc fail")
 	}
 	if DefaultLogWriter != nil {
@@ -36,7 +37,7 @@ func MallocType[T any](heap Heap, size uint64) *T {
 
 func FreeType[T any](heap Heap, t *T) bool {
 	ok := heap.Free(unsafe.Pointer(t))
-	if !ok {
+	if MallocFreeFailPanic && !ok {
 		panic("free fail")
 	}
 	if DefaultLogWriter != nil {

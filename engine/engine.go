@@ -2,14 +2,21 @@ package engine
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
-	"time"
+	"unsafe"
 
 	"github.com/flswld/halo/cpu"
+	"github.com/flswld/halo/hashmap"
+	"github.com/flswld/halo/mem"
 	"github.com/flswld/halo/protocol"
+)
+
+const (
+	NetIfStaticHeapSize = 8 * mem.MB
 )
 
 var (
@@ -62,29 +69,38 @@ type RoutingEntryConfig struct {
 	NetIf       string // 出接口
 }
 
+type IpAddrHash uint32
+
+func (h IpAddrHash) GetHashCode() uint64 {
+	data := make([]byte, 4)
+	binary.LittleEndian.PutUint32(data, uint32(h))
+	return hashmap.GetHashCode(data)
+}
+
 // NetIf 网卡
 type NetIf struct {
 	Config                  *NetIfConfig
-	MacAddr                 []byte                      // mac地址
-	IpAddr                  []byte                      // ip地址
-	NetworkMask             []byte                      // 子网掩码
-	EthTxBuffer             []byte                      // 网卡发包缓冲区
-	EthTxLock               cpu.SpinLock                // 网卡发包锁
-	LoChan                  chan []byte                 // 本地回环管道
-	Engine                  *Engine                     // 归属Engine指针
-	ArpCacheTable           map[uint32][]byte           // arp缓存表 key:ip value:mac
-	ArpLock                 sync.RWMutex                // arp锁
-	NatWanFlowTable         map[NatWanFlowHash]*NatFlow // wan口回程包nat流映射表
-	NatFlowTable            map[NatFlowHash]*NatFlow    // nat流表
-	NatPortAlloc            map[uint32]*PortAlloc       // nat端口分配表 key:目的ip value:端口分配信息
-	NatPortMappingTable     []*NatPortMappingEntry      // 网络地址转换端口映射表
-	NatLock                 sync.RWMutex                // nat锁
-	DnsServerAddr           []byte                      // dns服务器地址
-	DhcpLeaseMap            map[uint32]*DhcpLease       // dhcp租期表
-	DhcpLock                sync.RWMutex                // dhcp锁
-	DhcpClientTransactionId []byte                      // dhcp客户端事务id
-	HandleUdp               func(payload []byte, srcPort uint16, dstPort uint16, srcAddr []byte)
-	HandleTcp               func(payload []byte, srcPort uint16, dstPort uint16, seqNum uint32, ackNum uint32, flags uint8, srcAddr []byte)
+	MacAddr                 []byte                                     // mac地址
+	IpAddr                  []byte                                     // ip地址
+	NetworkMask             []byte                                     // 子网掩码
+	EthTxBuffer             []byte                                     // 网卡发包缓冲区
+	EthTxLock               cpu.SpinLock                               // 网卡发包锁
+	LoChan                  chan []byte                                // 本地回环管道
+	Engine                  *Engine                                    // 归属Engine指针
+	ArpCacheTable           *hashmap.HashMap[IpAddrHash, *ArpCache]    // arp缓存表 key:ip value:mac
+	ArpLock                 sync.RWMutex                               // arp锁
+	NatFlowTable            *hashmap.HashMap[NatFlowHash, *NatFlow]    // nat流表
+	NatWanFlowTable         *hashmap.HashMap[NatWanFlowHash, *NatFlow] // wan口回程包nat流映射表
+	NatPortAlloc            *hashmap.HashMap[IpAddrHash, *PortAlloc]   // nat端口分配表 key:目的ip value:端口分配信息
+	NatPortMappingTable     []*NatPortMappingEntry                     // 网络地址转换端口映射表
+	NatLock                 sync.RWMutex                               // nat锁
+	DnsServerAddr           []byte                                     // dns服务器地址
+	DhcpLeaseTable          *hashmap.HashMap[IpAddrHash, *DhcpLease]   // dhcp租期表
+	DhcpLock                sync.RWMutex                               // dhcp锁
+	DhcpClientTransactionId []byte                                     // dhcp客户端事务id
+	UdpServiceMap           map[uint16]UdpHandleFunc                   // udp服务集合
+	TcpServiceMap           map[uint16]TcpHandleFunc                   // tcp服务集合
+	StaticHeap              mem.Heap                                   // 静态堆内存
 }
 
 // Engine 协议栈
@@ -94,9 +110,12 @@ type Engine struct {
 	NetIfMap       map[string]*NetIf                                 // 网络接口集合 key:接口名 value:接口实例
 	RouteTable     *RouteTable                                       // 路由表
 	Ipv4PktFwdHook func(raw []byte, dir int) (drop bool, mod []byte) // ip报文转发钩子
+	StaticHeapPtr  unsafe.Pointer                                    // 静态堆内存指针
 }
 
 func InitEngine(config *Config) (*Engine, error) {
+	cHeap := mem.NewCHeap()
+	staticHeapPtr := cHeap.Malloc(NetIfStaticHeapSize * uint64(len(config.NetIfList)))
 	e := &Engine{
 		Config:   config,
 		Stop:     atomic.Bool{},
@@ -105,9 +124,10 @@ func InitEngine(config *Config) (*Engine, error) {
 			Root: new(TrieNode),
 		},
 		Ipv4PktFwdHook: nil,
+		StaticHeapPtr:  staticHeapPtr,
 	}
 	// 网卡列表
-	for _, netIfConfig := range config.NetIfList {
+	for index, netIfConfig := range config.NetIfList {
 		macAddr, err := protocol.ParseMacAddr(netIfConfig.MacAddr)
 		if err != nil {
 			return nil, err
@@ -133,6 +153,7 @@ func InitEngine(config *Config) (*Engine, error) {
 				return nil, err
 			}
 		}
+		staticHeap := mem.NewStaticHeap(mem.Offset(staticHeapPtr, int64(index*NetIfStaticHeapSize)), NetIfStaticHeapSize)
 		netIf := &NetIf{
 			Config:                  netIfConfig,
 			MacAddr:                 macAddr,
@@ -141,16 +162,17 @@ func InitEngine(config *Config) (*Engine, error) {
 			EthTxBuffer:             make([]byte, 0, 1514),
 			LoChan:                  make(chan []byte, 1024),
 			Engine:                  e,
-			ArpCacheTable:           make(map[uint32][]byte),
-			NatWanFlowTable:         make(map[NatWanFlowHash]*NatFlow),
-			NatFlowTable:            make(map[NatFlowHash]*NatFlow),
-			NatPortAlloc:            make(map[uint32]*PortAlloc),
+			ArpCacheTable:           hashmap.NewHashMap[IpAddrHash, *ArpCache](staticHeap),
+			NatFlowTable:            hashmap.NewHashMap[NatFlowHash, *NatFlow](staticHeap),
+			NatWanFlowTable:         hashmap.NewHashMap[NatWanFlowHash, *NatFlow](staticHeap),
+			NatPortAlloc:            hashmap.NewHashMap[IpAddrHash, *PortAlloc](staticHeap),
 			NatPortMappingTable:     make([]*NatPortMappingEntry, 0),
 			DnsServerAddr:           dnsServerAddr,
-			DhcpLeaseMap:            make(map[uint32]*DhcpLease),
+			DhcpLeaseTable:          hashmap.NewHashMap[IpAddrHash, *DhcpLease](staticHeap),
 			DhcpClientTransactionId: nil,
-			HandleUdp:               nil,
-			HandleTcp:               nil,
+			UdpServiceMap:           make(map[uint16]UdpHandleFunc),
+			TcpServiceMap:           make(map[uint16]TcpHandleFunc),
+			StaticHeap:              staticHeap,
 		}
 		for _, natPortMappingEntryConfig := range netIfConfig.NatPortMappingTable {
 			lanHostIpAddr, err := protocol.ParseIpAddr(natPortMappingEntryConfig.LanHostIpAddr)
@@ -229,6 +251,8 @@ func (e *Engine) GetNetIf(name string) *NetIf {
 
 func (e *Engine) StopEngine() {
 	e.Stop.Store(true)
+	cHeap := mem.NewCHeap()
+	cHeap.Free(e.StaticHeapPtr)
 }
 
 func (i *NetIf) PacketHandle() {
@@ -274,63 +298,5 @@ func (i *NetIf) PacketHandle() {
 				}
 			}
 		}
-	}
-}
-
-func (i *NetIf) SendUdpPktByFlow(natFlowHash NatFlowHash, dir int, udpPayload []byte) {
-	natFlowHash.Ipv4HeadProto = protocol.IPH_PROTO_UDP
-	remoteIpAddr := protocol.UToIpAddr(natFlowHash.RemoteIpAddr)
-	lanHostIpAddr := protocol.UToIpAddr(natFlowHash.LanHostIpAddr)
-	natFlow := i.NatGetFlowByHash(natFlowHash)
-	if natFlow == nil {
-		natFlow = i.NatAddFlow(lanHostIpAddr, remoteIpAddr, natFlowHash.LanHostPort, natFlowHash.RemotePort, natFlowHash.Ipv4HeadProto)
-		if natFlow == nil {
-			return
-		}
-	}
-	natFlow.LastAliveTime = uint32(time.Now().Unix())
-	switch dir {
-	case LanToWan:
-		udpPkt := make([]byte, 0, 1480)
-		udpPkt, err := protocol.BuildUdpPkt(udpPkt, udpPayload, natFlow.WanPort, natFlow.RemotePort, i.IpAddr, remoteIpAddr)
-		if err != nil {
-			return
-		}
-		ipv4Pkt := make([]byte, 0, 1500)
-		ipv4Pkt, err = protocol.BuildIpv4Pkt(ipv4Pkt, udpPkt, protocol.IPH_PROTO_UDP, i.IpAddr, remoteIpAddr)
-		if err != nil {
-			return
-		}
-		nextHopIpAddr, _ := i.FindRoute(remoteIpAddr)
-		if nextHopIpAddr == nil {
-			return
-		}
-		ethDstMac := i.GetArpCache(nextHopIpAddr)
-		if ethDstMac == nil {
-			return
-		}
-		i.TxEthernet(ipv4Pkt, ethDstMac, protocol.ETH_PROTO_IPV4)
-	case WanToLan:
-		udpPkt := make([]byte, 0, 1480)
-		udpPkt, err := protocol.BuildUdpPkt(udpPkt, udpPayload, natFlow.RemotePort, natFlow.LanHostPort, remoteIpAddr, lanHostIpAddr)
-		if err != nil {
-			return
-		}
-		ipv4Pkt := make([]byte, 0, 1500)
-		ipv4Pkt, err = protocol.BuildIpv4Pkt(ipv4Pkt, udpPkt, protocol.IPH_PROTO_UDP, remoteIpAddr, lanHostIpAddr)
-		if err != nil {
-			return
-		}
-		_, outNetIfName := i.FindRoute(lanHostIpAddr)
-		if outNetIfName == "" {
-			return
-		}
-		outNetIf := i.Engine.NetIfMap[outNetIfName]
-		ethDstMac := outNetIf.GetArpCache(lanHostIpAddr)
-		if ethDstMac == nil {
-			return
-		}
-		outNetIf.TxEthernet(ipv4Pkt, ethDstMac, protocol.ETH_PROTO_IPV4)
-	default:
 	}
 }

@@ -2,6 +2,7 @@ package hashmap
 
 import (
 	"encoding/json"
+	"errors"
 
 	"github.com/flswld/halo/list"
 	"github.com/flswld/halo/mem"
@@ -13,7 +14,8 @@ const (
 )
 
 type MapKey interface {
-	int | int8 | int16 | int32 | int64 | uint | uint8 | uint16 | uint32 | uint64
+	comparable
+	GetHashCode() uint64
 }
 
 type HashMap[K MapKey, V any] struct {
@@ -39,7 +41,14 @@ func NewHashMapWithCap[K MapKey, V any](heap mem.Heap, cap int) *HashMap[K, V] {
 		cap = initBucketSize
 	}
 	m := mem.MallocType[HashMap[K, V]](heap, 1)
+	if m == nil {
+		return nil
+	}
 	m.bucket = list.NewArrayListWithCap[*entry[K, V]](heap, cap)
+	if m.bucket == nil {
+		mem.FreeType[HashMap[K, V]](heap, m)
+		return nil
+	}
 	for i := 0; i < cap; i++ {
 		m.bucket.Add(nil)
 	}
@@ -49,36 +58,8 @@ func NewHashMapWithCap[K MapKey, V any](heap mem.Heap, cap int) *HashMap[K, V] {
 	return m
 }
 
-func (m *HashMap[K, V]) hashBucketIndex(key K, size uint64) uint64 {
-	k := any(key)
-	switch k.(type) {
-	case int:
-		return uint64(k.(int)) % size
-	case int8:
-		return uint64(k.(int8)) % size
-	case int16:
-		return uint64(k.(int16)) % size
-	case int32:
-		return uint64(k.(int32)) % size
-	case int64:
-		return uint64(k.(int64)) % size
-	case uint:
-		return uint64(k.(uint)) % size
-	case uint8:
-		return uint64(k.(uint8)) % size
-	case uint16:
-		return uint64(k.(uint16)) % size
-	case uint32:
-		return uint64(k.(uint32)) % size
-	case uint64:
-		return k.(uint64) % size
-	default:
-		return 0
-	}
-}
-
 func (m *HashMap[K, V]) Get(key K) (V, bool) {
-	i := m.hashBucketIndex(key, uint64(m.bucket.Len()))
+	i := key.GetHashCode() % uint64(m.bucket.Len())
 	e := m.bucket.Get(int(i))
 	if e == nil {
 		var v V
@@ -96,11 +77,14 @@ func (m *HashMap[K, V]) Get(key K) (V, bool) {
 	}
 }
 
-func (m *HashMap[K, V]) Set(key K, value V) {
-	i := m.hashBucketIndex(key, uint64(m.bucket.Len()))
+func (m *HashMap[K, V]) Set(key K, value V) bool {
+	i := key.GetHashCode() % uint64(m.bucket.Len())
 	e := m.bucket.Get(int(i))
 	if e == nil {
 		ne := mem.MallocType[entry[K, V]](m.heap, 1)
+		if ne == nil {
+			return false
+		}
 		ne.key = key
 		ne.value = value
 		ne.front = nil
@@ -108,16 +92,19 @@ func (m *HashMap[K, V]) Set(key K, value V) {
 		m.bucket.Set(int(i), ne)
 		m.load++
 		m.len++
-		return
+		return true
 	}
 	for {
 		if e.key == key {
 			e.key = key
 			e.value = value
-			return
+			return true
 		}
 		if e.next == nil {
 			ne := mem.MallocType[entry[K, V]](m.heap, 1)
+			if ne == nil {
+				return false
+			}
 			ne.key = key
 			ne.value = value
 			ne.front = e
@@ -127,7 +114,7 @@ func (m *HashMap[K, V]) Set(key K, value V) {
 			if float32(m.load)/float32(m.bucket.Len()) > growBucketLoad {
 				m.Grow()
 			}
-			return
+			return true
 		}
 		e = e.next
 	}
@@ -135,16 +122,24 @@ func (m *HashMap[K, V]) Set(key K, value V) {
 
 func (m *HashMap[K, V]) Grow() {
 	b := list.NewArrayListWithCap[*entry[K, V]](m.heap, m.bucket.Len()*2)
+	if b == nil {
+		return
+	}
 	for i := 0; i < m.bucket.Len()*2; i++ {
 		b.Add(nil)
 	}
 	bl := 0
 	l := 0
+	fail := false
 	m.For(func(key K, value V) (next bool) {
-		i := m.hashBucketIndex(key, uint64(b.Len()))
+		i := key.GetHashCode() % uint64(b.Len())
 		e := b.Get(int(i))
 		if e == nil {
 			ne := mem.MallocType[entry[K, V]](m.heap, 1)
+			if ne == nil {
+				fail = true
+				return false
+			}
 			ne.key = key
 			ne.value = value
 			ne.front = nil
@@ -162,6 +157,10 @@ func (m *HashMap[K, V]) Grow() {
 			}
 			if e.next == nil {
 				ne := mem.MallocType[entry[K, V]](m.heap, 1)
+				if ne == nil {
+					fail = true
+					return false
+				}
 				ne.key = key
 				ne.value = value
 				ne.front = e
@@ -173,6 +172,21 @@ func (m *HashMap[K, V]) Grow() {
 			e = e.next
 		}
 	})
+	if fail {
+		b.For(func(index int, e *entry[K, V]) (next bool) {
+			for {
+				if e == nil {
+					break
+				}
+				ee := e
+				e = e.next
+				mem.FreeType[entry[K, V]](m.heap, ee)
+			}
+			return true
+		})
+		b.Free()
+		return
+	}
 	m.Clear()
 	m.bucket.Free()
 	m.bucket = b
@@ -181,7 +195,7 @@ func (m *HashMap[K, V]) Grow() {
 }
 
 func (m *HashMap[K, V]) Del(key K) {
-	i := m.hashBucketIndex(key, uint64(m.bucket.Len()))
+	i := key.GetHashCode() % uint64(m.bucket.Len())
 	e := m.bucket.Get(int(i))
 	if e == nil {
 		return
@@ -220,11 +234,12 @@ func (m *HashMap[K, V]) For(fn func(key K, value V) (next bool)) {
 			if e == nil {
 				break
 			}
+			ne := e.next
 			n := fn(e.key, e.value)
 			if !n {
 				return false
 			}
-			e = e.next
+			e = ne
 		}
 		return true
 	})
@@ -275,7 +290,18 @@ func (m *HashMap[K, V]) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	for k, v := range mm {
-		m.Set(k, v)
+		ok := m.Set(k, v)
+		if !ok {
+			return errors.New("overflow")
+		}
 	}
 	return nil
+}
+
+func GetHashCode(data []byte) uint64 {
+	hashCode := uint64(0)
+	for _, v := range data {
+		hashCode = uint64(v) + 131*hashCode
+	}
+	return hashCode
 }

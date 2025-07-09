@@ -8,6 +8,7 @@ import (
 	"math/bits"
 	"time"
 
+	"github.com/flswld/halo/mem"
 	"github.com/flswld/halo/protocol"
 )
 
@@ -45,13 +46,15 @@ var (
 	DhcpMagicCookie = []byte{0x63, 0x82, 0x53, 0x63}
 )
 
+// DhcpLease DHCP租期
 type DhcpLease struct {
-	IpAddr   []byte
-	MacAddr  []byte
-	ExpTime  int64
-	HostName string
+	IpAddr   [4]byte            // ip地址
+	MacAddr  [6]byte            // mac地址
+	ExpTime  uint32             // 过期时间
+	HostName mem.StaticString64 // 主机名
 }
 
+// DhcpOption DHCP选项
 type DhcpOption struct {
 	Type         uint8
 	MsgType      uint8
@@ -225,8 +228,8 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 			optionReqIpAddr := dhcpOptionMap[DhcpOptionReqIpAddr]
 			if optionReqIpAddr != nil {
 				reqIpAddrU := protocol.IpAddrToU(optionReqIpAddr.IpAddr)
-				dhcpLease := i.DhcpLeaseMap[reqIpAddrU]
-				if dhcpLease != nil && bytes.Equal(dhcpLease.MacAddr, clientMacAddr) {
+				dhcpLease, exist := i.DhcpLeaseTable.Get(IpAddrHash(reqIpAddrU))
+				if exist && bytes.Equal(dhcpLease.MacAddr[:], clientMacAddr) {
 					clientIpAddrU = reqIpAddrU
 				}
 			}
@@ -243,8 +246,8 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 						if ipAddrU == selfIpAddrU {
 							continue
 						}
-						dhcpLease := i.DhcpLeaseMap[ipAddrU]
-						if dhcpLease != nil {
+						_, exist := i.DhcpLeaseTable.Get(IpAddrHash(ipAddrU))
+						if exist {
 							continue
 						}
 						clientIpAddrU = ipAddrU
@@ -278,34 +281,37 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 			if optionReqIpAddr == nil {
 				return
 			}
-			reqIpAddrU := protocol.IpAddrToU(optionReqIpAddr.IpAddr)
-			selfIpAddrU := protocol.IpAddrToU(i.IpAddr)
-			networkMaskU := protocol.IpAddrToU(i.NetworkMask)
-			if selfIpAddrU&networkMaskU != reqIpAddrU&networkMaskU {
-				i.TxDhcp(DhcpServerPort, DhcpClientPort, transactionId, []byte{0x00, 0x00, 0x00, 0x00}, clientMacAddr, map[uint8]*DhcpOption{
-					DhcpOptionMsgType:          {Type: DhcpOptionMsgType, MsgType: DhcpOptionMsgTypeNak},
-					DhcpOptionServerIdentifier: {Type: DhcpOptionServerIdentifier, ServerIpAddr: i.IpAddr},
-				})
-				return
-			}
-			dhcpLease := i.DhcpLeaseMap[reqIpAddrU]
-			if dhcpLease != nil && !bytes.Equal(dhcpLease.MacAddr, clientMacAddr) {
-				i.TxDhcp(DhcpServerPort, DhcpClientPort, transactionId, []byte{0x00, 0x00, 0x00, 0x00}, clientMacAddr, map[uint8]*DhcpOption{
-					DhcpOptionMsgType:          {Type: DhcpOptionMsgType, MsgType: DhcpOptionMsgTypeNak},
-					DhcpOptionServerIdentifier: {Type: DhcpOptionServerIdentifier, ServerIpAddr: i.IpAddr},
-				})
-				return
-			}
 			hostName := ""
 			optionHostName := dhcpOptionMap[DhcpOptionHostName]
 			if optionHostName != nil {
 				hostName = optionHostName.HostName
 			}
-			i.DhcpLeaseMap[reqIpAddrU] = &DhcpLease{
-				IpAddr:   optionReqIpAddr.IpAddr,
-				MacAddr:  clientMacAddr,
-				ExpTime:  time.Now().Unix() + DhcpLeaseTime,
-				HostName: hostName,
+			var dhcpLease *DhcpLease
+			var exist bool
+			var ok bool
+			reqIpAddrU := protocol.IpAddrToU(optionReqIpAddr.IpAddr)
+			selfIpAddrU := protocol.IpAddrToU(i.IpAddr)
+			networkMaskU := protocol.IpAddrToU(i.NetworkMask)
+			if selfIpAddrU&networkMaskU != reqIpAddrU&networkMaskU {
+				goto dhcp_nak
+			}
+			dhcpLease, exist = i.DhcpLeaseTable.Get(IpAddrHash(reqIpAddrU))
+			if exist && !bytes.Equal(dhcpLease.MacAddr[:], clientMacAddr) {
+				goto dhcp_nak
+			}
+			if !exist {
+				dhcpLease = mem.MallocType[DhcpLease](i.StaticHeap, 1)
+				if dhcpLease == nil {
+					goto dhcp_nak
+				}
+			}
+			copy(dhcpLease.IpAddr[:], optionReqIpAddr.IpAddr)
+			copy(dhcpLease.MacAddr[:], clientMacAddr)
+			dhcpLease.ExpTime = uint32(time.Now().Unix()) + DhcpLeaseTime
+			dhcpLease.HostName.Set(hostName)
+			ok = i.DhcpLeaseTable.Set(IpAddrHash(reqIpAddrU), dhcpLease)
+			if !ok {
+				goto dhcp_nak
 			}
 			Log(fmt.Sprintf("dhcp server ack ip: %v, name: %v, mac: % 02x\n", optionReqIpAddr.IpAddr, hostName, clientMacAddr))
 			i.TxDhcp(DhcpServerPort, DhcpClientPort, transactionId, optionReqIpAddr.IpAddr, clientMacAddr, map[uint8]*DhcpOption{
@@ -318,12 +324,19 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 				DhcpOptionRenewalTimeValue:   {Type: DhcpOptionRenewalTimeValue, TimeValue: DhcpLeaseTime * 0.5},
 				DhcpOptionServerIdentifier:   {Type: DhcpOptionServerIdentifier, ServerIpAddr: i.IpAddr},
 			})
+		dhcp_nak:
+			i.TxDhcp(DhcpServerPort, DhcpClientPort, transactionId, []byte{0x00, 0x00, 0x00, 0x00}, clientMacAddr, map[uint8]*DhcpOption{
+				DhcpOptionMsgType:          {Type: DhcpOptionMsgType, MsgType: DhcpOptionMsgTypeNak},
+				DhcpOptionServerIdentifier: {Type: DhcpOptionServerIdentifier, ServerIpAddr: i.IpAddr},
+			})
+			return
 		case DhcpOptionMsgTypeRelease:
 			ipv4SrcAddrU := protocol.IpAddrToU(ipv4SrcAddr)
-			dhcpLease := i.DhcpLeaseMap[ipv4SrcAddrU]
-			if dhcpLease != nil {
+			dhcpLease, exist := i.DhcpLeaseTable.Get(IpAddrHash(ipv4SrcAddrU))
+			if exist {
 				Log(fmt.Sprintf("dhcp server release ip: %v, name: %v, mac: % 02x\n", dhcpLease.IpAddr, dhcpLease.HostName, clientMacAddr))
-				delete(i.DhcpLeaseMap, ipv4SrcAddrU)
+				i.DhcpLeaseTable.Del(IpAddrHash(ipv4SrcAddrU))
+				mem.FreeType[DhcpLease](i.StaticHeap, dhcpLease)
 			}
 		default:
 		}
@@ -431,6 +444,18 @@ func (i *NetIf) DhcpDiscover() {
 	})
 }
 
+func (i *NetIf) ListDhcp() []*DhcpLease {
+	i.DhcpLock.Lock()
+	defer i.DhcpLock.Unlock()
+	ret := make([]*DhcpLease, 0)
+	i.DhcpLeaseTable.For(func(key IpAddrHash, value *DhcpLease) (next bool) {
+		v := *value
+		ret = append(ret, &v)
+		return true
+	})
+	return ret
+}
+
 func (i *NetIf) DhcpLeaseClear() {
 	ticker := time.NewTicker(time.Minute * 1)
 	for {
@@ -438,13 +463,15 @@ func (i *NetIf) DhcpLeaseClear() {
 		if i.Engine.Stop.Load() {
 			break
 		}
-		now := time.Now().Unix()
+		now := uint32(time.Now().Unix())
 		i.DhcpLock.Lock()
-		for ipAddrU, dhcpLease := range i.DhcpLeaseMap {
+		i.DhcpLeaseTable.For(func(ipAddrU IpAddrHash, dhcpLease *DhcpLease) (next bool) {
 			if now > dhcpLease.ExpTime {
-				delete(i.DhcpLeaseMap, ipAddrU)
+				i.DhcpLeaseTable.Del(ipAddrU)
+				mem.FreeType[DhcpLease](i.StaticHeap, dhcpLease)
 			}
-		}
+			return true
+		})
 		i.DhcpLock.Unlock()
 	}
 }

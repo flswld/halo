@@ -12,10 +12,11 @@ func (i *NetIf) RxUdp(ipv4Payload []byte, ipv4SrcAddr []byte) {
 		Log(fmt.Sprintf("parse udp packet error: %v\n", err))
 		return
 	}
-	if i.HandleUdp != nil {
-		i.HandleUdp(udpPayload, udpSrcPort, udpDstPort, ipv4SrcAddr)
+	handleFunc, exist := i.UdpServiceMap[udpDstPort]
+	if !exist {
 		return
 	}
+	handleFunc(UdpSession{RemoteIp: protocol.IpAddrToU(ipv4SrcAddr), RemotePort: udpSrcPort}, udpPayload)
 }
 
 func (i *NetIf) TxUdp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, ipv4DstAddr []byte) bool {
@@ -37,4 +38,19 @@ func (i *NetIf) RxUdpBroadcast(ipv4Payload []byte, ipv4SrcAddr []byte, ipv4DstAd
 	if udpDstPort == DhcpClientPort || udpDstPort == DhcpServerPort {
 		i.RxDhcp(udpPayload, udpSrcPort, udpDstPort, ipv4SrcAddr)
 	}
+}
+
+type UdpSession struct {
+	RemoteIp   uint32
+	RemotePort uint16
+}
+
+type UdpHandleFunc func(session UdpSession, payload []byte)
+
+func (i *NetIf) RecvUdp(udpPort uint16, handleFunc UdpHandleFunc) {
+	i.UdpServiceMap[udpPort] = handleFunc
+}
+
+func (i *NetIf) SendUdp(udpPort uint16, session UdpSession, payload []byte) {
+	i.TxUdp(payload, udpPort, session.RemotePort, protocol.UToIpAddr(session.RemoteIp))
 }

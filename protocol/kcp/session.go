@@ -13,6 +13,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1120,20 +1121,28 @@ var errChanConnAlreadyClose = errors.New("chan conn already close")
 
 // ChanConnAddr 管道连接地址
 type ChanConnAddr struct {
+	Ip   uint32
+	Port uint16
 }
 
-func (a *ChanConnAddr) Network() string {
+func (a ChanConnAddr) Network() string {
 	return "chan"
 }
 
-func (a *ChanConnAddr) String() string {
-	return "addr"
+func (a ChanConnAddr) String() string {
+	return strconv.Itoa(int(a.Ip>>24)) + "." + strconv.Itoa(int(a.Ip>>16)) + "." + strconv.Itoa(int(a.Ip>>8)) + "." + strconv.Itoa(int(a.Ip>>0)) + ":" + strconv.Itoa(int(a.Port))
+}
+
+// ChanConnMsg 管道连接消息
+type ChanConnMsg struct {
+	Addr ChanConnAddr
+	Pkt  []byte
 }
 
 // ChanConn 管道连接
 type ChanConn struct {
-	RxChan  chan []byte
-	TxChan  chan []byte
+	RxChan  chan ChanConnMsg
+	TxChan  chan ChanConnMsg
 	isClose atomic.Uint32
 }
 
@@ -1141,12 +1150,12 @@ func (c *ChanConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	if c.isClose.Load() == 1 {
 		return 0, nil, errChanConnAlreadyClose
 	}
-	pkt, ok := <-c.RxChan
+	msg, ok := <-c.RxChan
 	if !ok {
 		return 0, nil, errChanConnAlreadyClose
 	}
-	copy(p, pkt)
-	return len(pkt), &ChanConnAddr{}, nil
+	copy(p, msg.Pkt)
+	return len(msg.Pkt), msg.Addr, nil
 }
 
 func (c *ChanConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
@@ -1155,7 +1164,10 @@ func (c *ChanConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	}
 	pkt := make([]byte, len(p))
 	copy(pkt, p)
-	c.TxChan <- pkt
+	c.TxChan <- ChanConnMsg{
+		Addr: addr.(ChanConnAddr),
+		Pkt:  pkt,
+	}
 	return len(pkt), nil
 }
 

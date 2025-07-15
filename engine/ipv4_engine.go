@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/flswld/halo/hashmap"
-	"github.com/flswld/halo/list"
 	"github.com/flswld/halo/mem"
 	"github.com/flswld/halo/protocol"
 )
@@ -113,7 +112,7 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr []byte, ipv4DstA
 					// 没有nat表项
 					return false
 				}
-				natFlow.LastAliveTime = uint32(time.Now().Unix())
+				natFlow.LastAliveTime = i.Engine.TimeNow
 				ethPayload = protocol.NatChangeDst(ethPayload, protocol.UToIpAddr(natFlow.LanHostIpAddr), natFlow.LanHostPort)
 			} else {
 				ethPayload = protocol.NatChangeDst(ethPayload, protocol.UToIpAddr(natPortMappingEntry.LanHostIpAddr), natPortMappingEntry.LanHostPort)
@@ -174,7 +173,7 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr []byte, ipv4DstA
 					return true
 				}
 			}
-			natFlow.LastAliveTime = uint32(time.Now().Unix())
+			natFlow.LastAliveTime = i.Engine.TimeNow
 			ethPayload = protocol.NatChangeSrc(ethPayload, protocol.UToIpAddr(natFlow.WanIpAddr), natFlow.WanPort)
 		} else {
 			ethPayload = protocol.NatChangeSrc(ethPayload, outNetIf.IpAddr, natPortMappingEntry.WanPort)
@@ -401,7 +400,7 @@ type NatPortMappingEntry struct {
 
 // PortAlloc 端口分配器
 type PortAlloc struct {
-	PortList *list.ArrayList[uint16] // 端口列表
+	UsePortMap *hashmap.HashMap[PortHash, struct{}] // 已使用端口集合
 }
 
 func (i *NetIf) NatGetFlowByHash(remoteIpAddr []byte, remotePort uint16, lanHostIpAddr []byte, lanHostPort uint16, ipv4HeadProto uint8) *NatFlow {
@@ -485,30 +484,36 @@ func (i *NetIf) NatAddFlow(lanHostIpAddr []byte, remoteIpAddr []byte, lanHostPor
 		if portAlloc == nil {
 			return nil
 		}
-		portAlloc.PortList = list.NewArrayListWithCap[uint16](i.StaticHeap, 32768)
-		if portAlloc.PortList == nil {
+		portAlloc.UsePortMap = hashmap.NewHashMap[PortHash, struct{}](i.StaticHeap)
+		if portAlloc.UsePortMap == nil {
 			mem.FreeType[PortAlloc](i.StaticHeap, portAlloc)
 			return nil
-		}
-		port := uint16(32768)
-		for {
-			portAlloc.PortList.Add(port)
-			port++
-			if port == 0 {
-				break
-			}
 		}
 		ok := i.NatPortAlloc.Set(IpAddrHash(_remoteIpAddrU), portAlloc)
 		if !ok {
-			portAlloc.PortList.Free()
+			portAlloc.UsePortMap.Free()
 			mem.FreeType[PortAlloc](i.StaticHeap, portAlloc)
 			return nil
 		}
 	}
-	if portAlloc.PortList.Len() == 0 {
+	wanPort := uint16(32768)
+	for {
+		_, use := portAlloc.UsePortMap.Get(PortHash(wanPort))
+		if !use {
+			break
+		}
+		wanPort++
+		if wanPort == 0 {
+			break
+		}
+	}
+	if wanPort == 0 {
 		return nil
 	}
-	wanPort := portAlloc.PortList.Pop()
+	ok := portAlloc.UsePortMap.Set(PortHash(wanPort), struct{}{})
+	if !ok {
+		return nil
+	}
 	natFlowHash := NatFlowHash{
 		RemoteIpAddr:  _remoteIpAddrU,
 		RemotePort:    _remotePort,
@@ -516,10 +521,10 @@ func (i *NetIf) NatAddFlow(lanHostIpAddr []byte, remoteIpAddr []byte, lanHostPor
 		LanHostPort:   lanHostPort,
 		Ipv4HeadProto: ipv4HeadProto,
 	}
-	var ok bool
 	natFlow := mem.MallocType[NatFlow](i.StaticHeap, 1)
 	if natFlow == nil {
-		goto add_port
+		portAlloc.UsePortMap.Del(PortHash(wanPort))
+		return nil
 	}
 	natFlow.NatFlowHash = natFlowHash
 	natFlow.RemoteIpAddr = _remoteIpAddrU
@@ -529,10 +534,11 @@ func (i *NetIf) NatAddFlow(lanHostIpAddr []byte, remoteIpAddr []byte, lanHostPor
 	natFlow.LanHostIpAddr = protocol.IpAddrToU(lanHostIpAddr)
 	natFlow.LanHostPort = lanHostPort
 	natFlow.Ipv4HeadProto = ipv4HeadProto
-	natFlow.LastAliveTime = uint32(time.Now().Unix())
+	natFlow.LastAliveTime = i.Engine.TimeNow
 	ok = i.NatFlowTable.Set(natFlowHash, natFlow)
 	if !ok {
-		goto add_port
+		portAlloc.UsePortMap.Del(PortHash(wanPort))
+		return nil
 	}
 	ok = i.NatWanFlowTable.Set(NatWanFlowHash{
 		RemoteIpAddr:  _remoteIpAddrU,
@@ -542,16 +548,10 @@ func (i *NetIf) NatAddFlow(lanHostIpAddr []byte, remoteIpAddr []byte, lanHostPor
 		Ipv4HeadProto: ipv4HeadProto,
 	}, natFlow)
 	if !ok {
-		goto add_port
-	}
-	return natFlow
-add_port:
-	portAlloc, exist = i.NatPortAlloc.Get(IpAddrHash(_remoteIpAddrU))
-	if !exist {
+		portAlloc.UsePortMap.Del(PortHash(wanPort))
 		return nil
 	}
-	portAlloc.PortList.Add(wanPort)
-	return nil
+	return natFlow
 }
 
 func (i *NetIf) CheckNatPortMapping(dir int, ipAddr []byte, port uint16, ipv4HeadProto uint8) *NatPortMappingEntry {
@@ -593,16 +593,15 @@ func (i *NetIf) ListNat() []*NatFlow {
 }
 
 func (i *NetIf) NatTableClear() {
-	ticker := time.NewTicker(time.Minute * 1)
+	ticker := time.NewTicker(time.Second * 1)
 	for {
 		<-ticker.C
 		if i.Engine.Stop.Load() {
 			break
 		}
-		now := uint32(time.Now().Unix())
 		i.NatLock.Lock()
 		i.NatFlowTable.For(func(natFlowHash NatFlowHash, natFlow *NatFlow) (next bool) {
-			if now-natFlow.LastAliveTime > 60 {
+			if i.Engine.TimeNow-natFlow.LastAliveTime > 60 {
 				i.NatFlowTable.Del(natFlowHash)
 				i.NatWanFlowTable.Del(NatWanFlowHash{
 					RemoteIpAddr: natFlow.RemoteIpAddr,
@@ -615,9 +614,9 @@ func (i *NetIf) NatTableClear() {
 				if !exist {
 					return true
 				}
-				portAlloc.PortList.Add(natFlow.WanPort)
-				if portAlloc.PortList.Len() == 32768 {
-					portAlloc.PortList.Free()
+				portAlloc.UsePortMap.Del(PortHash(natFlow.WanPort))
+				if portAlloc.UsePortMap.Len() == 0 {
+					portAlloc.UsePortMap.Free()
 					i.NatPortAlloc.Del(IpAddrHash(natFlow.RemoteIpAddr))
 					mem.FreeType[PortAlloc](i.StaticHeap, portAlloc)
 				}
@@ -626,6 +625,7 @@ func (i *NetIf) NatTableClear() {
 		})
 		i.NatLock.Unlock()
 	}
+	i.Engine.StopWaitGroup.Done()
 }
 
 func (i *NetIf) SendUdpPktByFlow(natFlowHash NatFlowHash, dir int, udpPayload []byte) {
@@ -645,7 +645,7 @@ func (i *NetIf) SendUdpPktByFlow(natFlowHash NatFlowHash, dir int, udpPayload []
 			return
 		}
 	}
-	natFlow.LastAliveTime = uint32(time.Now().Unix())
+	natFlow.LastAliveTime = i.Engine.TimeNow
 	switch dir {
 	case LanToWan:
 		udpPkt := make([]byte, 0, 1480)

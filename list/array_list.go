@@ -79,14 +79,12 @@ func (a *ArrayList[T]) Get(index int) T {
 	return *p
 }
 
-func (a *ArrayList[T]) Pop() T {
-	if a.len == 0 {
-		var t T
-		return t
+func (a *ArrayList[T]) Del(index int) {
+	if index >= a.len {
+		return
 	}
-	p := mem.OffsetType[T](a.data, int64(a.len-1))
+	mem.MemCpyType[T](mem.OffsetType[T](a.data, int64(index)), mem.OffsetType[T](a.data, int64(index+1)), uint64(a.len-index-1))
 	a.len--
-	return *p
 }
 
 func (a *ArrayList[T]) For(fn func(index int, value T) (next bool)) {

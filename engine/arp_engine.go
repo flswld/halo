@@ -3,7 +3,6 @@ package engine
 import (
 	"bytes"
 	"fmt"
-	"time"
 
 	"github.com/flswld/halo/mem"
 	"github.com/flswld/halo/protocol"
@@ -61,7 +60,7 @@ func (i *NetIf) SetArpCache(ipAddr []byte, macAddr []byte) {
 	}
 	arpCache.IpAddr = ipAddrU
 	copy(arpCache.MacAddr[:], macAddr)
-	arpCache.CreateTime = uint32(time.Now().Unix())
+	arpCache.CreateTime = i.Engine.TimeNow
 	i.ArpCacheTable.Set(IpAddrHash(ipAddrU), arpCache)
 }
 

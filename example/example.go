@@ -127,7 +127,7 @@ func EthernetRouter() {
 				NatEnable:   true,                   // 开启网络地址转换
 				NatType:     engine.NatTypeFullCone, // 网络地址转换类型
 				// 网络地址转换端口映射表
-				NatPortMappingTable: []*engine.NatPortMappingEntryConfig{
+				NatPortMappingList: []*engine.NatPortMappingEntryConfig{
 					{
 						WanPort:       22,                     // wan口端口
 						LanHostIpAddr: "192.168.111.222",      // lan口主机ip地址
@@ -140,7 +140,10 @@ func EthernetRouter() {
 				DhcpClientEnable: false,                                           // 开启dhcp客户端
 				EthRxFunc:        func() (pkt []byte) { return dpdk.EthRxPkt(0) }, // 网卡收包方法
 				EthTxFunc:        func(pkt []byte) { dpdk.EthTxPkt(0, pkt) },      // 网卡发包方法
-				BindCpuCore:      -1,                                              // 绑定的cpu核心
+				BindCpuCore:      0,                                               // 绑定的cpu核心
+				StaticHeapSize:   8 * mem.MB,                                      // 静态堆内存大小
+				SwitchMode:       false,                                           // 交换机模式
+				SwitchGroup:      "",                                              // 交换机组
 			},
 			{
 				Name:             "wan1",
@@ -154,7 +157,6 @@ func EthernetRouter() {
 				EthTxFunc: func(pkt []byte) {
 					dpdk.EthTxPkt(1, pkt)
 				},
-				BindCpuCore: -1,
 			},
 			{
 				Name:             "lan0",
@@ -169,11 +171,10 @@ func EthernetRouter() {
 				EthTxFunc: func(pkt []byte) {
 					dpdk.KniTxPkt(pkt)
 				},
-				BindCpuCore: -1,
 			},
 		},
 		// 路由表
-		RoutingTable: []*engine.RoutingEntryConfig{
+		RoutingList: []*engine.RouteEntryConfig{
 			{
 				DstIpAddr:   "114.114.114.114", // 目的ip地址
 				NetworkMask: "255.255.255.255", // 网络掩码
@@ -181,6 +182,7 @@ func EthernetRouter() {
 				NetIf:       "wan0",            // 出接口
 			},
 		},
+		StaticHeapSize: 8 * mem.MB, // 静态堆内存大小
 	})
 	if err != nil {
 		panic(err)
@@ -196,6 +198,93 @@ func EthernetRouter() {
 		}
 		return false, raw
 	}
+
+	time.Sleep(time.Minute)
+
+	// 停止协议栈
+	e.StopEngine()
+
+	// 停止dpdk
+	dpdk.Exit()
+}
+
+// EthernetSwitch 以太网交换机
+func EthernetSwitch() {
+	// 启动dpdk
+	dpdk.Run(&dpdk.Config{
+		PortIdList: []int{0, 1, 2, 3, 4, 5, 6, 7},
+		StatsLog:   true,
+		IdleSleep:  true,
+		SingleCore: true,
+	})
+
+	// 初始化协议栈
+	e, err := engine.InitEngine(&engine.Config{
+		NetIfList: []*engine.NetIfConfig{
+			{
+				Name:        "port0",
+				EthRxFunc:   func() (pkt []byte) { return dpdk.EthRxPkt(0) },
+				EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(0, pkt) },
+				SwitchMode:  true,
+				SwitchGroup: "lan0",
+			},
+			{
+				Name:        "port1",
+				EthRxFunc:   func() (pkt []byte) { return dpdk.EthRxPkt(1) },
+				EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(1, pkt) },
+				SwitchMode:  true,
+				SwitchGroup: "lan0",
+			},
+			{
+				Name:        "port2",
+				EthRxFunc:   func() (pkt []byte) { return dpdk.EthRxPkt(2) },
+				EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(2, pkt) },
+				SwitchMode:  true,
+				SwitchGroup: "lan0",
+			},
+			{
+				Name:        "port3",
+				EthRxFunc:   func() (pkt []byte) { return dpdk.EthRxPkt(3) },
+				EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(3, pkt) },
+				SwitchMode:  true,
+				SwitchGroup: "lan0",
+			},
+			{
+				Name:        "port4",
+				EthRxFunc:   func() (pkt []byte) { return dpdk.EthRxPkt(4) },
+				EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(4, pkt) },
+				SwitchMode:  true,
+				SwitchGroup: "lan1",
+			},
+			{
+				Name:        "port5",
+				EthRxFunc:   func() (pkt []byte) { return dpdk.EthRxPkt(5) },
+				EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(5, pkt) },
+				SwitchMode:  true,
+				SwitchGroup: "lan1",
+			},
+			{
+				Name:        "port6",
+				EthRxFunc:   func() (pkt []byte) { return dpdk.EthRxPkt(6) },
+				EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(6, pkt) },
+				SwitchMode:  true,
+				SwitchGroup: "lan1",
+			},
+			{
+				Name:        "port7",
+				EthRxFunc:   func() (pkt []byte) { return dpdk.EthRxPkt(7) },
+				EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(7, pkt) },
+				SwitchMode:  true,
+				SwitchGroup: "lan1",
+			},
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// 启动协议栈
+	e.RunEngine()
 
 	time.Sleep(time.Minute)
 
@@ -239,7 +328,7 @@ func DDoS() {
 				BindCpuCore: 5,
 			},
 		},
-		RoutingTable: []*engine.RoutingEntryConfig{
+		RoutingList: []*engine.RouteEntryConfig{
 			{
 				DstIpAddr:   "0.0.0.0",
 				NetworkMask: "0.0.0.0",

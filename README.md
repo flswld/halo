@@ -183,7 +183,7 @@ func EthernetRouter() {
 				NatEnable:   true,                   // 开启网络地址转换
 				NatType:     engine.NatTypeFullCone, // 网络地址转换类型
 				// 网络地址转换端口映射表
-				NatPortMappingTable: []*engine.NatPortMappingEntryConfig{
+				NatPortMappingList: []*engine.NatPortMappingEntryConfig{
 					{
 						WanPort:       22,                     // wan口端口
 						LanHostIpAddr: "192.168.111.222",      // lan口主机ip地址
@@ -196,7 +196,10 @@ func EthernetRouter() {
 				DhcpClientEnable: false,                                           // 开启dhcp客户端
 				EthRxFunc:        func() (pkt []byte) { return dpdk.EthRxPkt(0) }, // 网卡收包方法
 				EthTxFunc:        func(pkt []byte) { dpdk.EthTxPkt(0, pkt) },      // 网卡发包方法
-				BindCpuCore:      -1,                                              // 绑定的cpu核心
+				BindCpuCore:      0,                                               // 绑定的cpu核心
+				StaticHeapSize:   8 * mem.MB,                                      // 静态堆内存大小
+				SwitchMode:       false,                                           // 交换机模式
+				SwitchGroup:      "",                                              // 交换机组
 			},
 			{
 				Name:             "wan1",
@@ -210,7 +213,6 @@ func EthernetRouter() {
 				EthTxFunc: func(pkt []byte) {
 					dpdk.EthTxPkt(1, pkt)
 				},
-				BindCpuCore: -1,
 			},
 			{
 				Name:             "lan0",
@@ -225,11 +227,10 @@ func EthernetRouter() {
 				EthTxFunc: func(pkt []byte) {
 					dpdk.KniTxPkt(pkt)
 				},
-				BindCpuCore: -1,
 			},
 		},
 		// 路由表
-		RoutingTable: []*engine.RoutingEntryConfig{
+		RoutingList: []*engine.RouteEntryConfig{
 			{
 				DstIpAddr:   "114.114.114.114", // 目的ip地址
 				NetworkMask: "255.255.255.255", // 网络掩码
@@ -237,6 +238,7 @@ func EthernetRouter() {
 				NetIf:       "wan0",            // 出接口
 			},
 		},
+		StaticHeapSize: 8 * mem.MB, // 静态堆内存大小
 	})
 	if err != nil {
 		panic(err)

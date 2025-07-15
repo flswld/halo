@@ -147,7 +147,6 @@ func EthQueueRxPkt(port_index int, queue_id int) (pkt []byte) {
 		if conf.IdleSleep {
 			time.Sleep(time.Millisecond * 10)
 		}
-		// 单个CPU核心轮询
 		return nil
 	}
 	pkt = pkt_rx_buf[:pkt_len]
@@ -180,7 +179,6 @@ func KniRxPkt() (pkt []byte) {
 		if conf.IdleSleep {
 			time.Sleep(time.Millisecond * 10)
 		}
-		// 单个cpu核心轮询
 		return nil
 	}
 	pkt = pkt_rx_buf[:pkt_len]

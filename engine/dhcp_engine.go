@@ -307,7 +307,7 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 			}
 			copy(dhcpLease.IpAddr[:], optionReqIpAddr.IpAddr)
 			copy(dhcpLease.MacAddr[:], clientMacAddr)
-			dhcpLease.ExpTime = uint32(time.Now().Unix()) + DhcpLeaseTime
+			dhcpLease.ExpTime = i.Engine.TimeNow + DhcpLeaseTime
 			dhcpLease.HostName.Set(hostName)
 			ok = i.DhcpLeaseTable.Set(IpAddrHash(reqIpAddrU), dhcpLease)
 			if !ok {
@@ -457,16 +457,15 @@ func (i *NetIf) ListDhcp() []*DhcpLease {
 }
 
 func (i *NetIf) DhcpLeaseClear() {
-	ticker := time.NewTicker(time.Minute * 1)
+	ticker := time.NewTicker(time.Second * 1)
 	for {
 		<-ticker.C
 		if i.Engine.Stop.Load() {
 			break
 		}
-		now := uint32(time.Now().Unix())
 		i.DhcpLock.Lock()
 		i.DhcpLeaseTable.For(func(ipAddrU IpAddrHash, dhcpLease *DhcpLease) (next bool) {
-			if now > dhcpLease.ExpTime {
+			if i.Engine.TimeNow > dhcpLease.ExpTime {
 				i.DhcpLeaseTable.Del(ipAddrU)
 				mem.FreeType[DhcpLease](i.StaticHeap, dhcpLease)
 			}
@@ -474,4 +473,5 @@ func (i *NetIf) DhcpLeaseClear() {
 		})
 		i.DhcpLock.Unlock()
 	}
+	i.Engine.StopWaitGroup.Done()
 }

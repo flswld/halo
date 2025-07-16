@@ -156,13 +156,9 @@ func InitEngine(config *Config) (*Engine, error) {
 	}
 	// 网卡列表
 	for _, netIfConfig := range config.NetIfList {
-		var macAddr []byte = nil
-		var err error = nil
-		if !netIfConfig.SwitchMode {
-			macAddr, err = protocol.ParseMacAddr(netIfConfig.MacAddr)
-			if err != nil {
-				return nil, err
-			}
+		macAddr, err := protocol.ParseMacAddr(netIfConfig.MacAddr)
+		if err != nil && !netIfConfig.SwitchMode {
+			return nil, err
 		}
 		ipAddr := []byte{0x00, 0x00, 0x00, 0x00}
 		if netIfConfig.IpAddr != "" {
@@ -248,6 +244,9 @@ func InitEngine(config *Config) (*Engine, error) {
 	}
 	// 直连路由
 	for _, netIf := range e.NetIfMap {
+		if netIf.MacAddr == nil {
+			continue
+		}
 		if netIf.Config.DhcpClientEnable {
 			continue
 		}
@@ -271,15 +270,12 @@ func (e *Engine) RunEngine() {
 	go e.Monitor()
 	e.StopWaitGroup.Add(1)
 	for _, netIf := range e.NetIfMap {
-		if netIf.Config.SwitchMode {
-			go netIf.SwitchPacketHandle()
-			e.StopWaitGroup.Add(1)
-			continue
-		}
-		if netIf.Config.DhcpClientEnable {
-			netIf.DhcpDiscover()
-		} else {
-			netIf.SendFreeArp()
+		if netIf.MacAddr != nil {
+			if netIf.Config.DhcpClientEnable {
+				netIf.DhcpDiscover()
+			} else {
+				netIf.SendFreeArp()
+			}
 		}
 		go netIf.PacketHandle()
 		e.StopWaitGroup.Add(1)
@@ -362,22 +358,6 @@ func (i *NetIf) PacketHandle() {
 					n = 0
 				}
 			}
-		}
-	}
-	i.Engine.StopWaitGroup.Done()
-}
-
-func (i *NetIf) SwitchPacketHandle() {
-	if i.Config.BindCpuCore >= 0 {
-		cpu.BindCpuCore(i.Config.BindCpuCore)
-	}
-	for {
-		if i.Engine.Stop.Load() {
-			break
-		}
-		ethFrm := i.Config.EthRxFunc()
-		if ethFrm != nil {
-			i.RxEthernet(ethFrm)
 		}
 	}
 	i.Engine.StopWaitGroup.Done()

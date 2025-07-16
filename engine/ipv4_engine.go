@@ -84,9 +84,9 @@ func (i *NetIf) TxIpv4(ipv4Payload []byte, ipv4HeadProto uint8, ipv4DstAddr []by
 		arpCache = outNetIf.GetArpCache(ipv4DstAddr)
 	}
 	if ethDstMac != nil {
-		return outNetIf.TxEthernet(ipv4Pkt, ethDstMac, protocol.ETH_PROTO_IPV4)
+		return outNetIf.SendEthernet(ipv4Pkt, ethDstMac, outNetIf.MacAddr, protocol.ETH_PROTO_IPV4)
 	} else if arpCache != nil {
-		return outNetIf.TxEthernet(ipv4Pkt, arpCache.MacAddr[:], protocol.ETH_PROTO_IPV4)
+		return outNetIf.SendEthernet(ipv4Pkt, arpCache.MacAddr[:], outNetIf.MacAddr, protocol.ETH_PROTO_IPV4)
 	} else {
 		return false
 	}
@@ -190,7 +190,7 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr []byte, ipv4DstA
 		// 二层地址查询失败
 		return true
 	}
-	outNetIf.TxEthernet(ethPayload, arpCache.MacAddr[:], protocol.ETH_PROTO_IPV4)
+	outNetIf.SendEthernet(ethPayload, arpCache.MacAddr[:], outNetIf.MacAddr, protocol.ETH_PROTO_IPV4)
 	return true
 }
 
@@ -666,7 +666,7 @@ func (i *NetIf) SendUdpPktByFlow(natFlowHash NatFlowHash, dir int, udpPayload []
 		if arpCache == nil {
 			return
 		}
-		i.TxEthernet(ipv4Pkt, arpCache.MacAddr[:], protocol.ETH_PROTO_IPV4)
+		i.SendEthernet(ipv4Pkt, arpCache.MacAddr[:], i.MacAddr, protocol.ETH_PROTO_IPV4)
 	case WanToLan:
 		udpPkt := make([]byte, 0, 1480)
 		udpPkt, err := protocol.BuildUdpPkt(udpPkt, udpPayload, natFlow.RemotePort, natFlow.LanHostPort, remoteIpAddr, lanHostIpAddr)
@@ -687,7 +687,7 @@ func (i *NetIf) SendUdpPktByFlow(natFlowHash NatFlowHash, dir int, udpPayload []
 		if arpCache == nil {
 			return
 		}
-		outNetIf.TxEthernet(ipv4Pkt, arpCache.MacAddr[:], protocol.ETH_PROTO_IPV4)
+		outNetIf.SendEthernet(ipv4Pkt, arpCache.MacAddr[:], outNetIf.MacAddr, protocol.ETH_PROTO_IPV4)
 	default:
 	}
 }

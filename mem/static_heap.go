@@ -174,6 +174,10 @@ func (s *StaticString64) Set(v string) {
 	MemCpy(unsafe.Pointer(s), unsafe.Pointer(&unsafe.Slice(unsafe.StringData(v), len(v))[0]), uint64(l))
 }
 
+func (s StaticString64) String() string {
+	return s.Get()
+}
+
 type StaticString1K [1 * KB]uint8
 
 func (s *StaticString1K) Get() string {
@@ -191,6 +195,10 @@ func (s *StaticString1K) Set(v string) {
 	(*s)[1*KB-1] = uint8(l >> 8)
 	(*s)[1*KB-2] = uint8(l)
 	MemCpy(unsafe.Pointer(s), unsafe.Pointer(&unsafe.Slice(unsafe.StringData(v), len(v))[0]), uint64(l))
+}
+
+func (s StaticString1K) String() string {
+	return s.Get()
 }
 
 type StaticString1M [1 * MB]uint8
@@ -214,4 +222,8 @@ func (s *StaticString1M) Set(v string) {
 	(*s)[1*MB-3] = uint8(l >> 8)
 	(*s)[1*MB-4] = uint8(l)
 	MemCpy(unsafe.Pointer(s), unsafe.Pointer(&unsafe.Slice(unsafe.StringData(v), len(v))[0]), uint64(l))
+}
+
+func (s StaticString1M) String() string {
+	return s.Get()
 }

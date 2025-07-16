@@ -22,7 +22,7 @@ func (i *NetIf) SendFreeArp() {
 		Log(fmt.Sprintf("build arp packet error: %v\n", err))
 		return
 	}
-	i.TxEthernet(arpPkt, protocol.BROADCAST_MAC_ADDR, protocol.ETH_PROTO_ARP)
+	i.SendEthernet(arpPkt, protocol.BROADCAST_MAC_ADDR, i.MacAddr, protocol.ETH_PROTO_ARP)
 }
 
 func (i *NetIf) GetArpCache(ipAddr []byte) *ArpCache {
@@ -41,7 +41,7 @@ func (i *NetIf) GetArpCache(ipAddr []byte) *ArpCache {
 			Log(fmt.Sprintf("build arp packet error: %v\n", err))
 			return nil
 		}
-		i.TxEthernet(arpPkt, protocol.BROADCAST_MAC_ADDR, protocol.ETH_PROTO_ARP)
+		i.SendEthernet(arpPkt, protocol.BROADCAST_MAC_ADDR, i.MacAddr, protocol.ETH_PROTO_ARP)
 		return nil
 	}
 	return arpCache
@@ -87,7 +87,7 @@ func (i *NetIf) HandleArp(ethPayload []byte, ethSrcMac []byte) {
 			Log(fmt.Sprintf("build arp packet error: %v\n", err))
 			return
 		}
-		i.TxEthernet(arpPkt, arpSrcMac, protocol.ETH_PROTO_ARP)
+		i.SendEthernet(arpPkt, arpSrcMac, i.MacAddr, protocol.ETH_PROTO_ARP)
 	}
 }
 

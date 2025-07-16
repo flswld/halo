@@ -350,8 +350,11 @@ func (s *UDPSession) CloseReason(enetType uint32) error {
 
 	if once {
 		enet := &Enet{
-			ConnType: ConnEnetFin,
-			EnetType: enetType,
+			Addr:      s.remote,
+			SessionId: s.GetSessionId(),
+			Conv:      s.GetConv(),
+			ConnType:  ConnEnetFin,
+			EnetType:  enetType,
 		}
 		if !s.isChanConn {
 			s.sendEnetNotifyToPeer(enet)
@@ -736,7 +739,7 @@ func (l *Listener) enetHandle() {
 					continue
 				}
 				l.remoteAddrEnetSynMapLock.Lock()
-				enetSyn, exist := l.remoteAddrEnetSynMap[enetNotify.Addr]
+				enetSyn, exist := l.remoteAddrEnetSynMap[enetNotify.Addr.String()]
 				if !exist {
 					sessionId := atomic.AddUint32(&l.sessionIdCounter, 1)
 					var conv uint32
@@ -751,7 +754,7 @@ func (l *Listener) enetHandle() {
 						rawConv:    rawConv,
 						createTime: uint32(time.Now().Unix()),
 					}
-					l.remoteAddrEnetSynMap[enetNotify.Addr] = enetSyn
+					l.remoteAddrEnetSynMap[enetNotify.Addr.String()] = enetSyn
 				}
 				l.remoteAddrEnetSynMapLock.Unlock()
 				enet := &Enet{
@@ -807,13 +810,13 @@ func (l *Listener) packetInput(data []byte, addr net.Addr) {
 		}
 		switch connType {
 		case ConnEnetSyn:
-			l.enetNotifyChan <- &Enet{Addr: addr.String(), SessionId: sessionId, Conv: conv, ConnType: ConnEnetSyn, EnetType: enetType}
+			l.enetNotifyChan <- &Enet{Addr: addr, SessionId: sessionId, Conv: conv, ConnType: ConnEnetSyn, EnetType: enetType}
 		case ConnEnetEst:
-			l.enetNotifyChan <- &Enet{Addr: addr.String(), SessionId: sessionId, Conv: conv, ConnType: ConnEnetEst, EnetType: enetType}
+			l.enetNotifyChan <- &Enet{Addr: addr, SessionId: sessionId, Conv: conv, ConnType: ConnEnetEst, EnetType: enetType}
 		case ConnEnetFin:
-			l.enetNotifyChan <- &Enet{Addr: addr.String(), SessionId: sessionId, Conv: conv, ConnType: ConnEnetFin, EnetType: enetType}
+			l.enetNotifyChan <- &Enet{Addr: addr, SessionId: sessionId, Conv: conv, ConnType: ConnEnetFin, EnetType: enetType}
 		case ConnEnetPing:
-			l.enetNotifyChan <- &Enet{Addr: addr.String(), SessionId: sessionId, Conv: conv, ConnType: ConnEnetPing, EnetType: enetType}
+			l.enetNotifyChan <- &Enet{Addr: addr, SessionId: sessionId, Conv: conv, ConnType: ConnEnetPing, EnetType: enetType}
 		default:
 			return
 		}
@@ -1055,13 +1058,7 @@ func DialKCP(raddr string) (*UDPSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	enet := &Enet{
-		SessionId: 0,
-		Conv:      0,
-		ConnType:  ConnEnetSyn,
-		EnetType:  EnetClientConnectKey,
-	}
-	data := BuildEnet(enet.ConnType, enet.EnetType, enet.SessionId, enet.Conv)
+	data := BuildEnet(ConnEnetSyn, EnetClientConnectKey, 0, 0)
 	_, err = conn.Write(data)
 	if err != nil {
 		return nil, err
@@ -1143,6 +1140,7 @@ type ChanConnMsg struct {
 type ChanConn struct {
 	RxChan  chan ChanConnMsg
 	TxChan  chan ChanConnMsg
+	Addr    ChanConnAddr
 	isClose atomic.Uint32
 }
 
@@ -1181,7 +1179,7 @@ func (c *ChanConn) Close() error {
 }
 
 func (c *ChanConn) LocalAddr() net.Addr {
-	return &ChanConnAddr{}
+	return c.Addr
 }
 
 func (c *ChanConn) SetDeadline(t time.Time) error {
@@ -1206,32 +1204,18 @@ func ListenChanConn(conn *ChanConn) (*Listener, error) {
 }
 
 // DialChanConn 发起管道连接
-func DialChanConn(conn *ChanConn) (*UDPSession, error) {
+func DialChanConn(conn *ChanConn, addr ChanConnAddr) (*UDPSession, error) {
 	if conn == nil || conn.RxChan == nil || conn.TxChan == nil {
 		return nil, errChanConnAlreadyClose
 	}
 	conn.isClose.Store(0)
-	enet := &Enet{
-		SessionId: 0,
-		Conv:      0,
-		ConnType:  ConnEnetSyn,
-		EnetType:  EnetClientConnectKey,
-	}
-	data := BuildEnet(enet.ConnType, enet.EnetType, enet.SessionId, enet.Conv)
-	_, err := conn.WriteTo(data, &ChanConnAddr{})
+	data := BuildEnet(ConnEnetSyn, EnetClientConnectKey, 0, 0)
+	_, err := conn.WriteTo(data, addr)
 	if err != nil {
 		return nil, err
 	}
 	buf := make([]byte, mtuLimit)
-	err = conn.SetReadDeadline(time.Now().Add(time.Second * 10))
-	if err != nil {
-		return nil, err
-	}
 	n, _, err := conn.ReadFrom(buf)
-	if err != nil {
-		return nil, err
-	}
-	err = conn.SetReadDeadline(time.Time{})
 	if err != nil {
 		return nil, err
 	}
@@ -1246,5 +1230,5 @@ func DialChanConn(conn *ChanConn) (*UDPSession, error) {
 	binary.LittleEndian.PutUint32(rawConvData[4:8], conv)
 	rawConv := binary.LittleEndian.Uint64(rawConvData)
 
-	return newUDPSession(rawConv, nil, conn, true, &ChanConnAddr{}), nil
+	return newUDPSession(rawConv, nil, conn, true, addr), nil
 }

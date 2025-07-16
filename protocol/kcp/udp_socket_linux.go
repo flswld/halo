@@ -153,7 +153,7 @@ func (l *Listener) sendEnetNotifyToPeer(enet *Enet) {
 	if data == nil {
 		return
 	}
-	remoteAddr, err := net.ResolveUDPAddr("udp", enet.Addr)
+	remoteAddr, err := net.ResolveUDPAddr("udp", enet.Addr.String())
 	if err != nil {
 		return
 	}
@@ -180,7 +180,7 @@ func (s *UDPSession) sendEnetNotifyToPeer(enet *Enet) {
 		s.defaultSendEnetNotifyToPeer(enet)
 		return
 	}
-	data := BuildEnet(enet.ConnType, enet.EnetType, s.GetSessionId(), s.GetConv())
+	data := BuildEnet(enet.ConnType, enet.EnetType, enet.SessionId, enet.Conv)
 	if data == nil {
 		return
 	}

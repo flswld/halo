@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"net"
 )
 
 // Enet连接控制协议
@@ -16,7 +17,7 @@ import (
 
 // Enet Enet协议上报结构体
 type Enet struct {
-	Addr      string
+	Addr      net.Addr
 	SessionId uint32
 	Conv      uint32
 	ConnType  string

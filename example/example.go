@@ -439,7 +439,7 @@ func KcpServerClient() {
 	e1.RunEngine()
 	e2.RunEngine()
 
-	e1.GetNetIf("eth0").Ping([]byte{192, 168, 100, 200}, 1)
+	e2.GetNetIf("eth0").Ping([]byte{192, 168, 100, 100}, 1)
 
 	kcpServer := func(netIf *engine.NetIf) {
 		rxChan := make(chan kcp.ChanConnMsg, 1024)
@@ -470,6 +470,10 @@ func KcpServerClient() {
 		listener, err := kcp.ListenChanConn(&kcp.ChanConn{
 			RxChan: rxChan,
 			TxChan: txChan,
+			Addr: kcp.ChanConnAddr{
+				Ip:   protocol.IpAddrToU([]byte{192, 168, 100, 100}),
+				Port: 22222,
+			},
 		})
 		if err != nil {
 			return
@@ -528,6 +532,13 @@ func KcpServerClient() {
 		conn, err := kcp.DialChanConn(&kcp.ChanConn{
 			RxChan: rxChan,
 			TxChan: txChan,
+			Addr: kcp.ChanConnAddr{
+				Ip:   protocol.IpAddrToU([]byte{192, 168, 100, 200}),
+				Port: 33333,
+			},
+		}, kcp.ChanConnAddr{
+			Ip:   protocol.IpAddrToU([]byte{192, 168, 100, 100}),
+			Port: 22222,
 		})
 		if err != nil {
 			return

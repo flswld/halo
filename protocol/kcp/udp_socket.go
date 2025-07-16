@@ -85,7 +85,7 @@ func (l *Listener) defaultSendEnetNotifyToPeer(enet *Enet) {
 	if data == nil {
 		return
 	}
-	remoteAddr, err := net.ResolveUDPAddr("udp", enet.Addr)
+	remoteAddr, err := net.ResolveUDPAddr("udp", enet.Addr.String())
 	if err != nil {
 		return
 	}
@@ -94,7 +94,7 @@ func (l *Listener) defaultSendEnetNotifyToPeer(enet *Enet) {
 
 // 客户端Enet事件发送接口
 func (s *UDPSession) defaultSendEnetNotifyToPeer(enet *Enet) {
-	data := BuildEnet(enet.ConnType, enet.EnetType, s.GetSessionId(), s.GetConv())
+	data := BuildEnet(enet.ConnType, enet.EnetType, enet.SessionId, enet.Conv)
 	if data == nil {
 		return
 	}
@@ -175,13 +175,13 @@ func (l *Listener) sendEnetNotifyToPeerChanConn(enet *Enet) {
 	if data == nil {
 		return
 	}
-	_, _ = l.conn.WriteTo(data, &ChanConnAddr{})
+	_, _ = l.conn.WriteTo(data, enet.Addr)
 }
 
 func (s *UDPSession) sendEnetNotifyToPeerChanConn(enet *Enet) {
-	data := BuildEnet(enet.ConnType, enet.EnetType, s.GetSessionId(), s.GetConv())
+	data := BuildEnet(enet.ConnType, enet.EnetType, enet.SessionId, enet.Conv)
 	if data == nil {
 		return
 	}
-	_, _ = s.conn.WriteTo(data, &ChanConnAddr{})
+	_, _ = s.conn.WriteTo(data, enet.Addr)
 }

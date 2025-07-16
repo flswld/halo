@@ -113,9 +113,9 @@ func EthernetRouter() {
 		KniEnable:       true,
 	})
 
-	// 初始化协议栈
+	// 初始化路由器
 	engine.DefaultLogWriter = new(logger.LogWriter)
-	e, err := engine.InitEngine(&engine.Config{
+	r, err := engine.InitRouter(&engine.RouterConfig{
 		DebugLog: false, // 调试日志
 		// 网卡列表
 		NetIfList: []*engine.NetIfConfig{
@@ -142,8 +142,6 @@ func EthernetRouter() {
 				EthTxFunc:        func(pkt []byte) { dpdk.EthTxPkt(0, pkt) },      // 网卡发包方法
 				BindCpuCore:      0,                                               // 绑定的cpu核心
 				StaticHeapSize:   8 * mem.MB,                                      // 静态堆内存大小
-				SwitchMode:       false,                                           // 交换机模式
-				SwitchGroup:      "",                                              // 交换机组
 			},
 			{
 				Name:             "wan1",
@@ -182,16 +180,15 @@ func EthernetRouter() {
 				NetIf:       "wan0",            // 出接口
 			},
 		},
-		StaticHeapSize: 8 * mem.MB, // 静态堆内存大小
 	})
 	if err != nil {
 		panic(err)
 	}
 
-	// 启动协议栈
-	e.RunEngine()
+	// 启动路由器
+	r.RunRouter()
 
-	e.Ipv4PktFwdHook = func(raw []byte, dir int) (drop bool, mod []byte) {
+	r.Ipv4PktFwdHook = func(raw []byte, dir int) (drop bool, mod []byte) {
 		payload, _, srcAddr, dstAddr, err := protocol.ParseIpv4Pkt(raw)
 		if err == nil {
 			logger.Debug("[IPV4 ROUTE FWD] src: %v -> dst: %v, len: %v", srcAddr, dstAddr, len(payload))
@@ -201,8 +198,8 @@ func EthernetRouter() {
 
 	time.Sleep(time.Minute)
 
-	// 停止协议栈
-	e.StopEngine()
+	// 停止路由器
+	r.StopRouter()
 
 	// 停止dpdk
 	dpdk.Exit()
@@ -212,70 +209,97 @@ func EthernetRouter() {
 func EthernetSwitch() {
 	// 启动dpdk
 	dpdk.Run(&dpdk.Config{
-		PortIdList: []int{0, 1, 2, 3, 4, 5, 6, 7},
+		PortIdList: []int{0, 1, 2, 3},
 		StatsLog:   true,
 		IdleSleep:  true,
 		SingleCore: true,
 	})
 
-	// 初始化协议栈
-	e, err := engine.InitEngine(&engine.Config{
+	// 初始化交换机
+	s, err := engine.InitSwitch(&engine.SwitchConfig{
+		// 端口列表
+		SwitchPortList: []*engine.SwitchPortConfig{
+			{
+				Name:        "port0",                                         // 端口名
+				EthRxFunc:   func() (pkt []byte) { return dpdk.EthRxPkt(0) }, // 端口收包方法
+				EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(0, pkt) },      // 端口发包方法
+				VlanId:      1,                                               // vlan号
+				BindCpuCore: 0,                                               // 绑定的cpu核心
+			},
+			{
+				Name:      "port1",
+				EthRxFunc: func() (pkt []byte) { return dpdk.EthRxPkt(1) },
+				EthTxFunc: func(pkt []byte) { dpdk.EthTxPkt(1, pkt) },
+				VlanId:    1,
+			},
+			{
+				Name:      "port2",
+				EthRxFunc: func() (pkt []byte) { return dpdk.EthRxPkt(2) },
+				EthTxFunc: func(pkt []byte) { dpdk.EthTxPkt(2, pkt) },
+				VlanId:    2,
+			},
+			{
+				Name:      "port3",
+				EthRxFunc: func() (pkt []byte) { return dpdk.EthRxPkt(3) },
+				EthTxFunc: func(pkt []byte) { dpdk.EthTxPkt(3, pkt) },
+				VlanId:    2,
+			},
+		},
+		StaticHeapSize: 8 * mem.MB, // 静态堆内存大小
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// 启动交换机
+	s.RunSwitch()
+
+	time.Sleep(time.Minute)
+
+	// 停止交换机
+	s.StopSwitch()
+
+	// 停止dpdk
+	dpdk.Exit()
+}
+
+// EthernetRouterSwitch 以太网路由交换机
+func EthernetRouterSwitch() {
+	// 启动dpdk
+	dpdk.Run(&dpdk.Config{
+		PortIdList: []int{0, 1, 2},
+		StatsLog:   true,
+		IdleSleep:  true,
+		SingleCore: true,
+	})
+
+	wireS2R := engine.NewWire(true)
+	wireR2S := engine.NewWire(true)
+
+	// 初始化路由器
+	r, err := engine.InitRouter(&engine.RouterConfig{
 		NetIfList: []*engine.NetIfConfig{
 			{
-				Name:        "port0",
-				EthRxFunc:   func() (pkt []byte) { return dpdk.EthRxPkt(0) },
-				EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(0, pkt) },
-				SwitchMode:  true,
-				SwitchGroup: "lan0",
+				Name:             "wan0",
+				MacAddr:          "AA:AA:AA:AA:AA:AA",
+				NatEnable:        true,
+				NatType:          engine.NatTypeFullCone,
+				DhcpClientEnable: true,
+				EthRxFunc: func() (pkt []byte) {
+					return dpdk.EthRxPkt(0)
+				},
+				EthTxFunc: func(pkt []byte) {
+					dpdk.EthTxPkt(0, pkt)
+				},
 			},
 			{
-				Name:        "port1",
-				EthRxFunc:   func() (pkt []byte) { return dpdk.EthRxPkt(1) },
-				EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(1, pkt) },
-				SwitchMode:  true,
-				SwitchGroup: "lan0",
-			},
-			{
-				Name:        "port2",
-				EthRxFunc:   func() (pkt []byte) { return dpdk.EthRxPkt(2) },
-				EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(2, pkt) },
-				SwitchMode:  true,
-				SwitchGroup: "lan0",
-			},
-			{
-				Name:        "port3",
-				EthRxFunc:   func() (pkt []byte) { return dpdk.EthRxPkt(3) },
-				EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(3, pkt) },
-				SwitchMode:  true,
-				SwitchGroup: "lan0",
-			},
-			{
-				Name:        "port4",
-				EthRxFunc:   func() (pkt []byte) { return dpdk.EthRxPkt(4) },
-				EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(4, pkt) },
-				SwitchMode:  true,
-				SwitchGroup: "lan1",
-			},
-			{
-				Name:        "port5",
-				EthRxFunc:   func() (pkt []byte) { return dpdk.EthRxPkt(5) },
-				EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(5, pkt) },
-				SwitchMode:  true,
-				SwitchGroup: "lan1",
-			},
-			{
-				Name:        "port6",
-				EthRxFunc:   func() (pkt []byte) { return dpdk.EthRxPkt(6) },
-				EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(6, pkt) },
-				SwitchMode:  true,
-				SwitchGroup: "lan1",
-			},
-			{
-				Name:        "port7",
-				EthRxFunc:   func() (pkt []byte) { return dpdk.EthRxPkt(7) },
-				EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(7, pkt) },
-				SwitchMode:  true,
-				SwitchGroup: "lan1",
+				Name:             "lan0",
+				MacAddr:          "AA:AA:AA:AA:AA:BB",
+				IpAddr:           "192.168.111.1",
+				NetworkMask:      "255.255.255.0",
+				DhcpServerEnable: true,
+				EthRxFunc:        wireS2R.Rx,
+				EthTxFunc:        wireR2S.Tx,
 			},
 		},
 	})
@@ -283,13 +307,55 @@ func EthernetSwitch() {
 		panic(err)
 	}
 
-	// 启动协议栈
-	e.RunEngine()
+	// 初始化交换机
+	s, err := engine.InitSwitch(&engine.SwitchConfig{
+		SwitchPortList: []*engine.SwitchPortConfig{
+			{
+				Name:      "switch_port_lan",
+				EthRxFunc: wireR2S.Rx,
+				EthTxFunc: wireS2R.Tx,
+				VlanId:    1,
+			},
+			{
+				Name: "switch_port_1",
+				EthRxFunc: func() (pkt []byte) {
+					return dpdk.EthRxPkt(1)
+				},
+				EthTxFunc: func(pkt []byte) {
+					dpdk.EthTxPkt(1, pkt)
+				},
+				VlanId: 1,
+			},
+			{
+				Name: "switch_port_2",
+				EthRxFunc: func() (pkt []byte) {
+					return dpdk.EthRxPkt(2)
+				},
+				EthTxFunc: func(pkt []byte) {
+					dpdk.EthTxPkt(2, pkt)
+				},
+				VlanId: 1,
+			},
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// 启动路由器
+	r.RunRouter()
+	// 启动交换机
+	s.RunSwitch()
 
 	time.Sleep(time.Minute)
 
-	// 停止协议栈
-	e.StopEngine()
+	// 停止路由器
+	r.StopRouter()
+	// 停止交换机
+	s.StopSwitch()
+
+	wireS2R.Destroy()
+	wireR2S.Destroy()
 
 	// 停止dpdk
 	dpdk.Exit()
@@ -308,8 +374,8 @@ func DDoS() {
 
 	var icmpReqPkt []byte = nil
 
-	// 初始化协议栈
-	e, err := engine.InitEngine(&engine.Config{
+	// 初始化路由器
+	r, err := engine.InitRouter(&engine.RouterConfig{
 		NetIfList: []*engine.NetIfConfig{
 			{
 				Name:        "eth0",
@@ -341,12 +407,12 @@ func DDoS() {
 		panic(err)
 	}
 
-	// 启动协议栈
-	e.RunEngine()
+	// 启动路由器
+	r.RunRouter()
 
 	// 一分钟icmp洪水攻击
 	for {
-		ok := e.GetNetIf("eth0").TxIcmp(protocol.ICMP_DEFAULT_PAYLOAD, protocol.ICMP_REQUEST, []byte{0x00, 0x01}, 1, []byte{192, 168, 100, 1})
+		ok := r.GetNetIf("eth0").TxIcmp(protocol.ICMP_DEFAULT_PAYLOAD, protocol.ICMP_REQUEST, []byte{0x00, 0x01}, 1, []byte{192, 168, 100, 1})
 		if ok {
 			break
 		}
@@ -375,8 +441,8 @@ func DDoS() {
 	exit.Store(true)
 	time.Sleep(time.Second)
 
-	// 停止协议栈
-	e.StopEngine()
+	// 停止路由器
+	r.StopRouter()
 
 	// 停止dpdk
 	dpdk.Exit()
@@ -395,8 +461,8 @@ func KcpServerClient() {
 		SingleCore: true,
 	})
 
-	// 初始化协议栈
-	e1, err := engine.InitEngine(&engine.Config{
+	// 初始化路由器
+	r1, err := engine.InitRouter(&engine.RouterConfig{
 		NetIfList: []*engine.NetIfConfig{
 			{
 				Name:        "eth0",
@@ -415,7 +481,7 @@ func KcpServerClient() {
 	if err != nil {
 		panic(err)
 	}
-	e2, err := engine.InitEngine(&engine.Config{
+	r2, err := engine.InitRouter(&engine.RouterConfig{
 		NetIfList: []*engine.NetIfConfig{
 			{
 				Name:        "eth0",
@@ -435,11 +501,11 @@ func KcpServerClient() {
 		panic(err)
 	}
 
-	// 启动协议栈
-	e1.RunEngine()
-	e2.RunEngine()
+	// 启动路由器
+	r1.RunRouter()
+	r2.RunRouter()
 
-	e2.GetNetIf("eth0").Ping([]byte{192, 168, 100, 100}, 1)
+	r2.GetNetIf("eth0").Ping([]byte{192, 168, 100, 100}, 1)
 
 	kcpServer := func(netIf *engine.NetIf) {
 		rxChan := make(chan kcp.ChanConnMsg, 1024)
@@ -566,14 +632,14 @@ func KcpServerClient() {
 	}
 
 	// kcp协议栈测试
-	go kcpServer(e1.GetNetIf("eth0"))
+	go kcpServer(r1.GetNetIf("eth0"))
 	time.Sleep(time.Second)
-	go kcpClient(e2.GetNetIf("eth0"))
+	go kcpClient(r2.GetNetIf("eth0"))
 	time.Sleep(time.Minute)
 
-	// 停止协议栈
-	e1.StopEngine()
-	e2.StopEngine()
+	// 停止路由器
+	r1.StopRouter()
+	r2.StopRouter()
 
 	// 停止dpdk
 	dpdk.Exit()
@@ -589,8 +655,8 @@ func MagicPacketModifier() {
 		SingleCore: true,
 	})
 
-	// 初始化协议栈
-	e, err := engine.InitEngine(&engine.Config{
+	// 初始化路由器
+	r, err := engine.InitRouter(&engine.RouterConfig{
 		NetIfList: []*engine.NetIfConfig{
 			{
 				Name:             "wan0",
@@ -624,10 +690,10 @@ func MagicPacketModifier() {
 		panic(err)
 	}
 
-	// 启动协议栈
-	e.RunEngine()
+	// 启动路由器
+	r.RunRouter()
 
-	e.Ipv4PktFwdHook = func(raw []byte, dir int) (drop bool, mod []byte) {
+	r.Ipv4PktFwdHook = func(raw []byte, dir int) (drop bool, mod []byte) {
 		// 数据包监听回调
 		ipv4Payload, ipHeadProto, srcAddr, dstAddr, err := protocol.ParseIpv4Pkt(raw)
 		if err != nil {
@@ -659,7 +725,7 @@ func MagicPacketModifier() {
 				}
 				go func() {
 					time.Sleep(time.Second)
-					e.GetNetIf("wan0").SendUdpPktByFlow(engine.NatFlowHash{
+					r.GetNetIf("wan0").SendUdpPktByFlow(engine.NatFlowHash{
 						RemoteIpAddr:  protocol.IpAddrToU(srcAddr),
 						RemotePort:    srcPort,
 						LanHostIpAddr: protocol.IpAddrToU(dstAddr),
@@ -674,8 +740,8 @@ func MagicPacketModifier() {
 
 	time.Sleep(time.Minute)
 
-	// 停止协议栈
-	e.StopEngine()
+	// 停止路由器
+	r.StopRouter()
 
 	// 停止dpdk
 	dpdk.Exit()

@@ -62,7 +62,7 @@ func (i *NetIf) TxIpv4(ipv4Payload []byte, ipv4HeadProto uint8, ipv4DstAddr []by
 			return false
 		}
 		nextHopIpAddr = _nextHopIpAddr
-		outNetIf = i.Engine.NetIfMap[outNetIfName]
+		outNetIf = i.Router.NetIfMap[outNetIfName]
 		dstIpAddrU := protocol.IpAddrToU(ipv4DstAddr)
 		outNetIfIpAddrU := protocol.IpAddrToU(outNetIf.IpAddr)
 		if dstIpAddrU == outNetIfIpAddrU {
@@ -84,9 +84,9 @@ func (i *NetIf) TxIpv4(ipv4Payload []byte, ipv4HeadProto uint8, ipv4DstAddr []by
 		arpCache = outNetIf.GetArpCache(ipv4DstAddr)
 	}
 	if ethDstMac != nil {
-		return outNetIf.SendEthernet(ipv4Pkt, ethDstMac, outNetIf.MacAddr, protocol.ETH_PROTO_IPV4)
+		return outNetIf.TxEthernet(ipv4Pkt, ethDstMac, protocol.ETH_PROTO_IPV4)
 	} else if arpCache != nil {
-		return outNetIf.SendEthernet(ipv4Pkt, arpCache.MacAddr[:], outNetIf.MacAddr, protocol.ETH_PROTO_IPV4)
+		return outNetIf.TxEthernet(ipv4Pkt, arpCache.MacAddr[:], protocol.ETH_PROTO_IPV4)
 	} else {
 		return false
 	}
@@ -112,7 +112,7 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr []byte, ipv4DstA
 					// 没有nat表项
 					return false
 				}
-				natFlow.LastAliveTime = i.Engine.TimeNow
+				natFlow.LastAliveTime = i.Router.TimeNow
 				ethPayload = protocol.NatChangeDst(ethPayload, protocol.UToIpAddr(natFlow.LanHostIpAddr), natFlow.LanHostPort)
 			} else {
 				ethPayload = protocol.NatChangeDst(ethPayload, protocol.UToIpAddr(natPortMappingEntry.LanHostIpAddr), natPortMappingEntry.LanHostPort)
@@ -131,14 +131,14 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr []byte, ipv4DstA
 		return true
 	}
 	// 外部钩子回调
-	if i.Engine.Ipv4PktFwdHook != nil {
+	if i.Router.Ipv4PktFwdHook != nil {
 		dir := 0
 		if i.Config.NatEnable {
 			dir = WanToLan
 		} else {
 			dir = LanToWan
 		}
-		drop, mod := i.Engine.Ipv4PktFwdHook(ethPayload, dir)
+		drop, mod := i.Router.Ipv4PktFwdHook(ethPayload, dir)
 		if drop {
 			// 外部钩子回调强制丢弃
 			return true
@@ -152,7 +152,7 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr []byte, ipv4DstA
 		Log(fmt.Sprintf("no route found for: %v\n", ipv4DstAddr))
 		return true
 	}
-	outNetIf := i.Engine.NetIfMap[outNetIfName]
+	outNetIf := i.Router.NetIfMap[outNetIfName]
 	dstIpAddrU := protocol.IpAddrToU(ipv4DstAddr)
 	outNetIfIpAddrU := protocol.IpAddrToU(outNetIf.IpAddr)
 	if dstIpAddrU == outNetIfIpAddrU && !i.Config.NatEnable {
@@ -173,7 +173,7 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr []byte, ipv4DstA
 					return true
 				}
 			}
-			natFlow.LastAliveTime = i.Engine.TimeNow
+			natFlow.LastAliveTime = i.Router.TimeNow
 			ethPayload = protocol.NatChangeSrc(ethPayload, protocol.UToIpAddr(natFlow.WanIpAddr), natFlow.WanPort)
 		} else {
 			ethPayload = protocol.NatChangeSrc(ethPayload, outNetIf.IpAddr, natPortMappingEntry.WanPort)
@@ -190,7 +190,7 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr []byte, ipv4DstA
 		// 二层地址查询失败
 		return true
 	}
-	outNetIf.SendEthernet(ethPayload, arpCache.MacAddr[:], outNetIf.MacAddr, protocol.ETH_PROTO_IPV4)
+	outNetIf.TxEthernet(ethPayload, arpCache.MacAddr[:], protocol.ETH_PROTO_IPV4)
 	return true
 }
 
@@ -326,7 +326,7 @@ func (r *RouteTable) foreachNode(node *TrieNode) []*RouteEntry {
 }
 
 func (i *NetIf) FindRoute(ipv4DstAddr []byte) ([]byte, string) {
-	route := i.Engine.RouteTable.FindRoute(ipv4DstAddr)
+	route := i.Router.RouteTable.FindRoute(ipv4DstAddr)
 	if route == nil {
 		return nil, ""
 	}
@@ -534,7 +534,7 @@ func (i *NetIf) NatAddFlow(lanHostIpAddr []byte, remoteIpAddr []byte, lanHostPor
 	natFlow.LanHostIpAddr = protocol.IpAddrToU(lanHostIpAddr)
 	natFlow.LanHostPort = lanHostPort
 	natFlow.Ipv4HeadProto = ipv4HeadProto
-	natFlow.LastAliveTime = i.Engine.TimeNow
+	natFlow.LastAliveTime = i.Router.TimeNow
 	ok = i.NatFlowTable.Set(natFlowHash, natFlow)
 	if !ok {
 		portAlloc.UsePortMap.Del(PortHash(wanPort))
@@ -596,12 +596,12 @@ func (i *NetIf) NatTableClear() {
 	ticker := time.NewTicker(time.Second * 1)
 	for {
 		<-ticker.C
-		if i.Engine.Stop.Load() {
+		if i.Router.Stop.Load() {
 			break
 		}
 		i.NatLock.Lock()
 		i.NatFlowTable.For(func(natFlowHash NatFlowHash, natFlow *NatFlow) (next bool) {
-			if i.Engine.TimeNow-natFlow.LastAliveTime > 60 {
+			if i.Router.TimeNow-natFlow.LastAliveTime > 60 {
 				i.NatFlowTable.Del(natFlowHash)
 				i.NatWanFlowTable.Del(NatWanFlowHash{
 					RemoteIpAddr: natFlow.RemoteIpAddr,
@@ -625,7 +625,7 @@ func (i *NetIf) NatTableClear() {
 		})
 		i.NatLock.Unlock()
 	}
-	i.Engine.StopWaitGroup.Done()
+	i.Router.StopWaitGroup.Done()
 }
 
 func (i *NetIf) SendUdpPktByFlow(natFlowHash NatFlowHash, dir int, udpPayload []byte) {
@@ -645,7 +645,7 @@ func (i *NetIf) SendUdpPktByFlow(natFlowHash NatFlowHash, dir int, udpPayload []
 			return
 		}
 	}
-	natFlow.LastAliveTime = i.Engine.TimeNow
+	natFlow.LastAliveTime = i.Router.TimeNow
 	switch dir {
 	case LanToWan:
 		udpPkt := make([]byte, 0, 1480)
@@ -666,7 +666,7 @@ func (i *NetIf) SendUdpPktByFlow(natFlowHash NatFlowHash, dir int, udpPayload []
 		if arpCache == nil {
 			return
 		}
-		i.SendEthernet(ipv4Pkt, arpCache.MacAddr[:], i.MacAddr, protocol.ETH_PROTO_IPV4)
+		i.TxEthernet(ipv4Pkt, arpCache.MacAddr[:], protocol.ETH_PROTO_IPV4)
 	case WanToLan:
 		udpPkt := make([]byte, 0, 1480)
 		udpPkt, err := protocol.BuildUdpPkt(udpPkt, udpPayload, natFlow.RemotePort, natFlow.LanHostPort, remoteIpAddr, lanHostIpAddr)
@@ -682,12 +682,12 @@ func (i *NetIf) SendUdpPktByFlow(natFlowHash NatFlowHash, dir int, udpPayload []
 		if outNetIfName == "" {
 			return
 		}
-		outNetIf := i.Engine.NetIfMap[outNetIfName]
+		outNetIf := i.Router.NetIfMap[outNetIfName]
 		arpCache := outNetIf.GetArpCache(lanHostIpAddr)
 		if arpCache == nil {
 			return
 		}
-		outNetIf.SendEthernet(ipv4Pkt, arpCache.MacAddr[:], outNetIf.MacAddr, protocol.ETH_PROTO_IPV4)
+		outNetIf.TxEthernet(ipv4Pkt, arpCache.MacAddr[:], protocol.ETH_PROTO_IPV4)
 	default:
 	}
 }

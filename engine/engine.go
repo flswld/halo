@@ -26,50 +26,6 @@ func Log(msg string) {
 	}
 }
 
-// Config 协议栈配置
-type Config struct {
-	DebugLog       bool                // 调试日志
-	NetIfList      []*NetIfConfig      // 网卡列表
-	RoutingList    []*RouteEntryConfig // 路由表
-	StaticHeapSize int                 // 静态堆内存大小
-}
-
-// NetIfConfig 网卡配置
-type NetIfConfig struct {
-	Name               string                       // 网卡名
-	MacAddr            string                       // mac地址
-	IpAddr             string                       // ip地址
-	NetworkMask        string                       // 子网掩码
-	NatEnable          bool                         // 开启网络地址转换
-	NatType            int                          // 网络地址转换类型
-	NatPortMappingList []*NatPortMappingEntryConfig // 网络地址转换端口映射表
-	DnsServerAddr      string                       // dns服务器地址
-	DhcpServerEnable   bool                         // 开启dhcp服务器
-	DhcpClientEnable   bool                         // 开启dhcp客户端
-	EthRxFunc          func() (pkt []byte)          // 网卡收包方法
-	EthTxFunc          func(pkt []byte)             // 网卡发包方法
-	BindCpuCore        int                          // 绑定的cpu核心
-	StaticHeapSize     int                          // 静态堆内存大小
-	SwitchMode         bool                         // 交换机模式
-	SwitchGroup        string                       // 交换机组
-}
-
-// NatPortMappingEntryConfig NAT端口映射配置
-type NatPortMappingEntryConfig struct {
-	WanPort       uint16 // wan口端口
-	LanHostIpAddr string // lan口主机ip地址
-	LanHostPort   uint16 // lan口主机端口
-	Ipv4HeadProto uint8  // ip头部协议
-}
-
-// RouteEntryConfig 路由条目配置
-type RouteEntryConfig struct {
-	DstIpAddr   string // 目的ip地址
-	NetworkMask string // 网络掩码
-	NextHop     string // 下一跳
-	NetIf       string // 出接口
-}
-
 type IpAddrHash uint32
 
 func (h IpAddrHash) GetHashCode() uint64 {
@@ -92,6 +48,47 @@ func (h MacAddrHash) GetHashCode() uint64 {
 	return hashmap.GetHashCode(h[:])
 }
 
+// RouterConfig 路由器配置
+type RouterConfig struct {
+	DebugLog    bool                // 调试日志
+	NetIfList   []*NetIfConfig      // 网卡列表
+	RoutingList []*RouteEntryConfig // 路由表
+}
+
+// NetIfConfig 网卡配置
+type NetIfConfig struct {
+	Name               string                       // 网卡名
+	MacAddr            string                       // mac地址
+	IpAddr             string                       // ip地址
+	NetworkMask        string                       // 子网掩码
+	NatEnable          bool                         // 开启网络地址转换
+	NatType            int                          // 网络地址转换类型
+	NatPortMappingList []*NatPortMappingEntryConfig // 网络地址转换端口映射表
+	DnsServerAddr      string                       // dns服务器地址
+	DhcpServerEnable   bool                         // 开启dhcp服务器
+	DhcpClientEnable   bool                         // 开启dhcp客户端
+	EthRxFunc          func() (pkt []byte)          // 网卡收包方法
+	EthTxFunc          func(pkt []byte)             // 网卡发包方法
+	BindCpuCore        int                          // 绑定的cpu核心
+	StaticHeapSize     int                          // 静态堆内存大小
+}
+
+// NatPortMappingEntryConfig NAT端口映射配置
+type NatPortMappingEntryConfig struct {
+	WanPort       uint16 // wan口端口
+	LanHostIpAddr string // lan口主机ip地址
+	LanHostPort   uint16 // lan口主机端口
+	Ipv4HeadProto uint8  // ip头部协议
+}
+
+// RouteEntryConfig 路由条目配置
+type RouteEntryConfig struct {
+	DstIpAddr   string // 目的ip地址
+	NetworkMask string // 网络掩码
+	NextHop     string // 下一跳
+	NetIf       string // 出接口
+}
+
 // NetIf 网卡
 type NetIf struct {
 	Config                  *NetIfConfig                               // 配置
@@ -100,9 +97,8 @@ type NetIf struct {
 	NetworkMask             []byte                                     // 子网掩码
 	EthTxBuffer             []byte                                     // 网卡发包缓冲区
 	EthTxLock               cpu.SpinLock                               // 网卡发包锁
-	EthRxLock               cpu.SpinLock                               // 网卡收包锁
 	LoChan                  chan []byte                                // 本地回环管道
-	Engine                  *Engine                                    // 归属Engine指针
+	Router                  *Router                                    // 归属Router指针
 	ArpCacheTable           *hashmap.HashMap[IpAddrHash, *ArpCache]    // arp缓存表 key:ip value:mac
 	ArpLock                 sync.RWMutex                               // arp锁
 	NatFlowTable            *hashmap.HashMap[NatFlowHash, *NatFlow]    // nat流表 key:流摘要 value:流信息
@@ -120,44 +116,32 @@ type NetIf struct {
 	StaticHeap              mem.Heap                                   // 静态堆内存
 }
 
-// Engine 协议栈
-type Engine struct {
-	Config             *Config                                           // 配置
-	Stop               atomic.Bool                                       // 停止标志
-	StopWaitGroup      sync.WaitGroup                                    // 停止等待组
-	NetIfMap           map[string]*NetIf                                 // 网络接口集合 key:接口名 value:接口实例
-	RouteTable         *RouteTable                                       // 路由表
-	Ipv4PktFwdHook     func(raw []byte, dir int) (drop bool, mod []byte) // ip报文转发钩子
-	SwitchMacAddrTable *hashmap.HashMap[MacAddrHash, *SwitchMacAddr]     // 交换机mac地址表 key:mac地址 value:地址信息
-	SwitchMacAddrLock  sync.RWMutex                                      // 交换机mac地址锁
-	StaticHeapPtr      unsafe.Pointer                                    // 静态堆内存指针
-	StaticHeap         mem.Heap                                          // 静态堆内存
-	TimeNow            uint32                                            // 当前毫秒时间戳
+// Router 路由器
+type Router struct {
+	Config         *RouterConfig                                     // 配置
+	Stop           atomic.Bool                                       // 停止标志
+	StopWaitGroup  sync.WaitGroup                                    // 停止等待组
+	NetIfMap       map[string]*NetIf                                 // 网络接口集合 key:接口名 value:接口实例
+	RouteTable     *RouteTable                                       // 路由表
+	Ipv4PktFwdHook func(raw []byte, dir int) (drop bool, mod []byte) // ip报文转发钩子
+	TimeNow        uint32                                            // 当前毫秒时间戳
 }
 
-func InitEngine(config *Config) (*Engine, error) {
-	if config.StaticHeapSize == 0 {
-		config.StaticHeapSize = 8 * mem.MB
-	}
-	cHeap := mem.NewCHeap()
-	staticHeapPtr := cHeap.Malloc(uint64(config.StaticHeapSize))
-	staticHeap := mem.NewStaticHeap(staticHeapPtr, uint64(config.StaticHeapSize))
-	e := &Engine{
+func InitRouter(config *RouterConfig) (*Router, error) {
+	r := &Router{
 		Config:   config,
 		NetIfMap: make(map[string]*NetIf),
 		RouteTable: &RouteTable{
 			Root: new(TrieNode),
 		},
-		Ipv4PktFwdHook:     nil,
-		SwitchMacAddrTable: hashmap.NewHashMap[MacAddrHash, *SwitchMacAddr](staticHeap),
-		StaticHeapPtr:      staticHeapPtr,
-		StaticHeap:         staticHeap,
-		TimeNow:            uint32(time.Now().Unix()),
+		Ipv4PktFwdHook: nil,
+		TimeNow:        uint32(time.Now().Unix()),
 	}
 	// 网卡列表
+	cHeap := mem.NewCHeap()
 	for _, netIfConfig := range config.NetIfList {
 		macAddr, err := protocol.ParseMacAddr(netIfConfig.MacAddr)
-		if err != nil && !netIfConfig.SwitchMode {
+		if err != nil {
 			return nil, err
 		}
 		ipAddr := []byte{0x00, 0x00, 0x00, 0x00}
@@ -184,8 +168,8 @@ func InitEngine(config *Config) (*Engine, error) {
 		if netIfConfig.StaticHeapSize == 0 {
 			netIfConfig.StaticHeapSize = 8 * mem.MB
 		}
-		netIfStaticHeapPtr := cHeap.Malloc(uint64(netIfConfig.StaticHeapSize))
-		netIfStaticHeap := mem.NewStaticHeap(netIfStaticHeapPtr, uint64(netIfConfig.StaticHeapSize))
+		staticHeapPtr := cHeap.Malloc(uint64(netIfConfig.StaticHeapSize))
+		staticHeap := mem.NewStaticHeap(staticHeapPtr, uint64(netIfConfig.StaticHeapSize))
 		netIf := &NetIf{
 			Config:                  netIfConfig,
 			MacAddr:                 macAddr,
@@ -193,19 +177,19 @@ func InitEngine(config *Config) (*Engine, error) {
 			NetworkMask:             networkMask,
 			EthTxBuffer:             make([]byte, 0, 1514),
 			LoChan:                  make(chan []byte, 1024),
-			Engine:                  e,
-			ArpCacheTable:           hashmap.NewHashMap[IpAddrHash, *ArpCache](netIfStaticHeap),
-			NatFlowTable:            hashmap.NewHashMap[NatFlowHash, *NatFlow](netIfStaticHeap),
-			NatWanFlowTable:         hashmap.NewHashMap[NatWanFlowHash, *NatFlow](netIfStaticHeap),
-			NatPortAlloc:            hashmap.NewHashMap[IpAddrHash, *PortAlloc](netIfStaticHeap),
+			Router:                  r,
+			ArpCacheTable:           hashmap.NewHashMap[IpAddrHash, *ArpCache](staticHeap),
+			NatFlowTable:            hashmap.NewHashMap[NatFlowHash, *NatFlow](staticHeap),
+			NatWanFlowTable:         hashmap.NewHashMap[NatWanFlowHash, *NatFlow](staticHeap),
+			NatPortAlloc:            hashmap.NewHashMap[IpAddrHash, *PortAlloc](staticHeap),
 			NatPortMappingTable:     make([]*NatPortMappingEntry, 0),
 			DnsServerAddr:           dnsServerAddr,
-			DhcpLeaseTable:          hashmap.NewHashMap[IpAddrHash, *DhcpLease](netIfStaticHeap),
+			DhcpLeaseTable:          hashmap.NewHashMap[IpAddrHash, *DhcpLease](staticHeap),
 			DhcpClientTransactionId: nil,
 			UdpServiceMap:           make(map[uint16]UdpHandleFunc),
 			TcpServiceMap:           make(map[uint16]TcpHandleFunc),
-			StaticHeapPtr:           netIfStaticHeapPtr,
-			StaticHeap:              netIfStaticHeap,
+			StaticHeapPtr:           staticHeapPtr,
+			StaticHeap:              staticHeap,
 		}
 		for _, natPortMappingEntryConfig := range netIfConfig.NatPortMappingList {
 			lanHostIpAddr, err := protocol.ParseIpAddr(natPortMappingEntryConfig.LanHostIpAddr)
@@ -219,7 +203,7 @@ func InitEngine(config *Config) (*Engine, error) {
 				Ipv4HeadProto: natPortMappingEntryConfig.Ipv4HeadProto,
 			})
 		}
-		e.NetIfMap[netIf.Config.Name] = netIf
+		r.NetIfMap[netIf.Config.Name] = netIf
 	}
 	// 路由表
 	for _, routingEntryConfig := range config.RoutingList {
@@ -235,7 +219,7 @@ func InitEngine(config *Config) (*Engine, error) {
 		if err != nil {
 			return nil, err
 		}
-		e.RouteTable.AddRoute(&RouteEntry{
+		r.RouteTable.AddRoute(&RouteEntry{
 			DstIpAddr:   dstIpAddr,
 			NetworkMask: networkMask,
 			NextHop:     nextHop,
@@ -243,16 +227,13 @@ func InitEngine(config *Config) (*Engine, error) {
 		})
 	}
 	// 直连路由
-	for _, netIf := range e.NetIfMap {
-		if netIf.MacAddr == nil {
-			continue
-		}
+	for _, netIf := range r.NetIfMap {
 		if netIf.Config.DhcpClientEnable {
 			continue
 		}
 		dstIpAddrU := protocol.IpAddrToU(netIf.IpAddr) & protocol.IpAddrToU(netIf.NetworkMask)
 		dstIpAddr := protocol.UToIpAddr(dstIpAddrU)
-		e.RouteTable.AddRoute(&RouteEntry{
+		r.RouteTable.AddRoute(&RouteEntry{
 			DstIpAddr:   dstIpAddr,
 			NetworkMask: netIf.NetworkMask,
 			NextHop:     nil,
@@ -260,60 +241,55 @@ func InitEngine(config *Config) (*Engine, error) {
 		})
 	}
 	protocol.SetRandIpHeaderId()
-	return e, nil
+	return r, nil
 }
 
-func (e *Engine) RunEngine() {
-	e.Stop.Store(false)
-	go e.SwitchMacAddrClear()
-	e.StopWaitGroup.Add(1)
-	go e.Monitor()
-	e.StopWaitGroup.Add(1)
-	for _, netIf := range e.NetIfMap {
-		if netIf.MacAddr != nil {
-			if netIf.Config.DhcpClientEnable {
-				netIf.DhcpDiscover()
-			} else {
-				netIf.SendFreeArp()
-			}
+func (r *Router) RunRouter() {
+	r.Stop.Store(false)
+	go r.Monitor()
+	r.StopWaitGroup.Add(1)
+	for _, netIf := range r.NetIfMap {
+		if netIf.Config.DhcpClientEnable {
+			netIf.DhcpDiscover()
+		} else {
+			netIf.SendFreeArp()
 		}
 		go netIf.PacketHandle()
-		e.StopWaitGroup.Add(1)
+		r.StopWaitGroup.Add(1)
 		if netIf.Config.NatEnable {
 			go netIf.NatTableClear()
-			e.StopWaitGroup.Add(1)
+			r.StopWaitGroup.Add(1)
 		}
 		if netIf.Config.DhcpServerEnable {
 			go netIf.DhcpLeaseClear()
-			e.StopWaitGroup.Add(1)
+			r.StopWaitGroup.Add(1)
 		}
 	}
 }
 
-func (e *Engine) Monitor() {
+func (r *Router) Monitor() {
 	ticker := time.NewTicker(time.Second * 1)
 	for {
 		<-ticker.C
-		if e.Stop.Load() {
+		if r.Stop.Load() {
 			break
 		}
-		e.TimeNow = uint32(time.Now().Unix())
+		r.TimeNow = uint32(time.Now().Unix())
 	}
-	e.StopWaitGroup.Done()
+	r.StopWaitGroup.Done()
 }
 
-func (e *Engine) GetNetIf(name string) *NetIf {
-	return e.NetIfMap[name]
+func (r *Router) GetNetIf(name string) *NetIf {
+	return r.NetIfMap[name]
 }
 
-func (e *Engine) StopEngine() {
-	e.Stop.Store(true)
-	e.StopWaitGroup.Wait()
+func (r *Router) StopRouter() {
+	r.Stop.Store(true)
+	r.StopWaitGroup.Wait()
 	cHeap := mem.NewCHeap()
-	for _, netIf := range e.NetIfMap {
+	for _, netIf := range r.NetIfMap {
 		cHeap.Free(netIf.StaticHeapPtr)
 	}
-	cHeap.Free(e.StaticHeapPtr)
 }
 
 func (i *NetIf) PacketHandle() {
@@ -322,7 +298,7 @@ func (i *NetIf) PacketHandle() {
 	}
 	n := 0
 	for {
-		if i.Engine.Stop.Load() {
+		if i.Router.Stop.Load() {
 			break
 		}
 		ethFrm := i.Config.EthRxFunc()
@@ -360,5 +336,157 @@ func (i *NetIf) PacketHandle() {
 			}
 		}
 	}
-	i.Engine.StopWaitGroup.Done()
+	i.Router.StopWaitGroup.Done()
+}
+
+// SwitchPortConfig 交换机端口配置
+type SwitchPortConfig struct {
+	Name        string              // 端口名
+	EthRxFunc   func() (pkt []byte) // 端口收包方法
+	EthTxFunc   func(pkt []byte)    // 端口发包方法
+	VlanId      uint16              // vlan号
+	BindCpuCore int                 // 绑定的cpu核心
+}
+
+// SwitchConfig 交换机配置
+type SwitchConfig struct {
+	SwitchPortList []*SwitchPortConfig // 端口列表
+	StaticHeapSize int                 // 静态堆内存大小
+}
+
+// SwitchPort 交换机端口
+type SwitchPort struct {
+	Config      *SwitchPortConfig // 配置
+	Switch      *Switch           // 归属Switch指针
+	EthTxBuffer []byte            // 端口发包缓冲区
+	EthTxLock   cpu.SpinLock      // 端口发包锁
+}
+
+// Switch 交换机
+type Switch struct {
+	Config             *SwitchConfig                                 // 配置
+	Stop               atomic.Bool                                   // 停止标志
+	StopWaitGroup      sync.WaitGroup                                // 停止等待组
+	SwitchPortMap      map[string]*SwitchPort                        // 交换机端口集合 key:端口名 value:端口实例
+	SwitchMacAddrTable *hashmap.HashMap[MacAddrHash, *SwitchMacAddr] // 交换机mac地址表 key:mac地址 value:地址信息
+	SwitchMacAddrLock  sync.RWMutex                                  // 交换机mac地址锁
+	StaticHeapPtr      unsafe.Pointer                                // 静态堆内存指针
+	StaticHeap         mem.Heap                                      // 静态堆内存
+	TimeNow            uint32                                        // 当前毫秒时间戳
+}
+
+func InitSwitch(config *SwitchConfig) (*Switch, error) {
+	if config.StaticHeapSize == 0 {
+		config.StaticHeapSize = 8 * mem.MB
+	}
+	cHeap := mem.NewCHeap()
+	staticHeapPtr := cHeap.Malloc(uint64(config.StaticHeapSize))
+	staticHeap := mem.NewStaticHeap(staticHeapPtr, uint64(config.StaticHeapSize))
+	s := &Switch{
+		Config:             config,
+		SwitchPortMap:      make(map[string]*SwitchPort),
+		SwitchMacAddrTable: hashmap.NewHashMap[MacAddrHash, *SwitchMacAddr](staticHeap),
+		StaticHeapPtr:      staticHeapPtr,
+		StaticHeap:         staticHeap,
+		TimeNow:            uint32(time.Now().Unix()),
+	}
+	for _, switchPortConfig := range config.SwitchPortList {
+		switchPort := &SwitchPort{
+			Config:      switchPortConfig,
+			Switch:      s,
+			EthTxBuffer: make([]byte, 0, 1514),
+		}
+		s.SwitchPortMap[switchPort.Config.Name] = switchPort
+	}
+	return s, nil
+}
+
+func (s *Switch) RunSwitch() {
+	s.Stop.Store(false)
+	go s.Monitor()
+	s.StopWaitGroup.Add(1)
+	for _, switchPort := range s.SwitchPortMap {
+		go switchPort.PacketHandle()
+		s.StopWaitGroup.Add(1)
+	}
+	go s.SwitchMacAddrClear()
+	s.StopWaitGroup.Add(1)
+}
+
+func (s *Switch) Monitor() {
+	ticker := time.NewTicker(time.Second * 1)
+	for {
+		<-ticker.C
+		if s.Stop.Load() {
+			break
+		}
+		s.TimeNow = uint32(time.Now().Unix())
+	}
+	s.StopWaitGroup.Done()
+}
+
+func (s *Switch) GetSwitchPort(name string) *SwitchPort {
+	return s.SwitchPortMap[name]
+}
+
+func (s *Switch) StopSwitch() {
+	s.Stop.Store(true)
+	s.StopWaitGroup.Wait()
+	cHeap := mem.NewCHeap()
+	cHeap.Free(s.StaticHeapPtr)
+}
+
+func (s *SwitchPort) PacketHandle() {
+	if s.Config.BindCpuCore >= 0 {
+		cpu.BindCpuCore(s.Config.BindCpuCore)
+	}
+	for {
+		if s.Switch.Stop.Load() {
+			break
+		}
+		ethFrm := s.Config.EthRxFunc()
+		if ethFrm != nil {
+			s.RxEthernet(ethFrm)
+		}
+	}
+	s.Switch.StopWaitGroup.Done()
+}
+
+type Wire struct {
+	Memory     unsafe.Pointer
+	RingBuffer *mem.RingBuffer
+	Data       []byte
+	IdleSleep  bool
+}
+
+func NewWire(idleSleep bool) *Wire {
+	memory := new(mem.CHeap).Malloc(mem.SizeOf[mem.RingBuffer]() + 8*mem.MB)
+	ringBuffer := mem.RingBufferCreate(memory, uint32(mem.SizeOf[mem.RingBuffer]()+8*mem.MB))
+	return &Wire{
+		Memory:     memory,
+		RingBuffer: ringBuffer,
+		Data:       make([]byte, 1514),
+		IdleSleep:  idleSleep,
+	}
+}
+
+func (w *Wire) Rx() (pkt []byte) {
+	dataLen := uint16(0)
+	mem.ReadPacket(w.RingBuffer, w.Data, &dataLen)
+	if dataLen == 0 {
+		if w.IdleSleep {
+			time.Sleep(time.Millisecond * 10)
+		}
+		return nil
+	}
+	return w.Data[:dataLen]
+}
+
+func (w *Wire) Tx(pkt []byte) {
+	mem.WritePacket(w.RingBuffer, pkt, uint16(len(pkt)))
+}
+
+func (w *Wire) Destroy() {
+	mem.RingBufferDestroy(w.RingBuffer)
+	new(mem.CHeap).Free(w.Memory)
 }

@@ -307,7 +307,7 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 			}
 			copy(dhcpLease.IpAddr[:], optionReqIpAddr.IpAddr)
 			copy(dhcpLease.MacAddr[:], clientMacAddr)
-			dhcpLease.ExpTime = i.Engine.TimeNow + DhcpLeaseTime
+			dhcpLease.ExpTime = i.Router.TimeNow + DhcpLeaseTime
 			dhcpLease.HostName.Set(hostName)
 			ok = i.DhcpLeaseTable.Set(IpAddrHash(reqIpAddrU), dhcpLease)
 			if !ok {
@@ -380,7 +380,7 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 			if optionRouter != nil {
 				nextHop := make([]byte, 4)
 				copy(nextHop, optionRouter.IpAddr)
-				i.Engine.RouteTable.AddRoute(&RouteEntry{
+				i.Router.RouteTable.AddRoute(&RouteEntry{
 					DstIpAddr:   []byte{0x00, 0x00, 0x00, 0x00},
 					NetworkMask: []byte{0x00, 0x00, 0x00, 0x00},
 					NextHop:     nextHop,
@@ -388,7 +388,7 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 				})
 				dstIpAddrU := protocol.IpAddrToU(i.IpAddr) & protocol.IpAddrToU(i.NetworkMask)
 				dstIpAddr := protocol.UToIpAddr(dstIpAddrU)
-				i.Engine.RouteTable.AddRoute(&RouteEntry{
+				i.Router.RouteTable.AddRoute(&RouteEntry{
 					DstIpAddr:   dstIpAddr,
 					NetworkMask: i.NetworkMask,
 					NextHop:     nil,
@@ -400,7 +400,7 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 			if optionDomainNameServer != nil {
 				copy(i.DnsServerAddr, optionDomainNameServer.IpAddr)
 				Log(fmt.Sprintf("dhcp client get dns: %v\n", optionDomainNameServer.IpAddr))
-				for _, netIf := range i.Engine.NetIfMap {
+				for _, netIf := range i.Router.NetIfMap {
 					if !netIf.Config.DhcpServerEnable {
 						continue
 					}
@@ -460,12 +460,12 @@ func (i *NetIf) DhcpLeaseClear() {
 	ticker := time.NewTicker(time.Second * 1)
 	for {
 		<-ticker.C
-		if i.Engine.Stop.Load() {
+		if i.Router.Stop.Load() {
 			break
 		}
 		i.DhcpLock.Lock()
 		i.DhcpLeaseTable.For(func(ipAddrU IpAddrHash, dhcpLease *DhcpLease) (next bool) {
-			if i.Engine.TimeNow > dhcpLease.ExpTime {
+			if i.Router.TimeNow > dhcpLease.ExpTime {
 				i.DhcpLeaseTable.Del(ipAddrU)
 				mem.FreeType[DhcpLease](i.StaticHeap, dhcpLease)
 			}
@@ -473,5 +473,5 @@ func (i *NetIf) DhcpLeaseClear() {
 		})
 		i.DhcpLock.Unlock()
 	}
-	i.Engine.StopWaitGroup.Done()
+	i.Router.StopWaitGroup.Done()
 }

@@ -9,14 +9,8 @@ import (
 	"github.com/flswld/halo/protocol"
 )
 
-type SwitchMacAddr struct {
-	MacAddr    [6]byte            // mac地址
-	NetIf      mem.StaticString64 // 网卡名
-	CreateTime uint32             // 创建时间
-}
-
 func (i *NetIf) RxEthernet(ethFrm []byte) {
-	if i.Engine.Config.DebugLog {
+	if i.Router.Config.DebugLog {
 		Log(fmt.Sprintf("rx eth frm, if: %v, len: %v, data: %02x\n", i.Config.Name, len(ethFrm), ethFrm))
 	}
 	ethPayload, ethDstMac, ethSrcMac, ethProto, err := protocol.ParseEthFrm(ethFrm)
@@ -24,94 +18,6 @@ func (i *NetIf) RxEthernet(ethFrm []byte) {
 		Log(fmt.Sprintf("parse ethernet frame error: %v\n", err))
 		return
 	}
-	if !i.Config.SwitchMode {
-		i.EthRxLock.Lock()
-		i.RecvEthernet(ethPayload, ethSrcMac, ethDstMac, ethProto)
-		i.EthRxLock.Unlock()
-		return
-	}
-	forward := true
-	for _, netIf := range i.Engine.NetIfMap {
-		if !netIf.Config.SwitchMode || netIf.Config.SwitchGroup != i.Config.SwitchGroup {
-			continue
-		}
-		if netIf.MacAddr == nil {
-			continue
-		}
-		netIf.EthRxLock.Lock()
-		netIf.RecvEthernet(ethPayload, ethSrcMac, ethDstMac, ethProto)
-		netIf.EthRxLock.Unlock()
-		if bytes.Equal(ethDstMac, netIf.MacAddr) {
-			forward = false
-		}
-	}
-	if ethSrcMac[0]&0x01 == 0x01 {
-		return
-	}
-	if ethDstMac[0]&0x01 == 0x01 {
-		forward = true
-	}
-	if !forward {
-		return
-	}
-	i.Engine.SwitchMacAddrLock.RLock()
-	srcMacAddr, exist := i.Engine.SwitchMacAddrTable.Get(MacAddrHash(ethSrcMac))
-	i.Engine.SwitchMacAddrLock.RUnlock()
-	if !exist {
-		i.Engine.SwitchMacAddrLock.Lock()
-		srcMacAddr = mem.MallocType[SwitchMacAddr](i.Engine.StaticHeap, 1)
-		if srcMacAddr == nil {
-			i.Engine.SwitchMacAddrLock.Unlock()
-			return
-		}
-		ok := i.Engine.SwitchMacAddrTable.Set(MacAddrHash(ethSrcMac), srcMacAddr)
-		if !ok {
-			mem.FreeType[SwitchMacAddr](i.Engine.StaticHeap, srcMacAddr)
-			i.Engine.SwitchMacAddrLock.Unlock()
-			return
-		}
-		i.Engine.SwitchMacAddrLock.Unlock()
-	}
-	copy(srcMacAddr.MacAddr[:], ethSrcMac)
-	srcMacAddr.NetIf.Set(i.Config.Name)
-	srcMacAddr.CreateTime = i.Engine.TimeNow
-	i.Engine.SwitchMacAddrLock.RLock()
-	dstMacAddr, exist := i.Engine.SwitchMacAddrTable.Get(MacAddrHash(ethDstMac))
-	i.Engine.SwitchMacAddrLock.RUnlock()
-	if exist {
-		netIf := i.Engine.GetNetIf(dstMacAddr.NetIf.Get())
-		netIf.TxEthernet(ethPayload, ethDstMac, ethSrcMac, ethProto)
-	} else {
-		for _, netIf := range i.Engine.NetIfMap {
-			if netIf.Config.Name == i.Config.Name {
-				continue
-			}
-			if !netIf.Config.SwitchMode || netIf.Config.SwitchGroup != i.Config.SwitchGroup {
-				continue
-			}
-			netIf.TxEthernet(ethPayload, ethDstMac, ethSrcMac, ethProto)
-		}
-	}
-}
-
-func (i *NetIf) TxEthernet(ethPayload []byte, ethDstMac []byte, ethSrcMac []byte, ethProto uint16) bool {
-	i.EthTxLock.Lock()
-	i.EthTxBuffer = i.EthTxBuffer[0:0]
-	ethFrm, err := protocol.BuildEthFrm(i.EthTxBuffer, ethPayload, ethDstMac, ethSrcMac, ethProto)
-	if err != nil {
-		Log(fmt.Sprintf("build ethernet frame error: %v\n", err))
-		i.EthTxLock.Unlock()
-		return false
-	}
-	if i.Engine.Config.DebugLog {
-		Log(fmt.Sprintf("tx eth frm, if: %v, len: %v, data: %02x\n", i.Config.Name, len(ethFrm), ethFrm))
-	}
-	i.Config.EthTxFunc(ethFrm)
-	i.EthTxLock.Unlock()
-	return true
-}
-
-func (i *NetIf) RecvEthernet(ethPayload []byte, ethSrcMac []byte, ethDstMac []byte, ethProto uint16) {
 	if bytes.Equal(ethDstMac, i.MacAddr) || bytes.Equal(ethDstMac, protocol.BROADCAST_MAC_ADDR) {
 		switch ethProto {
 		case protocol.ETH_PROTO_ARP:
@@ -123,55 +29,121 @@ func (i *NetIf) RecvEthernet(ethPayload []byte, ethSrcMac []byte, ethDstMac []by
 	}
 }
 
-func (i *NetIf) SendEthernet(ethPayload []byte, ethDstMac []byte, ethSrcMac []byte, ethProto uint16) bool {
-	if !i.Config.SwitchMode {
-		return i.TxEthernet(ethPayload, ethDstMac, ethSrcMac, ethProto)
+func (i *NetIf) TxEthernet(ethPayload []byte, ethDstMac []byte, ethProto uint16) bool {
+	i.EthTxLock.Lock()
+	i.EthTxBuffer = i.EthTxBuffer[0:0]
+	ethFrm, err := protocol.BuildEthFrm(i.EthTxBuffer, ethPayload, ethDstMac, i.MacAddr, ethProto)
+	if err != nil {
+		Log(fmt.Sprintf("build ethernet frame error: %v\n", err))
+		i.EthTxLock.Unlock()
+		return false
 	}
-	i.Engine.SwitchMacAddrLock.RLock()
-	dstMacAddr, exist := i.Engine.SwitchMacAddrTable.Get(MacAddrHash(ethDstMac))
-	i.Engine.SwitchMacAddrLock.RUnlock()
+	if i.Router.Config.DebugLog {
+		Log(fmt.Sprintf("tx eth frm, if: %v, len: %v, data: %02x\n", i.Config.Name, len(ethFrm), ethFrm))
+	}
+	i.Config.EthTxFunc(ethFrm)
+	i.EthTxLock.Unlock()
+	return true
+}
+
+type SwitchMacAddr struct {
+	MacAddr    [6]byte            // mac地址
+	NetIf      mem.StaticString64 // 网卡名
+	CreateTime uint32             // 创建时间
+}
+
+func (s *SwitchPort) RxEthernet(ethFrm []byte) {
+	ethPayload, ethDstMac, ethSrcMac, ethProto, err := protocol.ParseEthFrm(ethFrm)
+	if err != nil {
+		Log(fmt.Sprintf("parse ethernet frame error: %v\n", err))
+		return
+	}
+	s.HandleEthernet(ethPayload, ethDstMac, ethSrcMac, ethProto)
+}
+
+func (s *SwitchPort) HandleEthernet(ethPayload []byte, ethDstMac []byte, ethSrcMac []byte, ethProto uint16) {
+	if ethSrcMac[0]&0x01 == 0x01 {
+		return
+	}
+	s.Switch.SwitchMacAddrLock.RLock()
+	srcMacAddr, exist := s.Switch.SwitchMacAddrTable.Get(MacAddrHash(ethSrcMac))
+	s.Switch.SwitchMacAddrLock.RUnlock()
+	if !exist {
+		s.Switch.SwitchMacAddrLock.Lock()
+		srcMacAddr = mem.MallocType[SwitchMacAddr](s.Switch.StaticHeap, 1)
+		if srcMacAddr == nil {
+			s.Switch.SwitchMacAddrLock.Unlock()
+			return
+		}
+		ok := s.Switch.SwitchMacAddrTable.Set(MacAddrHash(ethSrcMac), srcMacAddr)
+		if !ok {
+			mem.FreeType[SwitchMacAddr](s.Switch.StaticHeap, srcMacAddr)
+			s.Switch.SwitchMacAddrLock.Unlock()
+			return
+		}
+		s.Switch.SwitchMacAddrLock.Unlock()
+	}
+	copy(srcMacAddr.MacAddr[:], ethSrcMac)
+	srcMacAddr.NetIf.Set(s.Config.Name)
+	srcMacAddr.CreateTime = s.Switch.TimeNow
+	s.Switch.SwitchMacAddrLock.RLock()
+	dstMacAddr, exist := s.Switch.SwitchMacAddrTable.Get(MacAddrHash(ethDstMac))
+	s.Switch.SwitchMacAddrLock.RUnlock()
 	if exist {
-		netIf := i.Engine.GetNetIf(dstMacAddr.NetIf.Get())
-		return netIf.TxEthernet(ethPayload, ethDstMac, ethSrcMac, ethProto)
+		switchPort := s.Switch.GetSwitchPort(dstMacAddr.NetIf.Get())
+		switchPort.TxEthernet(ethPayload, ethDstMac, ethSrcMac, ethProto)
 	} else {
-		for _, netIf := range i.Engine.NetIfMap {
-			if !netIf.Config.SwitchMode || netIf.Config.SwitchGroup != i.Config.SwitchGroup {
+		for _, switchPort := range s.Switch.SwitchPortMap {
+			if switchPort.Config.Name == s.Config.Name {
 				continue
 			}
-			ok := netIf.TxEthernet(ethPayload, ethDstMac, ethSrcMac, ethProto)
-			if !ok {
-				return false
+			if switchPort.Config.VlanId != s.Config.VlanId {
+				continue
 			}
+			switchPort.TxEthernet(ethPayload, ethDstMac, ethSrcMac, ethProto)
 		}
-		return true
 	}
 }
 
-func (e *Engine) SwitchMacAddrClear() {
+func (s *SwitchPort) TxEthernet(ethPayload []byte, ethDstMac []byte, ethSrcMac []byte, ethProto uint16) bool {
+	s.EthTxLock.Lock()
+	s.EthTxBuffer = s.EthTxBuffer[0:0]
+	ethFrm, err := protocol.BuildEthFrm(s.EthTxBuffer, ethPayload, ethDstMac, ethSrcMac, ethProto)
+	if err != nil {
+		Log(fmt.Sprintf("build ethernet frame error: %v\n", err))
+		s.EthTxLock.Unlock()
+		return false
+	}
+	s.Config.EthTxFunc(ethFrm)
+	s.EthTxLock.Unlock()
+	return true
+}
+
+func (s *Switch) SwitchMacAddrClear() {
 	ticker := time.NewTicker(time.Second * 1)
 	for {
 		<-ticker.C
-		if e.Stop.Load() {
+		if s.Stop.Load() {
 			break
 		}
-		e.SwitchMacAddrLock.Lock()
-		e.SwitchMacAddrTable.For(func(macAddrHash MacAddrHash, switchMacAddr *SwitchMacAddr) (next bool) {
-			if e.TimeNow > switchMacAddr.CreateTime+300 {
-				e.SwitchMacAddrTable.Del(macAddrHash)
-				mem.FreeType[SwitchMacAddr](e.StaticHeap, switchMacAddr)
+		s.SwitchMacAddrLock.Lock()
+		s.SwitchMacAddrTable.For(func(macAddrHash MacAddrHash, switchMacAddr *SwitchMacAddr) (next bool) {
+			if s.TimeNow > switchMacAddr.CreateTime+300 {
+				s.SwitchMacAddrTable.Del(macAddrHash)
+				mem.FreeType[SwitchMacAddr](s.StaticHeap, switchMacAddr)
 			}
 			return true
 		})
-		e.SwitchMacAddrLock.Unlock()
+		s.SwitchMacAddrLock.Unlock()
 	}
-	e.StopWaitGroup.Done()
+	s.StopWaitGroup.Done()
 }
 
-func (e *Engine) ListSwitchMacAddr() []*SwitchMacAddr {
-	e.SwitchMacAddrLock.Lock()
-	defer e.SwitchMacAddrLock.Unlock()
+func (s *Switch) ListSwitchMacAddr() []*SwitchMacAddr {
+	s.SwitchMacAddrLock.Lock()
+	defer s.SwitchMacAddrLock.Unlock()
 	ret := make([]*SwitchMacAddr, 0)
-	e.SwitchMacAddrTable.For(func(key MacAddrHash, value *SwitchMacAddr) (next bool) {
+	s.SwitchMacAddrTable.For(func(key MacAddrHash, value *SwitchMacAddr) (next bool) {
 		v := *value
 		ret = append(ret, &v)
 		return true

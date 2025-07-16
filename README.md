@@ -169,9 +169,9 @@ func EthernetRouter() {
 		KniEnable:       true,
 	})
 
-	// 初始化协议栈
+	// 初始化路由器
 	engine.DefaultLogWriter = new(logger.LogWriter)
-	e, err := engine.InitEngine(&engine.Config{
+	r, err := engine.InitRouter(&engine.RouterConfig{
 		DebugLog: false, // 调试日志
 		// 网卡列表
 		NetIfList: []*engine.NetIfConfig{
@@ -198,8 +198,6 @@ func EthernetRouter() {
 				EthTxFunc:        func(pkt []byte) { dpdk.EthTxPkt(0, pkt) },      // 网卡发包方法
 				BindCpuCore:      0,                                               // 绑定的cpu核心
 				StaticHeapSize:   8 * mem.MB,                                      // 静态堆内存大小
-				SwitchMode:       false,                                           // 交换机模式
-				SwitchGroup:      "",                                              // 交换机组
 			},
 			{
 				Name:             "wan1",
@@ -238,16 +236,15 @@ func EthernetRouter() {
 				NetIf:       "wan0",            // 出接口
 			},
 		},
-		StaticHeapSize: 8 * mem.MB, // 静态堆内存大小
 	})
 	if err != nil {
 		panic(err)
 	}
 
-	// 启动协议栈
-	e.RunEngine()
+	// 启动路由器
+	r.RunRouter()
 
-	e.Ipv4PktFwdHook = func(raw []byte, dir int) (drop bool, mod []byte) {
+	r.Ipv4PktFwdHook = func(raw []byte, dir int) (drop bool, mod []byte) {
 		payload, _, srcAddr, dstAddr, err := protocol.ParseIpv4Pkt(raw)
 		if err == nil {
 			logger.Debug("[IPV4 ROUTE FWD] src: %v -> dst: %v, len: %v", srcAddr, dstAddr, len(payload))
@@ -257,8 +254,66 @@ func EthernetRouter() {
 
 	time.Sleep(time.Minute)
 
-	// 停止协议栈
-	e.StopEngine()
+	// 停止路由器
+	r.StopRouter()
+
+	// 停止dpdk
+	dpdk.Exit()
+}
+
+// EthernetSwitch 以太网交换机
+func EthernetSwitch() {
+	// 启动dpdk
+	dpdk.Run(&dpdk.Config{
+		PortIdList: []int{0, 1, 2, 3},
+		StatsLog:   true,
+		IdleSleep:  true,
+		SingleCore: true,
+	})
+
+	// 初始化交换机
+	s, err := engine.InitSwitch(&engine.SwitchConfig{
+		// 端口列表
+		SwitchPortList: []*engine.SwitchPortConfig{
+			{
+				Name:        "port0",                                         // 端口名
+				EthRxFunc:   func() (pkt []byte) { return dpdk.EthRxPkt(0) }, // 端口收包方法
+				EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(0, pkt) },      // 端口发包方法
+				VlanId:      1,                                               // vlan号
+				BindCpuCore: 0,                                               // 绑定的cpu核心
+			},
+			{
+				Name:      "port1",
+				EthRxFunc: func() (pkt []byte) { return dpdk.EthRxPkt(1) },
+				EthTxFunc: func(pkt []byte) { dpdk.EthTxPkt(1, pkt) },
+				VlanId:    1,
+			},
+			{
+				Name:      "port2",
+				EthRxFunc: func() (pkt []byte) { return dpdk.EthRxPkt(2) },
+				EthTxFunc: func(pkt []byte) { dpdk.EthTxPkt(2, pkt) },
+				VlanId:    2,
+			},
+			{
+				Name:      "port3",
+				EthRxFunc: func() (pkt []byte) { return dpdk.EthRxPkt(3) },
+				EthTxFunc: func(pkt []byte) { dpdk.EthTxPkt(3, pkt) },
+				VlanId:    2,
+			},
+		},
+		StaticHeapSize: 8 * mem.MB, // 静态堆内存大小
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// 启动交换机
+	s.RunSwitch()
+
+	time.Sleep(time.Minute)
+
+	// 停止交换机
+	s.StopSwitch()
 
 	// 停止dpdk
 	dpdk.Exit()

@@ -153,8 +153,29 @@ int port_init(const int port_index, const uint16_t port_id, const uint16_t queue
         return ret;
     }
     port_conf[port_index].rxmode.max_rx_pkt_len = 1518;
-    port_conf[port_index].rxmode.offloads = dev_info.rx_offload_capa;
-    port_conf[port_index].txmode.offloads = dev_info.tx_offload_capa;
+    if (dev_info.rx_offload_capa & DEV_RX_OFFLOAD_IPV4_CKSUM) {
+        port_conf[port_index].rxmode.offloads |= DEV_RX_OFFLOAD_IPV4_CKSUM;
+    }
+    if (dev_info.rx_offload_capa & DEV_RX_OFFLOAD_TCP_CKSUM) {
+        port_conf[port_index].rxmode.offloads |= DEV_RX_OFFLOAD_TCP_CKSUM;
+    }
+    if (dev_info.rx_offload_capa & DEV_RX_OFFLOAD_UDP_CKSUM) {
+        port_conf[port_index].rxmode.offloads |= DEV_RX_OFFLOAD_UDP_CKSUM;
+    }
+    if (dev_info.rx_offload_capa & DEV_RX_OFFLOAD_RSS_HASH) {
+        port_conf[port_index].rxmode.offloads |= DEV_RX_OFFLOAD_RSS_HASH;
+        port_conf[port_index].rxmode.mq_mode = ETH_MQ_RX_RSS;
+        port_conf[port_index].rx_adv_conf.rss_conf.rss_hf = dev_info.flow_type_rss_offloads;
+    }
+    if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_IPV4_CKSUM) {
+        port_conf[port_index].txmode.offloads |= DEV_TX_OFFLOAD_IPV4_CKSUM;
+    }
+    if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_TCP_CKSUM) {
+        port_conf[port_index].txmode.offloads |= DEV_TX_OFFLOAD_TCP_CKSUM;
+    }
+    if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_UDP_CKSUM) {
+        port_conf[port_index].txmode.offloads |= DEV_TX_OFFLOAD_UDP_CKSUM;
+    }
     RTE_LOG(INFO, APP, "port init, port_id: %u, queue_num: %u, rx_offload_capa: %lu, tx_offload_capa: %lu\n",
             port_id, queue_num, dev_info.rx_offload_capa, dev_info.tx_offload_capa);
     ret = rte_eth_dev_configure(port_id, queue_num, queue_num, port_conf + port_index);

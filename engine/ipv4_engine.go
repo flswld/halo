@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"hash/fnv"
+	"hash"
 	"sync"
 	"time"
 
@@ -196,8 +196,9 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr []byte, ipv4DstA
 
 // RouteTable 路由表
 type RouteTable struct {
-	Root *TrieNode    // 根节点
-	Lock sync.RWMutex // 锁
+	Root   *TrieNode    // 根节点
+	Lock   sync.RWMutex // 锁
+	IpHash hash.Hash32  // ip地址hash计算对象
 }
 
 // TrieNode 路由树节点
@@ -295,9 +296,9 @@ func (r *RouteTable) FindRoute(ip []byte) *RouteEntry {
 	if lastMatch == nil {
 		return nil
 	}
-	h := fnv.New32a()
-	_, _ = h.Write(ip)
-	return lastMatch[h.Sum32()%uint32(len(lastMatch))]
+	r.IpHash.Reset()
+	_, _ = r.IpHash.Write(ip)
+	return lastMatch[r.IpHash.Sum32()%uint32(len(lastMatch))]
 }
 
 func (r *RouteTable) ListRoute() []*RouteEntry {
@@ -604,10 +605,11 @@ func (i *NetIf) NatTableClear() {
 			if i.Router.TimeNow-natFlow.LastAliveTime > 60 {
 				i.NatFlowTable.Del(natFlowHash)
 				i.NatWanFlowTable.Del(NatWanFlowHash{
-					RemoteIpAddr: natFlow.RemoteIpAddr,
-					RemotePort:   natFlow.RemotePort,
-					WanIpAddr:    natFlow.WanIpAddr,
-					WanPort:      natFlow.WanPort,
+					RemoteIpAddr:  natFlow.RemoteIpAddr,
+					RemotePort:    natFlow.RemotePort,
+					WanIpAddr:     natFlow.WanIpAddr,
+					WanPort:       natFlow.WanPort,
+					Ipv4HeadProto: natFlow.Ipv4HeadProto,
 				})
 				mem.FreeType[NatFlow](i.StaticHeap, natFlow)
 				portAlloc, exist := i.NatPortAlloc.Get(IpAddrHash(natFlow.RemoteIpAddr))

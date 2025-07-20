@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"fmt"
+	"time"
 
 	"github.com/flswld/halo/mem"
 	"github.com/flswld/halo/protocol"
@@ -10,9 +11,9 @@ import (
 
 // ArpCache ARP缓存
 type ArpCache struct {
-	IpAddr     uint32  // ip地址
-	MacAddr    [6]byte // mac地址
-	CreateTime uint32  // 创建时间
+	IpAddr  uint32  // ip地址
+	MacAddr [6]byte // mac地址
+	ExpTime uint32  // 过期时间
 }
 
 func (i *NetIf) SendFreeArp() {
@@ -35,16 +36,20 @@ func (i *NetIf) GetArpCache(ipAddr []byte) *ArpCache {
 	i.ArpLock.RUnlock()
 	if !exist {
 		// 不存在则发起ARP询问并返回空
-		arpPkt := make([]byte, 0, 28)
-		arpPkt, err := protocol.BuildArpPkt(arpPkt, protocol.ARP_REQUEST, i.MacAddr, i.IpAddr, protocol.BROADCAST_MAC_ADDR, ipAddr)
-		if err != nil {
-			Log(fmt.Sprintf("build arp packet error: %v\n", err))
-			return nil
-		}
-		i.TxEthernet(arpPkt, protocol.BROADCAST_MAC_ADDR, protocol.ETH_PROTO_ARP)
+		i.SendArpReq(ipAddr)
 		return nil
 	}
 	return arpCache
+}
+
+func (i *NetIf) SendArpReq(ipAddr []byte) {
+	arpPkt := make([]byte, 0, 28)
+	arpPkt, err := protocol.BuildArpPkt(arpPkt, protocol.ARP_REQUEST, i.MacAddr, i.IpAddr, protocol.BROADCAST_MAC_ADDR, ipAddr)
+	if err != nil {
+		Log(fmt.Sprintf("build arp packet error: %v\n", err))
+		return
+	}
+	i.TxEthernet(arpPkt, protocol.BROADCAST_MAC_ADDR, protocol.ETH_PROTO_ARP)
 }
 
 func (i *NetIf) SetArpCache(ipAddr []byte, macAddr []byte) {
@@ -60,7 +65,7 @@ func (i *NetIf) SetArpCache(ipAddr []byte, macAddr []byte) {
 	}
 	arpCache.IpAddr = ipAddrU
 	copy(arpCache.MacAddr[:], macAddr)
-	arpCache.CreateTime = i.Router.TimeNow
+	arpCache.ExpTime = i.Router.TimeNow + 300
 	i.ArpCacheTable.Set(IpAddrHash(ipAddrU), arpCache)
 }
 
@@ -89,6 +94,45 @@ func (i *NetIf) HandleArp(ethPayload []byte, ethSrcMac []byte) {
 		}
 		i.TxEthernet(arpPkt, arpSrcMac, protocol.ETH_PROTO_ARP)
 	}
+}
+
+func (i *NetIf) ArpTableRefresh() {
+	ticker := time.NewTicker(time.Second * 1)
+	for {
+		<-ticker.C
+		if i.Router.Stop.Load() {
+			break
+		}
+		i.ArpLock.Lock()
+		i.ArpCacheTable.For(func(key IpAddrHash, value *ArpCache) (next bool) {
+			if i.Router.TimeNow > value.ExpTime-10 {
+				i.SendArpReq(protocol.UToIpAddr(value.IpAddr))
+			}
+			return true
+		})
+		i.ArpLock.Unlock()
+	}
+	i.Router.StopWaitGroup.Done()
+}
+
+func (i *NetIf) ArpTableClear() {
+	ticker := time.NewTicker(time.Second * 1)
+	for {
+		<-ticker.C
+		if i.Router.Stop.Load() {
+			break
+		}
+		i.ArpLock.Lock()
+		i.ArpCacheTable.For(func(key IpAddrHash, value *ArpCache) (next bool) {
+			if i.Router.TimeNow > value.ExpTime {
+				i.ArpCacheTable.Del(key)
+				mem.FreeType[ArpCache](i.StaticHeap, value)
+			}
+			return true
+		})
+		i.ArpLock.Unlock()
+	}
+	i.Router.StopWaitGroup.Done()
 }
 
 func (i *NetIf) ListArp() []*ArpCache {

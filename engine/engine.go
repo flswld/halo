@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -132,7 +133,8 @@ func InitRouter(config *RouterConfig) (*Router, error) {
 		Config:   config,
 		NetIfMap: make(map[string]*NetIf),
 		RouteTable: &RouteTable{
-			Root: new(TrieNode),
+			Root:   new(TrieNode),
+			IpHash: fnv.New32a(),
 		},
 		Ipv4PktFwdHook: nil,
 		TimeNow:        uint32(time.Now().Unix()),
@@ -254,6 +256,10 @@ func (r *Router) RunRouter() {
 		} else {
 			netIf.SendFreeArp()
 		}
+		go netIf.ArpTableRefresh()
+		r.StopWaitGroup.Add(1)
+		go netIf.ArpTableClear()
+		r.StopWaitGroup.Add(1)
 		go netIf.PacketHandle()
 		r.StopWaitGroup.Add(1)
 		if netIf.Config.NatEnable {

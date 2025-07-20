@@ -292,6 +292,9 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 			reqIpAddrU := protocol.IpAddrToU(optionReqIpAddr.IpAddr)
 			selfIpAddrU := protocol.IpAddrToU(i.IpAddr)
 			networkMaskU := protocol.IpAddrToU(i.NetworkMask)
+			if reqIpAddrU == 0 {
+				goto dhcp_nak
+			}
 			if selfIpAddrU&networkMaskU != reqIpAddrU&networkMaskU {
 				goto dhcp_nak
 			}

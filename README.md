@@ -227,8 +227,8 @@ func EthernetRouter() {
 				},
 			},
 		},
-		// 路由表
-		RoutingList: []*engine.RouteEntryConfig{
+		// 静态路由列表
+		RouteList: []*engine.RouteEntryConfig{
 			{
 				DstIpAddr:   "114.114.114.114", // 目的ip地址
 				NetworkMask: "255.255.255.255", // 网络掩码

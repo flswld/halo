@@ -127,6 +127,9 @@ func BuildIpv4Pkt(pkt []byte, payload []byte, ipHeadProto uint8, srcAddr []byte,
 }
 
 func HandleIpv4PktTtl(pkt []byte) ([]byte, bool) {
+	if len(pkt) < 9 {
+		return nil, false
+	}
 	if pkt[8] <= 1 {
 		return pkt, false
 	}
@@ -136,6 +139,9 @@ func HandleIpv4PktTtl(pkt []byte) ([]byte, bool) {
 }
 
 func ReCalcIpv4CheckSum(pkt []byte) []byte {
+	if len(pkt) < 20 {
+		return pkt
+	}
 	pkt[10] = 0x00
 	pkt[11] = 0x00
 	if !CheckSumEnable {
@@ -148,6 +154,9 @@ func ReCalcIpv4CheckSum(pkt []byte) []byte {
 }
 
 func ReCalcIcmpCheckSum(pkt []byte) []byte {
+	if len(pkt) < 24 {
+		return pkt
+	}
 	pkt[22] = 0x00
 	pkt[23] = 0x00
 	sum := GetCheckSum(pkt[20:])
@@ -157,6 +166,9 @@ func ReCalcIcmpCheckSum(pkt []byte) []byte {
 }
 
 func ReCalcTcpCheckSum(pkt []byte) []byte {
+	if len(pkt) < 38 {
+		return pkt
+	}
 	pkt[36] = 0x00
 	pkt[37] = 0x00
 	if !CheckSumEnable {
@@ -178,6 +190,9 @@ func ReCalcTcpCheckSum(pkt []byte) []byte {
 }
 
 func ReCalcUdpCheckSum(pkt []byte) []byte {
+	if len(pkt) < 28 {
+		return pkt
+	}
 	pkt[26] = 0x00
 	pkt[27] = 0x00
 	if !CheckSumEnable {
@@ -199,6 +214,9 @@ func ReCalcUdpCheckSum(pkt []byte) []byte {
 }
 
 func NatGetSrcDstPort(pkt []byte) (srcPort uint16, dstPort uint16) {
+	if len(pkt) < 26 {
+		return 0, 0
+	}
 	switch pkt[9] {
 	case IPH_PROTO_ICMP:
 		srcPort = binary.BigEndian.Uint16(pkt[24:26])
@@ -214,6 +232,9 @@ func NatGetSrcDstPort(pkt []byte) (srcPort uint16, dstPort uint16) {
 }
 
 func NatChangeSrc(pkt []byte, ipAddr []byte, port uint16) []byte {
+	if len(pkt) < 26 {
+		return pkt
+	}
 	pkt[12] = ipAddr[0]
 	pkt[13] = ipAddr[1]
 	pkt[14] = ipAddr[2]
@@ -237,6 +258,9 @@ func NatChangeSrc(pkt []byte, ipAddr []byte, port uint16) []byte {
 }
 
 func NatChangeDst(pkt []byte, ipAddr []byte, port uint16) []byte {
+	if len(pkt) < 26 {
+		return pkt
+	}
 	pkt[16] = ipAddr[0]
 	pkt[17] = ipAddr[1]
 	pkt[18] = ipAddr[2]

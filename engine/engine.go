@@ -51,9 +51,9 @@ func (h MacAddrHash) GetHashCode() uint64 {
 
 // RouterConfig 路由器配置
 type RouterConfig struct {
-	DebugLog    bool                // 调试日志
-	NetIfList   []*NetIfConfig      // 网卡列表
-	RoutingList []*RouteEntryConfig // 路由表
+	DebugLog  bool                // 调试日志
+	NetIfList []*NetIfConfig      // 网卡列表
+	RouteList []*RouteEntryConfig // 静态路由列表
 }
 
 // NetIfConfig 网卡配置
@@ -208,7 +208,7 @@ func InitRouter(config *RouterConfig) (*Router, error) {
 		r.NetIfMap[netIf.Config.Name] = netIf
 	}
 	// 路由表
-	for _, routingEntryConfig := range config.RoutingList {
+	for _, routingEntryConfig := range config.RouteList {
 		dstIpAddr, err := protocol.ParseIpAddr(routingEntryConfig.DstIpAddr)
 		if err != nil {
 			return nil, err

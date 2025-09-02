@@ -1,27 +1,24 @@
 # halo
 
-[English](README-EN.md)
-***
+## Golang High-Performance Lightweight Network Packet Transmission Framework
 
-## Golang高性能轻量级网络包收发框架
+* Single NIC queue transmission performance can exceed 10Mpps
+* Complete Router Protocol Stack Implementation
+* Cross-platform ready-to-use toolkit: `logger`, `cpu (goroutine core binding/spinlock)`, `mem (memory allocator/ring buffer)`, `hashmap/list (custom memory allocator)`
 
-* 网卡单个队列发包性能可超过10Mpps
-* 完整的路由器协议栈实现
-* 全平台开箱即用的工具包：`logger(日志)`、`cpu(协程绑核/自旋锁)`、`mem(内存分配器/环状缓冲区)`、`hashmap/list(自定义内存分配器)`
-
-### dpdk环境搭建
+### dpdk Environment Setup
 
 ```shell
-# 建议使用Ubuntu20.04
+# Recommended: Ubuntu 20.04
 
-# 安装dpdk
+# Install dpdk
 cd /root
 wget https://fast.dpdk.org/rel/dpdk-20.11.10.tar.gz
 tar -zxvf dpdk-20.11.10.tar.gz
 cd dpdk-stable-20.11.10
-# 添加环境变量
+# Add environment variable
 export RTE_SDK="/root/dpdk-stable-20.11.10"
-# 编译DPDK
+# Build DPDK
 meson build
 cd build
 meson configure -Denable_kmods=true
@@ -37,12 +34,12 @@ $RTE_SDK/usertools/dpdk-devbind.py --bind=igb_uio eth0
 
 # VFIO
 vim /etc/default/grub
-# "GRUB_CMDLINE_LINUX" 追加 "intel_iommu=on"
+# Append "intel_iommu=on" to "GRUB_CMDLINE_LINUX"
 update-grub2
 reboot
 modprobe vfio && modprobe vfio-pci
 echo 1 >/sys/module/vfio/parameters/enable_unsafe_noiommu_mode
-# 查看要绑定网卡的pcie设备号
+# View PCIe device ID of the NIC to bind
 $RTE_SDK/usertools/dpdk-devbind.py --status
 ifconfig eth0 down
 $RTE_SDK/usertools/dpdk-devbind.py -b vfio-pci 0000:00:05.0
@@ -50,7 +47,7 @@ $RTE_SDK/usertools/dpdk-devbind.py -b vfio-pci 0000:00:05.0
 # KNI
 insmod $RTE_SDK/build/kernel/linux/kni/rte_kni.ko carrier=on
 
-# 内存大页
+# Hugepages
 echo 1024 >/sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages
 mkdir -p /mnt/huge_2M
 mount -t hugetlbfs none /mnt/huge_2M -o pagesize=2M
@@ -60,36 +57,36 @@ mount -t hugetlbfs none /mnt/huge_1G -o pagesize=1G
 
 ```
 
-### 如何使用
+### How to Use
 
 ```shell
 go get github.com/flswld/halo
 
 ```
 
-### 使用示例
+### Usage Examples
 
 ```go
-// 详见example/example.go
+// See example/example.go
 
-// DirectDpdk 直接使用dpdk收发网络报文
+// DirectDpdk directly sends and receives network packets using dpdk
 func DirectDpdk() {
-	// 启动dpdk
+	// Start dpdk
 	dpdk.Run(&dpdk.Config{
-		DpdkCpuCoreList: []int{0, 1, 2, 3, 4, 5, 6, 7, 8}, // dpdk使用的核心编号列表 主线程第一个核心 每个网卡队列一个核心
-		DpdkMemChanNum:  4,                                // dpdk内存通道数
-		PortIdList:      []int{0, 1},                      // 使用的网卡id列表
-		QueueNum:        2,                                // 启用的网卡队列数
-		RingBufferSize:  128 * mem.MB,                     // 环状缓冲区大小
-		AfPacketDevList: nil,                              // 使用的af_packet虚拟网卡列表
-		StatsLog:        true,                             // 收发包统计日志
-		DebugLog:        false,                            // 收发包调试日志
-		IdleSleep:       false,                            // 空闲睡眠 降低cpu占用
-		SingleCore:      false,                            // 单核模式 只使用cpu0
-		KniEnable:       false,                            // 开启kni内核网卡
+		DpdkCpuCoreList: []int{0, 1, 2, 3, 4, 5, 6, 7, 8}, // List of CPU cores used by dpdk. First core for the main thread, one core per NIC queue.
+		DpdkMemChanNum:  4,                                // Number of dpdk memory channels
+		PortIdList:      []int{0, 1},                      // List of NIC IDs to use
+		QueueNum:        2,                                // Number of NIC queues enabled
+		RingBufferSize:  128 * mem.MB,                     // Ring buffer size
+		AfPacketDevList: nil,                              // List of af_packet virtual NICs
+		StatsLog:        true,                             // Packet send/receive statistics log
+		DebugLog:        false,                            // Packet send/receive debug log
+		IdleSleep:       false,                            // Idle sleep to reduce CPU usage
+		SingleCore:      false,                            // Single-core mode, only use CPU0
+		KniEnable:       false,                            // Enable kni kernel NIC
 	})
 
-	// 通过EthQueueRxPkt和EthQueueTxPkt方法发送接收原始以太网报文
+	// Send and receive raw Ethernet packets via EthQueueRxPkt and EthQueueTxPkt
 	var exit atomic.Bool
 	go func() {
 		cpu.BindCpuCore(9)
@@ -147,16 +144,16 @@ func DirectDpdk() {
 	exit.Store(true)
 	time.Sleep(time.Second)
 
-	// 停止dpdk
+	// Stop dpdk
 	dpdk.Exit()
 }
 
-// EthernetRouter 以太网路由器
+// EthernetRouter
 func EthernetRouter() {
 	logger.InitLogger(nil)
 	defer logger.CloseLogger()
 
-	// 启动dpdk
+	// Start dpdk
 	dpdk.DefaultLogWriter = new(logger.LogWriter)
 	dpdk.Run(&dpdk.Config{
 		DpdkCpuCoreList: nil,
@@ -172,35 +169,35 @@ func EthernetRouter() {
 		KniEnable:       true,
 	})
 
-	// 初始化路由器
+	// Initialize router
 	engine.DefaultLogWriter = new(logger.LogWriter)
 	r, err := engine.InitRouter(&engine.RouterConfig{
-		DebugLog: false, // 调试日志
-		// 网卡列表
+		DebugLog: false, // Debug log
+		// NIC list
 		NetIfList: []*engine.NetIfConfig{
 			{
-				Name:        "wan0",                 // 网卡名
-				MacAddr:     "AA:AA:AA:AA:AA:AA",    // mac地址
-				IpAddr:      "192.168.100.100",      // ip地址
-				NetworkMask: "255.255.255.0",        // 子网掩码
-				NatEnable:   true,                   // 开启网络地址转换
-				NatType:     engine.NatTypeFullCone, // 网络地址转换类型
-				// 网络地址转换端口映射表
+				Name:        "wan0",                 // NIC name
+				MacAddr:     "AA:AA:AA:AA:AA:AA",    // MAC address
+				IpAddr:      "192.168.100.100",      // IP address
+				NetworkMask: "255.255.255.0",        // Subnet mask
+				NatEnable:   true,                   // Enable NAT
+				NatType:     engine.NatTypeFullCone, // NAT type
+				// NAT port mapping table
 				NatPortMappingList: []*engine.NatPortMappingEntryConfig{
 					{
-						WanPort:       22,                     // wan口端口
-						LanHostIpAddr: "192.168.111.222",      // lan口主机ip地址
-						LanHostPort:   22,                     // lan口主机端口
-						Ipv4HeadProto: protocol.IPH_PROTO_TCP, // ip头部协议
+						WanPort:       22,                     // WAN port
+						LanHostIpAddr: "192.168.111.222",      // LAN host IP address
+						LanHostPort:   22,                     // LAN host port
+						Ipv4HeadProto: protocol.IPH_PROTO_TCP, // IP header protocol
 					},
 				},
-				DnsServerAddr:    "",                                              // dns服务器地址
-				DhcpServerEnable: false,                                           // 开启dhcp服务器
-				DhcpClientEnable: false,                                           // 开启dhcp客户端
-				EthRxFunc:        func() (pkt []byte) { return dpdk.EthRxPkt(0) }, // 网卡收包方法
-				EthTxFunc:        func(pkt []byte) { dpdk.EthTxPkt(0, pkt) },      // 网卡发包方法
-				BindCpuCore:      0,                                               // 绑定的cpu核心
-				StaticHeapSize:   8 * mem.MB,                                      // 静态堆内存大小
+				DnsServerAddr:    "",                                              // DNS server address
+				DhcpServerEnable: false,                                           // Enable DHCP server
+				DhcpClientEnable: false,                                           // Enable DHCP client
+				EthRxFunc:        func() (pkt []byte) { return dpdk.EthRxPkt(0) }, // NIC receive method
+				EthTxFunc:        func(pkt []byte) { dpdk.EthTxPkt(0, pkt) },      // NIC send method
+				BindCpuCore:      0,                                               // Bound CPU core
+				StaticHeapSize:   8 * mem.MB,                                      // Static heap memory size
 			},
 			{
 				Name:             "wan1",
@@ -230,13 +227,13 @@ func EthernetRouter() {
 				},
 			},
 		},
-		// 静态路由列表
+		// Static route list
 		RouteList: []*engine.RouteEntryConfig{
 			{
-				DstIpAddr:   "114.114.114.114", // 目的ip地址
-				NetworkMask: "255.255.255.255", // 网络掩码
-				NextHop:     "192.168.100.1",   // 下一跳
-				NetIf:       "wan0",            // 出接口
+				DstIpAddr:   "114.114.114.114", // Destination IP address
+				NetworkMask: "255.255.255.255", // Network mask
+				NextHop:     "192.168.100.1",   // Next hop
+				NetIf:       "wan0",            // Outbound interface
 			},
 		},
 	})
@@ -244,7 +241,7 @@ func EthernetRouter() {
 		panic(err)
 	}
 
-	// 启动路由器
+	// Start router
 	r.RunRouter()
 
 	r.Ipv4PktFwdHook = func(raw []byte, dir int) (drop bool, mod []byte) {
@@ -257,16 +254,16 @@ func EthernetRouter() {
 
 	time.Sleep(time.Minute)
 
-	// 停止路由器
+	// Stop router
 	r.StopRouter()
 
-	// 停止dpdk
+	// Stop dpdk
 	dpdk.Exit()
 }
 
-// EthernetSwitch 以太网交换机
+// EthernetSwitch
 func EthernetSwitch() {
-	// 启动dpdk
+	// Start dpdk
 	dpdk.Run(&dpdk.Config{
 		PortIdList: []int{0, 1, 2, 3},
 		StatsLog:   true,
@@ -274,16 +271,16 @@ func EthernetSwitch() {
 		SingleCore: true,
 	})
 
-	// 初始化交换机
+	// Initialize switch
 	s, err := engine.InitSwitch(&engine.SwitchConfig{
-		// 端口列表
+		// Port list
 		SwitchPortList: []*engine.SwitchPortConfig{
 			{
-				Name:        "port0",                                         // 端口名
-				EthRxFunc:   func() (pkt []byte) { return dpdk.EthRxPkt(0) }, // 端口收包方法
-				EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(0, pkt) },      // 端口发包方法
-				VlanId:      1,                                               // vlan号
-				BindCpuCore: 0,                                               // 绑定的cpu核心
+				Name:        "port0",                                         // Port name
+				EthRxFunc:   func() (pkt []byte) { return dpdk.EthRxPkt(0) }, // Port receive method
+				EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(0, pkt) },      // Port send method
+				VlanId:      1,                                               // VLAN ID
+				BindCpuCore: 0,                                               // Bound CPU core
 			},
 			{
 				Name:      "port1",
@@ -304,21 +301,21 @@ func EthernetSwitch() {
 				VlanId:    2,
 			},
 		},
-		StaticHeapSize: 8 * mem.MB, // 静态堆内存大小
+		StaticHeapSize: 8 * mem.MB, // Static heap memory size
 	})
 	if err != nil {
 		panic(err)
 	}
 
-	// 启动交换机
+	// Start switch
 	s.RunSwitch()
 
 	time.Sleep(time.Minute)
 
-	// 停止交换机
+	// Stop switch
 	s.StopSwitch()
 
-	// 停止dpdk
+	// Stop dpdk
 	dpdk.Exit()
 }
 
@@ -326,12 +323,12 @@ func EthernetSwitch() {
 
 ### TODO
 
-- [X] 简易ARP+IPV4+ICMP协议栈
-- [X] KCP协议栈
-- [X] 多网卡支持
-- [X] 路由转发功能
-- [X] NAT功能
-- [X] 网卡多队列支持
-- [X] DHCP功能
-- [ ] PPPOE功能
-- [ ] IPV6支持
+- [X] Simple ARP+IPv4+ICMP Protocol Stack
+- [X] KCP Protocol Stack
+- [X] Multi-NIC Support
+- [X] Routing Forwarding Feature
+- [X] NAT Feature
+- [X] Multi-queue NIC Support
+- [X] DHCP Feature
+- [ ] PPPOE Feature
+- [ ] IPv6 Support

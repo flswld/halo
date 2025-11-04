@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"reflect"
@@ -38,8 +39,8 @@ func ParseLevel(level string) int {
 
 var levelMap = map[int][]byte{
 	DEBUG: []byte("DEBUG"),
-	INFO:  []byte("INFO"),
-	WARN:  []byte("WARN"),
+	INFO:  []byte("INFO "),
+	WARN:  []byte("WARN "),
 	ERROR: []byte("ERROR"),
 }
 
@@ -74,6 +75,10 @@ var (
 	config *Config = nil
 )
 
+func GetLogger() *Logger {
+	return logger
+}
+
 func GetConfig() *Config {
 	return config
 }
@@ -90,15 +95,17 @@ type Config struct {
 	FileTimeCut  bool
 	DisableColor bool
 	EnableJson   bool
+	FullPath     bool
 }
 
 type Logger struct {
-	FileTagMap    map[string]*os.File
-	LastLogTime   time.Time
-	LogInfoChan   chan *LogInfo
-	WriteBuf      []byte
-	WriteCacheNum int32
-	CloseChan     chan struct{}
+	FileTagMap      map[string]*os.File
+	LastLogTime     time.Time
+	LogInfoChan     chan *LogInfo
+	WriteBuf        []byte
+	WriteCacheNum   int32
+	CloseChan       chan struct{}
+	RemoteLogWriter io.Writer
 }
 
 type LogInfo struct {
@@ -130,6 +137,7 @@ func InitLogger(cfg *Config) {
 			FileTimeCut:  true,
 			DisableColor: false,
 			EnableJson:   false,
+			FullPath:     false,
 		}
 	}
 	config = cfg
@@ -153,6 +161,7 @@ func InitLogger(cfg *Config) {
 	logger.WriteBuf = make([]byte, 0)
 	logger.WriteCacheNum = 0
 	logger.CloseChan = make(chan struct{})
+	logger.RemoteLogWriter = nil
 	go logger.doLog()
 }
 
@@ -219,6 +228,7 @@ func (l *Logger) doLog() {
 						logBuf.Write(magenta)
 					}
 					logBuf.Write(leftBracket)
+					logBuf.Write(space)
 					logBuf.Write([]byte(logInfo.FileName))
 					logBuf.Write(colon)
 					logBuf.Write([]byte(strconv.Itoa(logInfo.Line)))
@@ -235,6 +245,7 @@ func (l *Logger) doLog() {
 						logBuf.Write(colon)
 						logBuf.Write([]byte(logInfo.ThreadId))
 					}
+					logBuf.Write(space)
 					logBuf.Write(rightBracket)
 					if !config.DisableColor {
 						logBuf.Write(reset)
@@ -277,6 +288,9 @@ func (l *Logger) writeLog(logData []byte, logTag string, logTime time.Time) {
 		if logTag != "" {
 			l.writeLogFile(logData, logTag)
 		}
+	}
+	if l.RemoteLogWriter != nil {
+		_, _ = l.RemoteLogWriter.Write(logData)
 	}
 	l.WriteBuf = append(l.WriteBuf, logData...)
 	l.WriteCacheNum++
@@ -395,7 +409,7 @@ func formatLog(level int, msg string, param []any) {
 	logInfo.Msg = buf
 	logInfo.Raw = false
 	if config.TrackLine || logFlag.LogLine == "true" {
-		logInfo.FileName, logInfo.Line, logInfo.FuncName = logger.getLineFunc()
+		logInfo.FileName, logInfo.Line, logInfo.FuncName = logger.getLineFunc(config.FullPath)
 		logInfo.TrackLine = true
 	}
 	if config.TrackThread || logFlag.LogThread == "true" {
@@ -493,6 +507,17 @@ func Error(msg string, param ...any) {
 	formatLog(ERROR, msg, param)
 }
 
+func Print(param ...any) {
+	msg := make([]byte, 0, 32)
+	for i := 0; i < len(param); i++ {
+		if i > 0 {
+			msg = append(msg, space...)
+		}
+		msg = append(msg, '%', 'v')
+	}
+	formatLog(DEBUG, string(msg), param)
+}
+
 func Raw(data []byte) {
 	logInfo := logInfoPool.Get().(*LogInfo)
 	logInfo.Time = time.Now()
@@ -520,7 +545,7 @@ func (l *Logger) getGoroutineId() (goroutineId string) {
 	return goroutineId
 }
 
-func (l *Logger) getLineFunc() (fileName string, line int, funcName string) {
+func (l *Logger) getLineFunc(fullPath bool) (fileName string, line int, funcName string) {
 	var pc uintptr
 	var file string
 	var ok bool
@@ -528,9 +553,13 @@ func (l *Logger) getLineFunc() (fileName string, line int, funcName string) {
 	if !ok {
 		return "???", -1, "???"
 	}
-	fileName = path.Base(file)
+	if fullPath {
+		fileName = file
+	} else {
+		fileName = path.Base(file)
+	}
 	funcName = runtime.FuncForPC(pc).Name()
-	split := strings.Split(funcName, ".")
+	split := strings.Split(funcName, "/")
 	if len(split) != 0 {
 		funcName = split[len(split)-1]
 	}

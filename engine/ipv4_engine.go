@@ -157,7 +157,9 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr []byte, ipv4DstA
 	outNetIfIpAddrU := protocol.IpAddrToU(outNetIf.IpAddr)
 	if dstIpAddrU == outNetIfIpAddrU && !i.Config.NatEnable {
 		// 本地回环
-		outNetIf.LoChan <- ethPayload
+		_ethPayload := make([]byte, len(ethPayload))
+		copy(_ethPayload, ethPayload)
+		outNetIf.LoChan <- _ethPayload
 		return true
 	}
 	// SNAT 私网地址 -> 公网地址

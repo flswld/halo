@@ -32,58 +32,23 @@ func DirectDpdk() {
 
 	// 通过EthQueueRxPkt和EthQueueTxPkt方法发送接收原始以太网报文
 	var exit atomic.Bool
-	go func() {
-		cpu.BindCpuCore(9)
+	forward := func(core int, rxPort int, txPort int, queue int) {
+		cpu.BindCpuCore(core)
 		for {
 			if exit.Load() {
 				break
 			}
-			pkt := dpdk.EthQueueRxPkt(0, 0)
+			pkt := dpdk.EthQueueRxPkt(rxPort, queue)
 			if pkt == nil {
 				continue
 			}
-			dpdk.EthQueueTxPkt(1, 0, pkt)
+			dpdk.EthQueueTxPkt(txPort, queue, pkt)
 		}
-	}()
-	go func() {
-		cpu.BindCpuCore(10)
-		for {
-			if exit.Load() {
-				break
-			}
-			pkt := dpdk.EthQueueRxPkt(0, 1)
-			if pkt == nil {
-				continue
-			}
-			dpdk.EthQueueTxPkt(1, 1, pkt)
-		}
-	}()
-	go func() {
-		cpu.BindCpuCore(11)
-		for {
-			if exit.Load() {
-				break
-			}
-			pkt := dpdk.EthQueueRxPkt(1, 0)
-			if pkt == nil {
-				continue
-			}
-			dpdk.EthQueueTxPkt(0, 0, pkt)
-		}
-	}()
-	go func() {
-		cpu.BindCpuCore(12)
-		for {
-			if exit.Load() {
-				break
-			}
-			pkt := dpdk.EthQueueRxPkt(1, 1)
-			if pkt == nil {
-				continue
-			}
-			dpdk.EthQueueTxPkt(0, 1, pkt)
-		}
-	}()
+	}
+	go forward(9, 0, 1, 0)
+	go forward(10, 0, 1, 1)
+	go forward(11, 1, 0, 0)
+	go forward(12, 1, 0, 1)
 	time.Sleep(time.Minute)
 	exit.Store(true)
 	time.Sleep(time.Second)

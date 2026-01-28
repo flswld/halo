@@ -18,30 +18,32 @@ var (
 	MallocFreeFailPanic           = false
 )
 
-type Heap interface {
+type Allocator interface {
 	Malloc(size uint64) unsafe.Pointer
 	Free(p unsafe.Pointer) bool
+	AlignedMalloc(size uint64, align uint64) unsafe.Pointer
+	AlignedFree(p unsafe.Pointer) bool
 	GetAllocSize() uint64
 }
 
-func MallocType[T any](heap Heap, size uint64) *T {
-	p := (*T)(heap.Malloc(size * SizeOf[T]()))
+func MallocType[T any](allocator Allocator, size uint64) *T {
+	p := (*T)(allocator.Malloc(size * SizeOf[T]()))
 	if MallocFreeFailPanic && p == nil {
 		panic("malloc fail")
 	}
 	if DefaultLogWriter != nil {
-		_, _ = DefaultLogWriter.Write([]byte(fmt.Sprintf("[Malloc] heap:%T size:%d ptr:%p\n", heap, size*SizeOf[T](), p)))
+		_, _ = DefaultLogWriter.Write([]byte(fmt.Sprintf("[Malloc] allocator:%T size:%d ptr:%p\n", allocator, size*SizeOf[T](), p)))
 	}
 	return p
 }
 
-func FreeType[T any](heap Heap, t *T) bool {
-	ok := heap.Free(unsafe.Pointer(t))
+func FreeType[T any](allocator Allocator, t *T) bool {
+	ok := allocator.Free(unsafe.Pointer(t))
 	if MallocFreeFailPanic && !ok {
 		panic("free fail")
 	}
 	if DefaultLogWriter != nil {
-		_, _ = DefaultLogWriter.Write([]byte(fmt.Sprintf("[Free] heap:%T ptr:%p\n", heap, unsafe.Pointer(t))))
+		_, _ = DefaultLogWriter.Write([]byte(fmt.Sprintf("[Free] allocator:%T ptr:%p\n", allocator, unsafe.Pointer(t))))
 	}
 	return ok
 }

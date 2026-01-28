@@ -483,19 +483,19 @@ func (i *NetIf) NatAddFlow(lanHostIpAddr []byte, remoteIpAddr []byte, lanHostPor
 	// nat端口分配
 	portAlloc, exist := i.NatPortAlloc.Get(IpAddrHash(_remoteIpAddrU))
 	if !exist {
-		portAlloc = mem.MallocType[PortAlloc](i.StaticHeap, 1)
+		portAlloc = mem.MallocType[PortAlloc](i.StaticAllocator, 1)
 		if portAlloc == nil {
 			return nil
 		}
-		portAlloc.UsePortMap = hashmap.NewHashMap[PortHash, struct{}](i.StaticHeap)
+		portAlloc.UsePortMap = hashmap.NewHashMap[PortHash, struct{}](i.StaticAllocator)
 		if portAlloc.UsePortMap == nil {
-			mem.FreeType[PortAlloc](i.StaticHeap, portAlloc)
+			mem.FreeType[PortAlloc](i.StaticAllocator, portAlloc)
 			return nil
 		}
 		ok := i.NatPortAlloc.Set(IpAddrHash(_remoteIpAddrU), portAlloc)
 		if !ok {
 			portAlloc.UsePortMap.Free()
-			mem.FreeType[PortAlloc](i.StaticHeap, portAlloc)
+			mem.FreeType[PortAlloc](i.StaticAllocator, portAlloc)
 			return nil
 		}
 	}
@@ -524,7 +524,7 @@ func (i *NetIf) NatAddFlow(lanHostIpAddr []byte, remoteIpAddr []byte, lanHostPor
 		LanHostPort:   lanHostPort,
 		Ipv4HeadProto: ipv4HeadProto,
 	}
-	natFlow := mem.MallocType[NatFlow](i.StaticHeap, 1)
+	natFlow := mem.MallocType[NatFlow](i.StaticAllocator, 1)
 	if natFlow == nil {
 		portAlloc.UsePortMap.Del(PortHash(wanPort))
 		return nil
@@ -613,7 +613,7 @@ func (i *NetIf) NatTableClear() {
 					WanPort:       natFlow.WanPort,
 					Ipv4HeadProto: natFlow.Ipv4HeadProto,
 				})
-				mem.FreeType[NatFlow](i.StaticHeap, natFlow)
+				mem.FreeType[NatFlow](i.StaticAllocator, natFlow)
 				portAlloc, exist := i.NatPortAlloc.Get(IpAddrHash(natFlow.RemoteIpAddr))
 				if !exist {
 					return true
@@ -622,7 +622,7 @@ func (i *NetIf) NatTableClear() {
 				if portAlloc.UsePortMap.Len() == 0 {
 					portAlloc.UsePortMap.Free()
 					i.NatPortAlloc.Del(IpAddrHash(natFlow.RemoteIpAddr))
-					mem.FreeType[PortAlloc](i.StaticHeap, portAlloc)
+					mem.FreeType[PortAlloc](i.StaticAllocator, portAlloc)
 				}
 			}
 			return true

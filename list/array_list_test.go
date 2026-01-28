@@ -8,10 +8,10 @@ import (
 )
 
 func TestArrayList(t *testing.T) {
-	goHeap := mem.NewGoHeap()
-	ptr := goHeap.Malloc(1 * mem.GB)
-	staticHeap := mem.NewStaticHeap(ptr, 1*mem.GB)
-	arrayList := NewArrayList[uint64](staticHeap)
+	heapAllocator := mem.GetHeapAllocator()
+	ptr := heapAllocator.Malloc(1 * mem.GB)
+	staticAllocator := mem.NewStaticAllocator(ptr, 1*mem.GB)
+	arrayList := NewArrayList[uint64](staticAllocator)
 	for i := 0; i < 100; i++ {
 		arrayList.Add(uint64(i))
 	}
@@ -21,5 +21,5 @@ func TestArrayList(t *testing.T) {
 		return true
 	})
 	arrayList.Free()
-	goHeap.Free(ptr)
+	heapAllocator.Free(ptr)
 }

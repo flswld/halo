@@ -106,7 +106,7 @@ func EthernetRouter() {
 				EthRxFunc:        func() (pkt []byte) { return dpdk.EthRxPkt(0) }, // 网卡收包方法
 				EthTxFunc:        func(pkt []byte) { dpdk.EthTxPkt(0, pkt) },      // 网卡发包方法
 				BindCpuCore:      0,                                               // 绑定的cpu核心
-				StaticHeapSize:   8 * mem.MB,                                      // 静态堆内存大小
+				StaticMemSize:    8 * mem.MB,                                      // 静态内存大小
 			},
 			{
 				Name:             "wan1",
@@ -210,7 +210,7 @@ func EthernetSwitch() {
 				VlanId:    2,
 			},
 		},
-		StaticHeapSize: 8 * mem.MB, // 静态堆内存大小
+		StaticMemSize: 8 * mem.MB, // 静态内存大小
 	})
 	if err != nil {
 		panic(err)

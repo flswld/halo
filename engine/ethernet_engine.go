@@ -70,14 +70,14 @@ func (s *SwitchPort) HandleEthernet(ethPayload []byte, ethDstMac []byte, ethSrcM
 	s.Switch.SwitchMacAddrLock.RUnlock()
 	if !exist {
 		s.Switch.SwitchMacAddrLock.Lock()
-		srcMacAddr = mem.MallocType[SwitchMacAddr](s.Switch.StaticHeap, 1)
+		srcMacAddr = mem.MallocType[SwitchMacAddr](s.Switch.StaticAllocator, 1)
 		if srcMacAddr == nil {
 			s.Switch.SwitchMacAddrLock.Unlock()
 			return
 		}
 		ok := s.Switch.SwitchMacAddrTable.Set(MacAddrHash(ethSrcMac), srcMacAddr)
 		if !ok {
-			mem.FreeType[SwitchMacAddr](s.Switch.StaticHeap, srcMacAddr)
+			mem.FreeType[SwitchMacAddr](s.Switch.StaticAllocator, srcMacAddr)
 			s.Switch.SwitchMacAddrLock.Unlock()
 			return
 		}
@@ -130,7 +130,7 @@ func (s *Switch) SwitchMacAddrClear() {
 		s.SwitchMacAddrTable.For(func(macAddrHash MacAddrHash, switchMacAddr *SwitchMacAddr) (next bool) {
 			if s.TimeNow > switchMacAddr.CreateTime+300 {
 				s.SwitchMacAddrTable.Del(macAddrHash)
-				mem.FreeType[SwitchMacAddr](s.StaticHeap, switchMacAddr)
+				mem.FreeType[SwitchMacAddr](s.StaticAllocator, switchMacAddr)
 			}
 			return true
 		})

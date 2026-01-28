@@ -42,20 +42,20 @@ func init() {
 	blockSize = SizeOf[block]()
 }
 
-type StaticHeap struct {
+type StaticAllocator struct {
 	allocSize     uint64
 	freeBlockList *block
 }
 
-func NewStaticHeap(memory unsafe.Pointer, size uint64) *StaticHeap {
+func NewStaticAllocator(memory unsafe.Pointer, size uint64) *StaticAllocator {
 	if memory == nil {
 		return nil
 	}
-	headerSize := SizeOf[StaticHeap]()
+	headerSize := SizeOf[StaticAllocator]()
 	if size < headerSize+blockSize {
 		return nil
 	}
-	h := (*StaticHeap)(memory)
+	h := (*StaticAllocator)(memory)
 	b := (*block)(unsafe.Pointer(uintptr(memory) + uintptr(headerSize)))
 	b.header.setSize(size - headerSize - blockSize)
 	b.header.setFree(true)
@@ -68,7 +68,7 @@ func NewStaticHeap(memory unsafe.Pointer, size uint64) *StaticHeap {
 	return h
 }
 
-func (h *StaticHeap) Malloc(size uint64) unsafe.Pointer {
+func (h *StaticAllocator) Malloc(size uint64) unsafe.Pointer {
 	if size == 0 {
 		return nil
 	}
@@ -98,7 +98,7 @@ func (h *StaticHeap) Malloc(size uint64) unsafe.Pointer {
 	return nil
 }
 
-func (h *StaticHeap) Free(p unsafe.Pointer) bool {
+func (h *StaticAllocator) Free(p unsafe.Pointer) bool {
 	if p == nil {
 		return false
 	}
@@ -131,7 +131,7 @@ func (h *StaticHeap) Free(p unsafe.Pointer) bool {
 	return true
 }
 
-func (h *StaticHeap) insertFreeBlock(b *block) {
+func (h *StaticAllocator) insertFreeBlock(b *block) {
 	b.freeNext = h.freeBlockList
 	if h.freeBlockList != nil {
 		h.freeBlockList.freePrev = b
@@ -140,7 +140,7 @@ func (h *StaticHeap) insertFreeBlock(b *block) {
 	h.freeBlockList = b
 }
 
-func (h *StaticHeap) removeFreeBlock(b *block) {
+func (h *StaticAllocator) removeFreeBlock(b *block) {
 	if b.freePrev != nil {
 		b.freePrev.freeNext = b.freeNext
 	} else {
@@ -153,7 +153,15 @@ func (h *StaticHeap) removeFreeBlock(b *block) {
 	b.freePrev = nil
 }
 
-func (h *StaticHeap) GetAllocSize() uint64 {
+func (h *StaticAllocator) AlignedMalloc(size uint64, align uint64) unsafe.Pointer {
+	return nil
+}
+
+func (h *StaticAllocator) AlignedFree(p unsafe.Pointer) bool {
+	return false
+}
+
+func (h *StaticAllocator) GetAllocSize() uint64 {
 	return h.allocSize
 }
 

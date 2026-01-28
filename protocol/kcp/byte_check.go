@@ -1,5 +1,5 @@
-//go:build !xxhash
-// +build !xxhash
+//go:build !cgo
+// +build !cgo
 
 package kcp
 

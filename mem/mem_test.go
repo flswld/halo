@@ -6,8 +6,8 @@ import (
 )
 
 func TestMalloc(t *testing.T) {
-	var goHeap Heap = NewGoHeap()
-	p := MallocType[uint8](goHeap, 8*GB)
+	var heapAllocator Allocator = GetHeapAllocator()
+	p := MallocType[uint8](heapAllocator, 8*GB)
 	for i := 0; i < 8*GB; i++ {
 		v := OffsetType[uint8](p, int64(i))
 		*v = 0xFF
@@ -19,13 +19,13 @@ func TestMalloc(t *testing.T) {
 			panic("???")
 		}
 	}
-	FreeType[uint8](goHeap, p)
+	FreeType[uint8](heapAllocator, p)
 }
 
 func TestMemCpy(t *testing.T) {
-	var goHeap Heap = NewGoHeap()
-	ptr1 := goHeap.Malloc(8 * GB)
-	ptr2 := goHeap.Malloc(8 * GB)
+	var heapAllocator Allocator = GetHeapAllocator()
+	ptr1 := heapAllocator.Malloc(8 * GB)
+	ptr2 := heapAllocator.Malloc(8 * GB)
 	for i := 0; i < 8*GB; i++ {
 		v := (*uint8)(Offset(ptr1, int64(i)))
 		*v = 0xFF
@@ -39,6 +39,6 @@ func TestMemCpy(t *testing.T) {
 			panic("???")
 		}
 	}
-	goHeap.Free(ptr1)
-	goHeap.Free(ptr2)
+	heapAllocator.Free(ptr1)
+	heapAllocator.Free(ptr2)
 }

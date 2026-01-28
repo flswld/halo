@@ -5,9 +5,9 @@ import (
 	"time"
 )
 
-func TestGoHeap(t *testing.T) {
-	var goHeap Heap = NewGoHeap()
-	ptr := goHeap.Malloc(8 * GB)
+func TestHeapAllocator(t *testing.T) {
+	var heapAllocator Allocator = GetHeapAllocator()
+	ptr := heapAllocator.Malloc(8 * GB)
 	for i := 0; i < 8*GB; i++ {
 		v := (*uint8)(Offset(ptr, int64(i)))
 		*v = 0xFF
@@ -19,5 +19,5 @@ func TestGoHeap(t *testing.T) {
 			panic("???")
 		}
 	}
-	goHeap.Free(ptr)
+	heapAllocator.Free(ptr)
 }

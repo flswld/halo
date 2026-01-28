@@ -17,10 +17,10 @@ func (k Key) GetHashCode() uint64 {
 }
 
 func TestHashMap(t *testing.T) {
-	goHeap := mem.NewGoHeap()
-	ptr := goHeap.Malloc(1 * mem.GB)
-	staticHeap := mem.NewStaticHeap(ptr, 1*mem.GB)
-	hashMap := NewHashMap[Key, uint64](staticHeap)
+	heapAllocator := mem.GetHeapAllocator()
+	ptr := heapAllocator.Malloc(1 * mem.GB)
+	staticAllocator := mem.NewStaticAllocator(ptr, 1*mem.GB)
+	hashMap := NewHashMap[Key, uint64](staticAllocator)
 	for i := 0; i < 100; i++ {
 		hashMap.Set(Key(i), uint64(i+10000))
 	}
@@ -35,5 +35,5 @@ func TestHashMap(t *testing.T) {
 		return true
 	})
 	hashMap.Free()
-	goHeap.Free(ptr)
+	heapAllocator.Free(ptr)
 }

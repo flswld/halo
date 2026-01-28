@@ -5,7 +5,7 @@
 int bind_cpu_core(int *core_list, int len) {
     DWORD_PTR mask = 0;
     for (int i = 0; i < len; i++) {
-        mask += 1 << core_list[i];
+        mask |= 1 << core_list[i];
     }
     HANDLE hThread = GetCurrentThread();
     DWORD_PTR ret = SetThreadAffinityMask(hThread, mask);

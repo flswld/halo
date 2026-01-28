@@ -58,7 +58,7 @@ func (i *NetIf) SetArpCache(ipAddr []byte, macAddr []byte) {
 	ipAddrU := protocol.IpAddrToU(ipAddr)
 	arpCache, exist := i.ArpCacheTable.Get(IpAddrHash(ipAddrU))
 	if !exist {
-		arpCache = mem.MallocType[ArpCache](i.StaticHeap, 1)
+		arpCache = mem.MallocType[ArpCache](i.StaticAllocator, 1)
 		if arpCache == nil {
 			return
 		}
@@ -126,7 +126,7 @@ func (i *NetIf) ArpTableClear() {
 		i.ArpCacheTable.For(func(key IpAddrHash, value *ArpCache) (next bool) {
 			if i.Router.TimeNow > value.ExpTime {
 				i.ArpCacheTable.Del(key)
-				mem.FreeType[ArpCache](i.StaticHeap, value)
+				mem.FreeType[ArpCache](i.StaticAllocator, value)
 			}
 			return true
 		})

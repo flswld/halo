@@ -6,13 +6,13 @@ import (
 	"unsafe"
 )
 
-func TestStaticHeap(t *testing.T) {
-	var goHeap Heap = NewGoHeap()
-	p := goHeap.Malloc(8 * GB)
-	var staticHeap Heap = NewStaticHeap(p, 8*GB)
+func TestStaticAllocator(t *testing.T) {
+	var heapAllocator Allocator = GetHeapAllocator()
+	p := heapAllocator.Malloc(8 * GB)
+	var staticAllocator Allocator = NewStaticAllocator(p, 8*GB)
 	ptrList := make([]unsafe.Pointer, 4*1024)
 	for i := 0; i < len(ptrList); i++ {
-		ptr := staticHeap.Malloc(1 * MB)
+		ptr := staticAllocator.Malloc(1 * MB)
 		if ptr == nil {
 			panic("???")
 		}
@@ -30,10 +30,10 @@ func TestStaticHeap(t *testing.T) {
 				panic("???")
 			}
 		}
-		ok := staticHeap.Free(ptr)
+		ok := staticAllocator.Free(ptr)
 		if !ok {
 			panic("???")
 		}
 	}
-	goHeap.Free(p)
+	heapAllocator.Free(p)
 }

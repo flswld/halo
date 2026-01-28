@@ -303,7 +303,7 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 				goto dhcp_nak
 			}
 			if !exist {
-				dhcpLease = mem.MallocType[DhcpLease](i.StaticHeap, 1)
+				dhcpLease = mem.MallocType[DhcpLease](i.StaticAllocator, 1)
 				if dhcpLease == nil {
 					goto dhcp_nak
 				}
@@ -339,7 +339,7 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 			if exist {
 				Log(fmt.Sprintf("dhcp server release ip: %v, name: %v, mac: % 02x\n", dhcpLease.IpAddr, dhcpLease.HostName, clientMacAddr))
 				i.DhcpLeaseTable.Del(IpAddrHash(ipv4SrcAddrU))
-				mem.FreeType[DhcpLease](i.StaticHeap, dhcpLease)
+				mem.FreeType[DhcpLease](i.StaticAllocator, dhcpLease)
 			}
 		default:
 		}
@@ -470,7 +470,7 @@ func (i *NetIf) DhcpLeaseClear() {
 		i.DhcpLeaseTable.For(func(ipAddrU IpAddrHash, dhcpLease *DhcpLease) (next bool) {
 			if i.Router.TimeNow > dhcpLease.ExpTime {
 				i.DhcpLeaseTable.Del(ipAddrU)
-				mem.FreeType[DhcpLease](i.StaticHeap, dhcpLease)
+				mem.FreeType[DhcpLease](i.StaticAllocator, dhcpLease)
 			}
 			return true
 		})

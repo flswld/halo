@@ -19,10 +19,10 @@ type MapKey interface {
 }
 
 type HashMap[K MapKey, V any] struct {
-	bucket *list.ArrayList[*entry[K, V]]
-	load   int
-	len    int
-	heap   mem.Heap
+	bucket    *list.ArrayList[*entry[K, V]]
+	load      int
+	len       int
+	allocator mem.Allocator
 }
 
 type entry[K MapKey, V any] struct {
@@ -32,21 +32,21 @@ type entry[K MapKey, V any] struct {
 	next  *entry[K, V]
 }
 
-func NewHashMap[K MapKey, V any](heap mem.Heap) *HashMap[K, V] {
-	return NewHashMapWithCap[K, V](heap, initBucketSize)
+func NewHashMap[K MapKey, V any](allocator mem.Allocator) *HashMap[K, V] {
+	return NewHashMapWithCap[K, V](allocator, initBucketSize)
 }
 
-func NewHashMapWithCap[K MapKey, V any](heap mem.Heap, cap int) *HashMap[K, V] {
+func NewHashMapWithCap[K MapKey, V any](allocator mem.Allocator, cap int) *HashMap[K, V] {
 	if cap < initBucketSize {
 		cap = initBucketSize
 	}
-	m := mem.MallocType[HashMap[K, V]](heap, 1)
+	m := mem.MallocType[HashMap[K, V]](allocator, 1)
 	if m == nil {
 		return nil
 	}
-	m.bucket = list.NewArrayListWithCap[*entry[K, V]](heap, cap)
+	m.bucket = list.NewArrayListWithCap[*entry[K, V]](allocator, cap)
 	if m.bucket == nil {
-		mem.FreeType[HashMap[K, V]](heap, m)
+		mem.FreeType[HashMap[K, V]](allocator, m)
 		return nil
 	}
 	for i := 0; i < cap; i++ {
@@ -54,7 +54,7 @@ func NewHashMapWithCap[K MapKey, V any](heap mem.Heap, cap int) *HashMap[K, V] {
 	}
 	m.load = 0
 	m.len = 0
-	m.heap = heap
+	m.allocator = allocator
 	return m
 }
 
@@ -81,7 +81,7 @@ func (m *HashMap[K, V]) Set(key K, value V) bool {
 	i := key.GetHashCode() % uint64(m.bucket.Len())
 	e := m.bucket.Get(int(i))
 	if e == nil {
-		ne := mem.MallocType[entry[K, V]](m.heap, 1)
+		ne := mem.MallocType[entry[K, V]](m.allocator, 1)
 		if ne == nil {
 			return false
 		}
@@ -101,7 +101,7 @@ func (m *HashMap[K, V]) Set(key K, value V) bool {
 			return true
 		}
 		if e.next == nil {
-			ne := mem.MallocType[entry[K, V]](m.heap, 1)
+			ne := mem.MallocType[entry[K, V]](m.allocator, 1)
 			if ne == nil {
 				return false
 			}
@@ -121,7 +121,7 @@ func (m *HashMap[K, V]) Set(key K, value V) bool {
 }
 
 func (m *HashMap[K, V]) Grow() {
-	b := list.NewArrayListWithCap[*entry[K, V]](m.heap, m.bucket.Len()*2)
+	b := list.NewArrayListWithCap[*entry[K, V]](m.allocator, m.bucket.Len()*2)
 	if b == nil {
 		return
 	}
@@ -135,7 +135,7 @@ func (m *HashMap[K, V]) Grow() {
 		i := key.GetHashCode() % uint64(b.Len())
 		e := b.Get(int(i))
 		if e == nil {
-			ne := mem.MallocType[entry[K, V]](m.heap, 1)
+			ne := mem.MallocType[entry[K, V]](m.allocator, 1)
 			if ne == nil {
 				fail = true
 				return false
@@ -156,7 +156,7 @@ func (m *HashMap[K, V]) Grow() {
 				return true
 			}
 			if e.next == nil {
-				ne := mem.MallocType[entry[K, V]](m.heap, 1)
+				ne := mem.MallocType[entry[K, V]](m.allocator, 1)
 				if ne == nil {
 					fail = true
 					return false
@@ -180,7 +180,7 @@ func (m *HashMap[K, V]) Grow() {
 				}
 				ee := e
 				e = e.next
-				mem.FreeType[entry[K, V]](m.heap, ee)
+				mem.FreeType[entry[K, V]](m.allocator, ee)
 			}
 			return true
 		})
@@ -205,7 +205,7 @@ func (m *HashMap[K, V]) Del(key K) {
 		if e.next == nil {
 			m.load--
 		}
-		mem.FreeType[entry[K, V]](m.heap, e)
+		mem.FreeType[entry[K, V]](m.allocator, e)
 		m.len--
 		return
 	}
@@ -217,7 +217,7 @@ func (m *HashMap[K, V]) Del(key K) {
 			if e.next != nil {
 				e.next.front = e.front
 			}
-			mem.FreeType[entry[K, V]](m.heap, e)
+			mem.FreeType[entry[K, V]](m.allocator, e)
 			m.len--
 			return
 		}
@@ -257,7 +257,7 @@ func (m *HashMap[K, V]) Clear() {
 			}
 			ee := e
 			e = e.next
-			mem.FreeType[entry[K, V]](m.heap, ee)
+			mem.FreeType[entry[K, V]](m.allocator, ee)
 		}
 		return true
 	})
@@ -270,7 +270,7 @@ func (m *HashMap[K, V]) Clear() {
 func (m *HashMap[K, V]) Free() {
 	m.Clear()
 	m.bucket.Free()
-	mem.FreeType[HashMap[K, V]](m.heap, m)
+	mem.FreeType[HashMap[K, V]](m.allocator, m)
 }
 
 func (m *HashMap[K, V]) MarshalJSON() ([]byte, error) {

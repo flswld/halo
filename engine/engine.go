@@ -71,7 +71,7 @@ type NetIfConfig struct {
 	EthRxFunc          func() (pkt []byte)          // 网卡收包方法
 	EthTxFunc          func(pkt []byte)             // 网卡发包方法
 	BindCpuCore        int                          // 绑定的cpu核心
-	StaticHeapSize     int                          // 静态堆内存大小
+	StaticMemSize      int                          // 静态内存大小
 }
 
 // NatPortMappingEntryConfig NAT端口映射配置
@@ -113,8 +113,8 @@ type NetIf struct {
 	DhcpClientTransactionId []byte                                     // dhcp客户端事务id
 	UdpServiceMap           map[uint16]UdpHandleFunc                   // udp服务集合 key:端口 value:处理函数
 	TcpServiceMap           map[uint16]TcpHandleFunc                   // tcp服务集合 key:端口 value:处理函数
-	StaticHeapPtr           unsafe.Pointer                             // 静态堆内存指针
-	StaticHeap              mem.Heap                                   // 静态堆内存
+	StaticAllocatorPtr      unsafe.Pointer                             // 静态内存分配器指针
+	StaticAllocator         mem.Allocator                              // 静态内存分配器
 }
 
 // Router 路由器
@@ -140,7 +140,7 @@ func InitRouter(config *RouterConfig) (*Router, error) {
 		TimeNow:        uint32(time.Now().Unix()),
 	}
 	// 网卡列表
-	cHeap := mem.NewCHeap()
+	heapAllocator := mem.GetHeapAllocator()
 	for _, netIfConfig := range config.NetIfList {
 		macAddr, err := protocol.ParseMacAddr(netIfConfig.MacAddr)
 		if err != nil {
@@ -167,11 +167,11 @@ func InitRouter(config *RouterConfig) (*Router, error) {
 				return nil, err
 			}
 		}
-		if netIfConfig.StaticHeapSize == 0 {
-			netIfConfig.StaticHeapSize = 8 * mem.MB
+		if netIfConfig.StaticMemSize == 0 {
+			netIfConfig.StaticMemSize = 8 * mem.MB
 		}
-		staticHeapPtr := cHeap.Malloc(uint64(netIfConfig.StaticHeapSize))
-		staticHeap := mem.NewStaticHeap(staticHeapPtr, uint64(netIfConfig.StaticHeapSize))
+		staticAllocatorPtr := heapAllocator.Malloc(uint64(netIfConfig.StaticMemSize))
+		staticAllocator := mem.NewStaticAllocator(staticAllocatorPtr, uint64(netIfConfig.StaticMemSize))
 		netIf := &NetIf{
 			Config:                  netIfConfig,
 			MacAddr:                 macAddr,
@@ -180,18 +180,18 @@ func InitRouter(config *RouterConfig) (*Router, error) {
 			EthTxBuffer:             make([]byte, 0, 1514),
 			LoChan:                  make(chan []byte, 1024),
 			Router:                  r,
-			ArpCacheTable:           hashmap.NewHashMap[IpAddrHash, *ArpCache](staticHeap),
-			NatFlowTable:            hashmap.NewHashMap[NatFlowHash, *NatFlow](staticHeap),
-			NatWanFlowTable:         hashmap.NewHashMap[NatWanFlowHash, *NatFlow](staticHeap),
-			NatPortAlloc:            hashmap.NewHashMap[IpAddrHash, *PortAlloc](staticHeap),
+			ArpCacheTable:           hashmap.NewHashMap[IpAddrHash, *ArpCache](staticAllocator),
+			NatFlowTable:            hashmap.NewHashMap[NatFlowHash, *NatFlow](staticAllocator),
+			NatWanFlowTable:         hashmap.NewHashMap[NatWanFlowHash, *NatFlow](staticAllocator),
+			NatPortAlloc:            hashmap.NewHashMap[IpAddrHash, *PortAlloc](staticAllocator),
 			NatPortMappingTable:     make([]*NatPortMappingEntry, 0),
 			DnsServerAddr:           dnsServerAddr,
-			DhcpLeaseTable:          hashmap.NewHashMap[IpAddrHash, *DhcpLease](staticHeap),
+			DhcpLeaseTable:          hashmap.NewHashMap[IpAddrHash, *DhcpLease](staticAllocator),
 			DhcpClientTransactionId: nil,
 			UdpServiceMap:           make(map[uint16]UdpHandleFunc),
 			TcpServiceMap:           make(map[uint16]TcpHandleFunc),
-			StaticHeapPtr:           staticHeapPtr,
-			StaticHeap:              staticHeap,
+			StaticAllocatorPtr:      staticAllocatorPtr,
+			StaticAllocator:         staticAllocator,
 		}
 		for _, natPortMappingEntryConfig := range netIfConfig.NatPortMappingList {
 			lanHostIpAddr, err := protocol.ParseIpAddr(natPortMappingEntryConfig.LanHostIpAddr)
@@ -292,9 +292,9 @@ func (r *Router) GetNetIf(name string) *NetIf {
 func (r *Router) StopRouter() {
 	r.Stop.Store(true)
 	r.StopWaitGroup.Wait()
-	cHeap := mem.NewCHeap()
+	heapAllocator := mem.GetHeapAllocator()
 	for _, netIf := range r.NetIfMap {
-		cHeap.Free(netIf.StaticHeapPtr)
+		heapAllocator.Free(netIf.StaticAllocatorPtr)
 	}
 }
 
@@ -357,7 +357,7 @@ type SwitchPortConfig struct {
 // SwitchConfig 交换机配置
 type SwitchConfig struct {
 	SwitchPortList []*SwitchPortConfig // 端口列表
-	StaticHeapSize int                 // 静态堆内存大小
+	StaticMemSize  int                 // 静态内存大小
 }
 
 // SwitchPort 交换机端口
@@ -376,24 +376,24 @@ type Switch struct {
 	SwitchPortMap      map[string]*SwitchPort                        // 交换机端口集合 key:端口名 value:端口实例
 	SwitchMacAddrTable *hashmap.HashMap[MacAddrHash, *SwitchMacAddr] // 交换机mac地址表 key:mac地址 value:地址信息
 	SwitchMacAddrLock  sync.RWMutex                                  // 交换机mac地址锁
-	StaticHeapPtr      unsafe.Pointer                                // 静态堆内存指针
-	StaticHeap         mem.Heap                                      // 静态堆内存
+	StaticAllocatorPtr unsafe.Pointer                                // 静态内存分配器指针
+	StaticAllocator    mem.Allocator                                 // 静态内存分配器
 	TimeNow            uint32                                        // 当前毫秒时间戳
 }
 
 func InitSwitch(config *SwitchConfig) (*Switch, error) {
-	if config.StaticHeapSize == 0 {
-		config.StaticHeapSize = 8 * mem.MB
+	if config.StaticMemSize == 0 {
+		config.StaticMemSize = 8 * mem.MB
 	}
-	cHeap := mem.NewCHeap()
-	staticHeapPtr := cHeap.Malloc(uint64(config.StaticHeapSize))
-	staticHeap := mem.NewStaticHeap(staticHeapPtr, uint64(config.StaticHeapSize))
+	heapAllocator := mem.GetHeapAllocator()
+	staticAllocatorPtr := heapAllocator.Malloc(uint64(config.StaticMemSize))
+	staticAllocator := mem.NewStaticAllocator(staticAllocatorPtr, uint64(config.StaticMemSize))
 	s := &Switch{
 		Config:             config,
 		SwitchPortMap:      make(map[string]*SwitchPort),
-		SwitchMacAddrTable: hashmap.NewHashMap[MacAddrHash, *SwitchMacAddr](staticHeap),
-		StaticHeapPtr:      staticHeapPtr,
-		StaticHeap:         staticHeap,
+		SwitchMacAddrTable: hashmap.NewHashMap[MacAddrHash, *SwitchMacAddr](staticAllocator),
+		StaticAllocatorPtr: staticAllocatorPtr,
+		StaticAllocator:    staticAllocator,
 		TimeNow:            uint32(time.Now().Unix()),
 	}
 	for _, switchPortConfig := range config.SwitchPortList {
@@ -438,8 +438,8 @@ func (s *Switch) GetSwitchPort(name string) *SwitchPort {
 func (s *Switch) StopSwitch() {
 	s.Stop.Store(true)
 	s.StopWaitGroup.Wait()
-	cHeap := mem.NewCHeap()
-	cHeap.Free(s.StaticHeapPtr)
+	heapAllocator := mem.GetHeapAllocator()
+	heapAllocator.Free(s.StaticAllocatorPtr)
 }
 
 func (s *SwitchPort) PacketHandle() {
@@ -466,7 +466,7 @@ type Wire struct {
 }
 
 func NewWire(idleSleep bool) *Wire {
-	memory := new(mem.CHeap).Malloc(mem.SizeOf[mem.RingBuffer]() + 8*mem.MB)
+	memory := mem.GetHeapAllocator().Malloc(mem.SizeOf[mem.RingBuffer]() + 8*mem.MB)
 	ringBuffer := mem.RingBufferCreate(memory, uint32(mem.SizeOf[mem.RingBuffer]()+8*mem.MB))
 	return &Wire{
 		Memory:     memory,
@@ -494,5 +494,5 @@ func (w *Wire) Tx(pkt []byte) {
 
 func (w *Wire) Destroy() {
 	mem.RingBufferDestroy(w.RingBuffer)
-	new(mem.CHeap).Free(w.Memory)
+	mem.GetHeapAllocator().Free(w.Memory)
 }

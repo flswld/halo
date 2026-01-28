@@ -12,32 +12,32 @@ const (
 )
 
 type ArrayList[T any] struct {
-	data *T
-	len  int
-	cap  int
-	heap mem.Heap
+	data      *T
+	len       int
+	cap       int
+	allocator mem.Allocator
 }
 
-func NewArrayList[T any](heap mem.Heap) *ArrayList[T] {
-	return NewArrayListWithCap[T](heap, initCap)
+func NewArrayList[T any](allocator mem.Allocator) *ArrayList[T] {
+	return NewArrayListWithCap[T](allocator, initCap)
 }
 
-func NewArrayListWithCap[T any](heap mem.Heap, cap int) *ArrayList[T] {
+func NewArrayListWithCap[T any](allocator mem.Allocator, cap int) *ArrayList[T] {
 	if cap < initCap {
 		cap = initCap
 	}
-	a := mem.MallocType[ArrayList[T]](heap, 1)
+	a := mem.MallocType[ArrayList[T]](allocator, 1)
 	if a == nil {
 		return nil
 	}
-	a.data = mem.MallocType[T](heap, uint64(cap))
+	a.data = mem.MallocType[T](allocator, uint64(cap))
 	if a.data == nil {
-		mem.FreeType[ArrayList[T]](heap, a)
+		mem.FreeType[ArrayList[T]](allocator, a)
 		return nil
 	}
 	a.len = 0
 	a.cap = cap
-	a.heap = heap
+	a.allocator = allocator
 	return a
 }
 
@@ -47,12 +47,12 @@ func (a *ArrayList[T]) Len() int {
 
 func (a *ArrayList[T]) Add(value T) bool {
 	if a.len >= a.cap {
-		data := mem.MallocType[T](a.heap, uint64(a.cap*2))
+		data := mem.MallocType[T](a.allocator, uint64(a.cap*2))
 		if data == nil {
 			return false
 		}
 		mem.MemCpyType[T](data, a.data, uint64(a.cap))
-		mem.FreeType[T](a.heap, a.data)
+		mem.FreeType[T](a.allocator, a.data)
 		a.data = data
 		a.cap *= 2
 	}
@@ -98,8 +98,8 @@ func (a *ArrayList[T]) For(fn func(index int, value T) (next bool)) {
 }
 
 func (a *ArrayList[T]) Free() {
-	mem.FreeType[T](a.heap, a.data)
-	mem.FreeType[ArrayList[T]](a.heap, a)
+	mem.FreeType[T](a.allocator, a.data)
+	mem.FreeType[ArrayList[T]](a.allocator, a)
 }
 
 func (a *ArrayList[T]) MarshalJSON() ([]byte, error) {

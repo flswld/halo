@@ -9,6 +9,7 @@ import (
 	"github.com/flswld/halo/engine"
 	"github.com/flswld/halo/logger"
 	"github.com/flswld/halo/mem"
+	"github.com/flswld/halo/pcap"
 	"github.com/flswld/halo/protocol"
 	"github.com/flswld/halo/protocol/kcp"
 )
@@ -610,7 +611,7 @@ func KcpServerClient() {
 	dpdk.Exit()
 }
 
-// MagicPacketModifier 魔法改包器
+// MagicPacketModifier 魔法(HuLuan)改包器
 func MagicPacketModifier() {
 	// 启动dpdk
 	dpdk.Run(&dpdk.Config{
@@ -710,4 +711,82 @@ func MagicPacketModifier() {
 
 	// 停止dpdk
 	dpdk.Exit()
+}
+
+// UsePcapDev 使用pcap设备
+func UsePcapDev() {
+	logger.InitLogger(nil)
+	defer logger.CloseLogger()
+
+	// 启动pcap设备
+	devList, err := pcap.FindAllDevs()
+	if err != nil {
+		panic(err)
+	}
+	devName := ""
+	for _, dev := range devList {
+		if dev.Description == "Realtek PCIe GbE Family Controller" {
+			devName = dev.Name
+		}
+	}
+	if devName == "" {
+		panic("dev not found")
+	}
+	pcapHandle, err := pcap.OpenLive(devName, 65536, true, pcap.BlockForever)
+	if err != nil {
+		panic(err)
+	}
+	devRxFunc := func() (pkt []byte) {
+		data, ci, err := pcapHandle.ReadPacketData()
+		_ = ci
+		if err != nil {
+			logger.Error("pcap handle read packet error: %v", err)
+			return nil
+		}
+		return data
+	}
+	devTxFunc := func(pkt []byte) {
+		err := pcapHandle.WritePacketData(pkt)
+		if err != nil {
+			logger.Error("pcap handle write packet error: %v", err)
+			return
+		}
+	}
+
+	// 初始化路由器
+	protocol.CheckSumEnable = true
+	r, err := engine.InitRouter(&engine.RouterConfig{
+		NetIfList: []*engine.NetIfConfig{
+			{
+				Name:        "eth0",
+				MacAddr:     "AA:AA:AA:AA:AA:AA",
+				IpAddr:      "192.168.100.100",
+				NetworkMask: "255.255.255.0",
+				EthRxFunc:   devRxFunc,
+				EthTxFunc:   devTxFunc,
+			},
+		},
+		RouteList: []*engine.RouteEntryConfig{
+			{
+				DstIpAddr:   "0.0.0.0",
+				NetworkMask: "0.0.0.0",
+				NextHop:     "192.168.100.1",
+				NetIf:       "eth0",
+			},
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// 启动路由器
+	r.RunRouter()
+
+	r.GetNetIf("eth0").Ping([]byte{192, 168, 100, 1}, 3)
+
+	// 停止路由器
+	r.StopRouter()
+
+	// 停止pcap设备
+	pcapHandle.Close()
 }

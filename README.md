@@ -1,15 +1,109 @@
+<p align="center"><a href="https://github.com/flswld/halo" target="_blank"><img src="docs/logo.png"></a></p>
+
+<p align="center">
+<a href="https://pkg.go.dev/github.com/flswld/halo"><img src="https://pkg.go.dev/badge/github.com/flswld/halo" alt="GoDoc"></a>
+<a href="https://goreportcard.com/report/github.com/flswld/halo"><img src="https://goreportcard.com/badge/github.com/flswld/halo" alt="Go Report Card"></a>
+<a href="https://github.com/flswld/halo/blob/main/LICENSE"><img src="https://img.shields.io/github/license/flswld/halo" alt="License"></a>
+</p>
+
+Translations: [English](README-EN.md) | [简体中文](README.md)
+
 # halo
 
-[English](README-EN.md)
-***
+Golang高性能轻量级网络包收发框架
 
-## Golang高性能轻量级网络包收发框架
+### 特性
 
 * 网卡单个队列发包性能可超过10Mpps
 * 完整的路由器协议栈实现
 * 全平台开箱即用的工具包：`logger(日志)`、`cpu(协程绑核/自旋锁)`、`mem(内存分配器/环状缓冲区)`、`hashmap/list(自定义内存分配器)`
 
-### dpdk环境搭建
+## 环境搭建
+
+### 想在Windows/macOS平台快速体验？现已加入Npcap/libpcap驱动支持！快去安装Wireshark吧。
+
+```go
+// UsePcapDev 使用pcap设备
+func UsePcapDev() {
+	logger.InitLogger(nil)
+	defer logger.CloseLogger()
+
+	// 启动pcap设备
+	devList, err := pcap.FindAllDevs()
+	if err != nil {
+		panic(err)
+	}
+	devName := ""
+	for _, dev := range devList {
+		if dev.Description == "Realtek PCIe GbE Family Controller" {
+			devName = dev.Name
+		}
+	}
+	if devName == "" {
+		panic("dev not found")
+	}
+	pcapHandle, err := pcap.OpenLive(devName, 65536, true, pcap.BlockForever)
+	if err != nil {
+		panic(err)
+	}
+	devRxFunc := func() (pkt []byte) {
+		data, ci, err := pcapHandle.ReadPacketData()
+		_ = ci
+		if err != nil {
+			logger.Error("pcap handle read packet error: %v", err)
+			return nil
+		}
+		return data
+	}
+	devTxFunc := func(pkt []byte) {
+		err := pcapHandle.WritePacketData(pkt)
+		if err != nil {
+			logger.Error("pcap handle write packet error: %v", err)
+			return
+		}
+	}
+
+	// 初始化路由器
+	protocol.CheckSumEnable = true
+	r, err := engine.InitRouter(&engine.RouterConfig{
+		NetIfList: []*engine.NetIfConfig{
+			{
+				Name:        "eth0",
+				MacAddr:     "AA:AA:AA:AA:AA:AA",
+				IpAddr:      "192.168.100.100",
+				NetworkMask: "255.255.255.0",
+				EthRxFunc:   devRxFunc,
+				EthTxFunc:   devTxFunc,
+			},
+		},
+		RouteList: []*engine.RouteEntryConfig{
+			{
+				DstIpAddr:   "0.0.0.0",
+				NetworkMask: "0.0.0.0",
+				NextHop:     "192.168.100.1",
+				NetIf:       "eth0",
+			},
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// 启动路由器
+	r.RunRouter()
+
+	r.GetNetIf("eth0").Ping([]byte{192, 168, 100, 1}, 3)
+
+	// 停止路由器
+	r.StopRouter()
+
+	// 停止pcap设备
+	pcapHandle.Close()
+}
+
+```
+
+### linux dpdk 环境搭建
 
 ```shell
 # 建议使用Ubuntu20.04
@@ -60,18 +154,16 @@ mount -t hugetlbfs none /mnt/huge_1G -o pagesize=1G
 
 ```
 
-### 如何使用
+## 如何使用
 
 ```shell
 go get github.com/flswld/halo
 
 ```
 
-### 使用示例
+### 代码示例
 
 ```go
-// 详见example/example.go
-
 // DirectDpdk 直接使用dpdk收发网络报文
 func DirectDpdk() {
 	// 启动dpdk
@@ -91,58 +183,23 @@ func DirectDpdk() {
 
 	// 通过EthQueueRxPkt和EthQueueTxPkt方法发送接收原始以太网报文
 	var exit atomic.Bool
-	go func() {
-		cpu.BindCpuCore(9)
+	forward := func(core int, rxPort int, txPort int, queue int) {
+		cpu.BindCpuCore(core)
 		for {
 			if exit.Load() {
 				break
 			}
-			pkt := dpdk.EthQueueRxPkt(0, 0)
+			pkt := dpdk.EthQueueRxPkt(rxPort, queue)
 			if pkt == nil {
 				continue
 			}
-			dpdk.EthQueueTxPkt(1, 0, pkt)
+			dpdk.EthQueueTxPkt(txPort, queue, pkt)
 		}
-	}()
-	go func() {
-		cpu.BindCpuCore(10)
-		for {
-			if exit.Load() {
-				break
-			}
-			pkt := dpdk.EthQueueRxPkt(0, 1)
-			if pkt == nil {
-				continue
-			}
-			dpdk.EthQueueTxPkt(1, 1, pkt)
-		}
-	}()
-	go func() {
-		cpu.BindCpuCore(11)
-		for {
-			if exit.Load() {
-				break
-			}
-			pkt := dpdk.EthQueueRxPkt(1, 0)
-			if pkt == nil {
-				continue
-			}
-			dpdk.EthQueueTxPkt(0, 0, pkt)
-		}
-	}()
-	go func() {
-		cpu.BindCpuCore(12)
-		for {
-			if exit.Load() {
-				break
-			}
-			pkt := dpdk.EthQueueRxPkt(1, 1)
-			if pkt == nil {
-				continue
-			}
-			dpdk.EthQueueTxPkt(0, 1, pkt)
-		}
-	}()
+	}
+	go forward(9, 0, 1, 0)
+	go forward(10, 0, 1, 1)
+	go forward(11, 1, 0, 0)
+	go forward(12, 1, 0, 1)
 	time.Sleep(time.Minute)
 	exit.Store(true)
 	time.Sleep(time.Second)
@@ -200,7 +257,7 @@ func EthernetRouter() {
 				EthRxFunc:        func() (pkt []byte) { return dpdk.EthRxPkt(0) }, // 网卡收包方法
 				EthTxFunc:        func(pkt []byte) { dpdk.EthTxPkt(0, pkt) },      // 网卡发包方法
 				BindCpuCore:      0,                                               // 绑定的cpu核心
-				StaticHeapSize:   8 * mem.MB,                                      // 静态堆内存大小
+				StaticMemSize:    8 * mem.MB,                                      // 静态内存大小
 			},
 			{
 				Name:             "wan1",
@@ -304,7 +361,7 @@ func EthernetSwitch() {
 				VlanId:    2,
 			},
 		},
-		StaticHeapSize: 8 * mem.MB, // 静态堆内存大小
+		StaticMemSize: 8 * mem.MB, // 静态内存大小
 	})
 	if err != nil {
 		panic(err)
@@ -324,7 +381,7 @@ func EthernetSwitch() {
 
 ```
 
-### TODO
+## TODO
 
 - [X] 简易ARP+IPV4+ICMP协议栈
 - [X] KCP协议栈
@@ -335,3 +392,14 @@ func EthernetSwitch() {
 - [X] DHCP功能
 - [ ] PPPOE功能
 - [ ] IPV6支持
+- [ ] 轻量级TCP协议栈支持
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=flswld%2Fhalo&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=flswld/halo&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=flswld/halo&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=flswld/halo&type=date&legend=top-left" />
+ </picture>
+</a>

@@ -40,6 +40,11 @@ type pcapPkthdr struct {
 	Caplen uint32
 	Len    uint32
 }
+type PcapSendQueue struct {
+	Maxlen uint32
+	Len    uint32
+	Buffer uintptr
+}
 type pcapTPtr uintptr
 type pcapBpfInstruction struct {
 	Code uint16

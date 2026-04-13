@@ -129,6 +129,10 @@ var (
 	pcapFreealldevsPtr,
 	pcapFindalldevsPtr,
 	pcapSendpacketPtr,
+	pcapSendqueueAllocPtr,
+	pcapSendqueueQueuePtr,
+	pcapSendqueueTransmitPtr,
+	pcapSendqueueDestroyPtr,
 	pcapSetdirectionPtr,
 	pcapSnapshotPtr,
 	pcapTstampTypeValToNamePtr,
@@ -221,6 +225,10 @@ func LoadWinPCAP() error {
 	pcapFreealldevsPtr = mustLoad("pcap_freealldevs")
 	pcapFindalldevsPtr = mustLoad("pcap_findalldevs")
 	pcapSendpacketPtr = mustLoad("pcap_sendpacket")
+	pcapSendqueueAllocPtr = mustLoad("pcap_sendqueue_alloc")
+	pcapSendqueueQueuePtr = mustLoad("pcap_sendqueue_queue")
+	pcapSendqueueTransmitPtr = mustLoad("pcap_sendqueue_transmit")
+	pcapSendqueueDestroyPtr = mustLoad("pcap_sendqueue_destroy")
 	pcapSetdirectionPtr = mustLoad("pcap_setdirection")
 	pcapSnapshotPtr = mustLoad("pcap_snapshot")
 	// libpcap <1.2 doesn't have pcap_*_tstamp_* functions
@@ -658,6 +666,31 @@ func (p *Handle) pcapSendpacket(data []byte) error {
 		return p.pcapGeterr()
 	}
 	return nil
+}
+
+func (p *Handle) PcapSendqueueAlloc(memsize uint32) *PcapSendQueue {
+	ret, _, _ := syscall.Syscall(pcapSendqueueAllocPtr, 1, uintptr(memsize), uintptr(0), uintptr(0))
+	return (*PcapSendQueue)(unsafe.Pointer(ret))
+}
+
+func (p *Handle) PcapSendqueueQueue(queue *PcapSendQueue, data []byte) int32 {
+	var header pcapPkthdr
+	header.Caplen = uint32(len(data))
+	header.Len = uint32(len(data))
+	var pinner runtime.Pinner
+	pinner.Pin(&header)
+	ret, _, _ := syscall.Syscall(pcapSendqueueQueuePtr, 3, uintptr(unsafe.Pointer(queue)), uintptr(unsafe.Pointer(&header)), uintptr(unsafe.Pointer(&data[0])))
+	pinner.Unpin()
+	return int32(ret)
+}
+
+func (p *Handle) PcapSendqueueTransmit(queue *PcapSendQueue) uint32 {
+	ret, _, _ := syscall.Syscall(pcapSendqueueTransmitPtr, 3, uintptr(p.cptr), uintptr(unsafe.Pointer(queue)), uintptr(0))
+	return uint32(ret)
+}
+
+func (p *Handle) PcapSendqueueDestroy(queue *PcapSendQueue) {
+	_, _, _ = syscall.Syscall(pcapSendqueueDestroyPtr, 1, uintptr(unsafe.Pointer(queue)), uintptr(0), uintptr(0))
 }
 
 func (p *Handle) pcapSetdirection(direction Direction) error {

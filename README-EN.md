@@ -46,11 +46,15 @@ func UsePcapDev() {
 	if err != nil {
 		panic(err)
 	}
+	selfMacAddr, _ := protocol.ParseMacAddr("AA:AA:AA:AA:AA:AA")
 	devRxFunc := func() (pkt []byte) {
 		data, ci, err := pcapHandle.ReadPacketData()
 		_ = ci
 		if err != nil {
 			logger.Error("pcap handle read packet error: %v", err)
+			return nil
+		}
+		if bytes.Equal(data[6:12], selfMacAddr) {
 			return nil
 		}
 		return data

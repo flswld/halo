@@ -51,9 +51,10 @@ func (h MacAddrHash) GetHashCode() uint64 {
 
 // RouterConfig 路由器配置
 type RouterConfig struct {
-	DebugLog  bool                // 调试日志
-	NetIfList []*NetIfConfig      // 网卡列表
-	RouteList []*RouteEntryConfig // 静态路由列表
+	DebugLog      bool                // 调试日志
+	NetIfList     []*NetIfConfig      // 网卡列表
+	RouteList     []*RouteEntryConfig // 静态路由列表
+	StaticMemSize int                 // 静态内存大小
 }
 
 // NetIfConfig 网卡配置
@@ -62,6 +63,7 @@ type NetIfConfig struct {
 	MacAddr            string                       // mac地址
 	IpAddr             string                       // ip地址
 	NetworkMask        string                       // 子网掩码
+	Gateway            string                       // 网关地址
 	NatEnable          bool                         // 开启网络地址转换
 	NatType            int                          // 网络地址转换类型
 	NatPortMappingList []*NatPortMappingEntryConfig // 网络地址转换端口映射表
@@ -71,7 +73,6 @@ type NetIfConfig struct {
 	EthRxFunc          func() (pkt []byte)          // 网卡收包方法
 	EthTxFunc          func(pkt []byte)             // 网卡发包方法
 	BindCpuCore        int                          // 绑定的cpu核心
-	StaticMemSize      int                          // 静态内存大小
 }
 
 // NatPortMappingEntryConfig NAT端口映射配置
@@ -96,6 +97,7 @@ type NetIf struct {
 	MacAddr                 []byte                                     // mac地址
 	IpAddr                  []byte                                     // ip地址
 	NetworkMask             []byte                                     // 子网掩码
+	Gateway                 []byte                                     // 网关地址
 	EthTxBuffer             []byte                                     // 网卡发包缓冲区
 	EthTxLock               cpu.SpinLock                               // 网卡发包锁
 	LoChan                  chan []byte                                // 本地回环管道
@@ -113,22 +115,36 @@ type NetIf struct {
 	DhcpClientTransactionId []byte                                     // dhcp客户端事务id
 	UdpServiceMap           map[uint16]UdpHandleFunc                   // udp服务集合 key:端口 value:处理函数
 	TcpServiceMap           map[uint16]TcpHandleFunc                   // tcp服务集合 key:端口 value:处理函数
-	StaticAllocatorPtr      unsafe.Pointer                             // 静态内存分配器指针
-	StaticAllocator         mem.Allocator                              // 静态内存分配器
 }
 
 // Router 路由器
 type Router struct {
-	Config         *RouterConfig                                     // 配置
-	Stop           atomic.Bool                                       // 停止标志
-	StopWaitGroup  sync.WaitGroup                                    // 停止等待组
-	NetIfMap       map[string]*NetIf                                 // 网络接口集合 key:接口名 value:接口实例
-	RouteTable     *RouteTable                                       // 路由表
-	Ipv4PktFwdHook func(raw []byte, dir int) (drop bool, mod []byte) // ip报文转发钩子
-	TimeNow        uint32                                            // 当前毫秒时间戳
+	Config                  *RouterConfig                                      // 配置
+	Stop                    atomic.Bool                                        // 停止标志
+	StopWaitGroup           sync.WaitGroup                                     // 停止等待组
+	NetIfMap                map[string]*NetIf                                  // 网络接口集合 key:接口名 value:接口实例
+	RouteTable              *RouteTable                                        // 路由表
+	NatPortMappingFlowTable *hashmap.HashMap[NatFlowHash, *NatPortMappingFlow] // 端口映射回程NAT流表 key:流摘要 value:流信息
+	NatPortMappingFlowLock  sync.RWMutex                                       // 端口映射回程NAT流锁
+	Ipv4PktFwdHook          func(raw []byte, dir int) (drop bool, mod []byte)  // ip报文转发钩子
+	StaticAllocatorPtr      unsafe.Pointer                                     // 静态内存分配器指针
+	StaticAllocator         mem.Allocator                                      // 静态内存分配器
+	TimeNow                 uint32                                             // 当前毫秒时间戳
 }
 
 func InitRouter(config *RouterConfig) (*Router, error) {
+	if config.StaticMemSize == 0 {
+		config.StaticMemSize = 8 * mem.MB
+	}
+	heapAllocator := mem.GetHeapAllocator()
+	staticAllocatorPtr := heapAllocator.Malloc(uint64(config.StaticMemSize))
+	staticAllocator := mem.NewStaticAllocator(staticAllocatorPtr, uint64(config.StaticMemSize))
+	initSuccess := false
+	defer func() {
+		if !initSuccess {
+			heapAllocator.Free(staticAllocatorPtr)
+		}
+	}()
 	r := &Router{
 		Config:   config,
 		NetIfMap: make(map[string]*NetIf),
@@ -136,11 +152,13 @@ func InitRouter(config *RouterConfig) (*Router, error) {
 			Root:   new(TrieNode),
 			IpHash: fnv.New32a(),
 		},
-		Ipv4PktFwdHook: nil,
-		TimeNow:        uint32(time.Now().Unix()),
+		NatPortMappingFlowTable: hashmap.NewHashMap[NatFlowHash, *NatPortMappingFlow](staticAllocator),
+		Ipv4PktFwdHook:          nil,
+		StaticAllocatorPtr:      staticAllocatorPtr,
+		StaticAllocator:         staticAllocator,
+		TimeNow:                 uint32(time.Now().Unix()),
 	}
 	// 网卡列表
-	heapAllocator := mem.GetHeapAllocator()
 	for _, netIfConfig := range config.NetIfList {
 		macAddr, err := protocol.ParseMacAddr(netIfConfig.MacAddr)
 		if err != nil {
@@ -160,6 +178,13 @@ func InitRouter(config *RouterConfig) (*Router, error) {
 				return nil, err
 			}
 		}
+		gateway := []byte{0x00, 0x00, 0x00, 0x00}
+		if netIfConfig.Gateway != "" {
+			gateway, err = protocol.ParseIpAddr(netIfConfig.Gateway)
+			if err != nil {
+				return nil, err
+			}
+		}
 		dnsServerAddr := []byte{0x00, 0x00, 0x00, 0x00}
 		if netIfConfig.DnsServerAddr != "" {
 			dnsServerAddr, err = protocol.ParseIpAddr(netIfConfig.DnsServerAddr)
@@ -167,16 +192,12 @@ func InitRouter(config *RouterConfig) (*Router, error) {
 				return nil, err
 			}
 		}
-		if netIfConfig.StaticMemSize == 0 {
-			netIfConfig.StaticMemSize = 8 * mem.MB
-		}
-		staticAllocatorPtr := heapAllocator.Malloc(uint64(netIfConfig.StaticMemSize))
-		staticAllocator := mem.NewStaticAllocator(staticAllocatorPtr, uint64(netIfConfig.StaticMemSize))
 		netIf := &NetIf{
 			Config:                  netIfConfig,
 			MacAddr:                 macAddr,
 			IpAddr:                  ipAddr,
 			NetworkMask:             networkMask,
+			Gateway:                 gateway,
 			EthTxBuffer:             make([]byte, 0, 1514),
 			LoChan:                  make(chan []byte, 1024),
 			Router:                  r,
@@ -190,8 +211,6 @@ func InitRouter(config *RouterConfig) (*Router, error) {
 			DhcpClientTransactionId: nil,
 			UdpServiceMap:           make(map[uint16]UdpHandleFunc),
 			TcpServiceMap:           make(map[uint16]TcpHandleFunc),
-			StaticAllocatorPtr:      staticAllocatorPtr,
-			StaticAllocator:         staticAllocator,
 		}
 		for _, natPortMappingEntryConfig := range netIfConfig.NatPortMappingList {
 			lanHostIpAddr, err := protocol.ParseIpAddr(natPortMappingEntryConfig.LanHostIpAddr)
@@ -243,12 +262,14 @@ func InitRouter(config *RouterConfig) (*Router, error) {
 		})
 	}
 	protocol.SetRandIpHeaderId()
+	initSuccess = true
 	return r, nil
 }
 
 func (r *Router) RunRouter() {
 	r.Stop.Store(false)
 	go r.Monitor()
+	go r.NatPortMappingFlowClear()
 	r.StopWaitGroup.Add(1)
 	for _, netIf := range r.NetIfMap {
 		if netIf.Config.DhcpClientEnable {
@@ -293,9 +314,7 @@ func (r *Router) StopRouter() {
 	r.Stop.Store(true)
 	r.StopWaitGroup.Wait()
 	heapAllocator := mem.GetHeapAllocator()
-	for _, netIf := range r.NetIfMap {
-		heapAllocator.Free(netIf.StaticAllocatorPtr)
-	}
+	heapAllocator.Free(r.StaticAllocatorPtr)
 }
 
 func (i *NetIf) PacketHandle() {

@@ -2,6 +2,8 @@ package mem
 
 import (
 	"unsafe"
+
+	"github.com/flswld/halo/cpu"
 )
 
 type blockHeader uint64
@@ -45,6 +47,7 @@ func init() {
 type StaticAllocator struct {
 	allocSize     uint64
 	freeBlockList *block
+	lock          cpu.SpinLock
 }
 
 func NewStaticAllocator(memory unsafe.Pointer, size uint64) *StaticAllocator {
@@ -65,10 +68,13 @@ func NewStaticAllocator(memory unsafe.Pointer, size uint64) *StaticAllocator {
 	b.freePrev = nil
 	h.allocSize = headerSize
 	h.freeBlockList = b
+	h.lock = 0
 	return h
 }
 
 func (h *StaticAllocator) Malloc(size uint64) unsafe.Pointer {
+	h.lock.Lock()
+	defer h.lock.Unlock()
 	if size == 0 {
 		return nil
 	}
@@ -99,6 +105,8 @@ func (h *StaticAllocator) Malloc(size uint64) unsafe.Pointer {
 }
 
 func (h *StaticAllocator) Free(p unsafe.Pointer) bool {
+	h.lock.Lock()
+	defer h.lock.Unlock()
 	if p == nil {
 		return false
 	}
@@ -162,6 +170,8 @@ func (h *StaticAllocator) AlignedFree(p unsafe.Pointer) bool {
 }
 
 func (h *StaticAllocator) GetAllocSize() uint64 {
+	h.lock.Lock()
+	defer h.lock.Unlock()
 	return h.allocSize
 }
 

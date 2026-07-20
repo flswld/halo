@@ -83,7 +83,8 @@ func EthernetRouter() {
 	// 初始化路由器
 	engine.DefaultLogWriter = new(logger.LogWriter)
 	r, err := engine.InitRouter(&engine.RouterConfig{
-		DebugLog: false, // 调试日志
+		DebugLog:      false,      // 调试日志
+		StaticMemSize: 8 * mem.MB, // 静态内存大小
 		// 网卡列表
 		NetIfList: []*engine.NetIfConfig{
 			{
@@ -91,6 +92,7 @@ func EthernetRouter() {
 				MacAddr:     "AA:AA:AA:AA:AA:AA",    // mac地址
 				IpAddr:      "192.168.100.100",      // ip地址
 				NetworkMask: "255.255.255.0",        // 子网掩码
+				Gateway:     "192.168.100.1",        // 网关地址
 				NatEnable:   true,                   // 开启网络地址转换
 				NatType:     engine.NatTypeFullCone, // 网络地址转换类型
 				// 网络地址转换端口映射表
@@ -108,7 +110,6 @@ func EthernetRouter() {
 				EthRxFunc:        func() (pkt []byte) { return dpdk.EthRxPkt(0) }, // 网卡收包方法
 				EthTxFunc:        func(pkt []byte) { dpdk.EthTxPkt(0, pkt) },      // 网卡发包方法
 				BindCpuCore:      0,                                               // 绑定的cpu核心
-				StaticMemSize:    8 * mem.MB,                                      // 静态内存大小
 			},
 			{
 				Name:             "wan1",

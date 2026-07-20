@@ -303,7 +303,7 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 				goto dhcp_nak
 			}
 			if !exist {
-				dhcpLease = mem.MallocType[DhcpLease](i.StaticAllocator, 1)
+				dhcpLease = mem.MallocType[DhcpLease](i.Router.StaticAllocator, 1)
 				if dhcpLease == nil {
 					goto dhcp_nak
 				}
@@ -339,7 +339,7 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 			if exist {
 				Log(fmt.Sprintf("dhcp server release ip: %v, name: %v, mac: % 02x\n", dhcpLease.IpAddr, dhcpLease.HostName, clientMacAddr))
 				i.DhcpLeaseTable.Del(IpAddrHash(ipv4SrcAddrU))
-				mem.FreeType[DhcpLease](i.StaticAllocator, dhcpLease)
+				mem.FreeType[DhcpLease](i.Router.StaticAllocator, dhcpLease)
 			}
 		default:
 		}
@@ -381,8 +381,9 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 			}
 			optionRouter := dhcpOptionMap[DhcpOptionRouter]
 			if optionRouter != nil {
+				copy(i.Gateway, optionRouter.IpAddr)
 				nextHop := make([]byte, 4)
-				copy(nextHop, optionRouter.IpAddr)
+				copy(nextHop, i.Gateway)
 				i.Router.RouteTable.AddRoute(&RouteEntry{
 					DstIpAddr:   []byte{0x00, 0x00, 0x00, 0x00},
 					NetworkMask: []byte{0x00, 0x00, 0x00, 0x00},
@@ -397,7 +398,7 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 					NextHop:     nil,
 					NetIf:       i.Config.Name,
 				})
-				Log(fmt.Sprintf("dhcp client get router: %v\n", optionRouter.IpAddr))
+				Log(fmt.Sprintf("dhcp client get router: %v\n", i.Gateway))
 			}
 			optionDomainNameServer := dhcpOptionMap[DhcpOptionDomainNameServer]
 			if optionDomainNameServer != nil {
@@ -470,7 +471,7 @@ func (i *NetIf) DhcpLeaseClear() {
 		i.DhcpLeaseTable.For(func(ipAddrU IpAddrHash, dhcpLease *DhcpLease) (next bool) {
 			if i.Router.TimeNow > dhcpLease.ExpTime {
 				i.DhcpLeaseTable.Del(ipAddrU)
-				mem.FreeType[DhcpLease](i.StaticAllocator, dhcpLease)
+				mem.FreeType[DhcpLease](i.Router.StaticAllocator, dhcpLease)
 			}
 			return true
 		})

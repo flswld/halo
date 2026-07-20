@@ -99,14 +99,15 @@ const (
 )
 
 func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr []byte, ipv4DstAddr []byte, ipv4HeadProto uint8) bool {
+	var inNatPortMappingEntry *NatPortMappingEntry
 	// DNAT 公网地址 -> 私网地址
 	if i.Config.NatEnable {
 		srcPort, dstPort := protocol.NatGetSrcDstPort(ethPayload)
 		isIcmpTtl := false
 		ethPayload, isIcmpTtl = i.IcmpTtlDeepNat(ethPayload)
 		if !isIcmpTtl {
-			natPortMappingEntry := i.CheckNatPortMapping(WanToLan, i.IpAddr, dstPort, ipv4HeadProto)
-			if natPortMappingEntry == nil {
+			inNatPortMappingEntry = i.CheckNatPortMapping(WanToLan, i.IpAddr, dstPort, ipv4HeadProto)
+			if inNatPortMappingEntry == nil {
 				natFlow := i.NatGetFlowByWan(ipv4SrcAddr, srcPort, ipv4DstAddr, dstPort, ipv4HeadProto)
 				if natFlow == nil {
 					// 没有nat表项
@@ -115,7 +116,7 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr []byte, ipv4DstA
 				natFlow.LastAliveTime = i.Router.TimeNow
 				ethPayload = protocol.NatChangeDst(ethPayload, protocol.UToIpAddr(natFlow.LanHostIpAddr), natFlow.LanHostPort)
 			} else {
-				ethPayload = protocol.NatChangeDst(ethPayload, protocol.UToIpAddr(natPortMappingEntry.LanHostIpAddr), natPortMappingEntry.LanHostPort)
+				ethPayload = protocol.NatChangeDst(ethPayload, protocol.UToIpAddr(inNatPortMappingEntry.LanHostIpAddr), inNatPortMappingEntry.LanHostPort)
 			}
 		}
 	}
@@ -146,7 +147,31 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr []byte, ipv4DstA
 		ethPayload = mod
 	}
 	// 三层路由
+	var outNatPortMappingFlow *NatPortMappingFlow
+	// 非NAT接口查询端口映射回程流
+	if !i.Config.NatEnable {
+		srcPort, dstPort := protocol.NatGetSrcDstPort(ethPayload)
+		natFlowHash := NatFlowHash{
+			RemoteIpAddr:  protocol.IpAddrToU(ipv4DstAddr),
+			RemotePort:    dstPort,
+			LanHostIpAddr: protocol.IpAddrToU(ipv4SrcAddr),
+			LanHostPort:   srcPort,
+			Ipv4HeadProto: ipv4HeadProto,
+		}
+		i.Router.NatPortMappingFlowLock.Lock()
+		var exist bool
+		outNatPortMappingFlow, exist = i.Router.NatPortMappingFlowTable.Get(natFlowHash)
+		if exist {
+			outNatPortMappingFlow.LastAliveTime = i.Router.TimeNow
+		}
+		i.Router.NatPortMappingFlowLock.Unlock()
+	}
 	nextHopIpAddr, outNetIfName := i.FindRoute(ipv4DstAddr)
+	// 回程包改用原入口WAN接口
+	if outNatPortMappingFlow != nil && outNetIfName != outNatPortMappingFlow.WanNetIf {
+		outNetIfName = outNatPortMappingFlow.WanNetIf
+		nextHopIpAddr = i.Router.NetIfMap[outNetIfName].Gateway
+	}
 	if nextHopIpAddr == nil && outNetIfName == "" {
 		// 没有路由
 		Log(fmt.Sprintf("no route found for: %v\n", ipv4DstAddr))
@@ -164,21 +189,26 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr []byte, ipv4DstA
 	}
 	// SNAT 私网地址 -> 公网地址
 	if outNetIf.Config.NatEnable {
-		srcPort, dstPort := protocol.NatGetSrcDstPort(ethPayload)
-		natPortMappingEntry := outNetIf.CheckNatPortMapping(LanToWan, ipv4SrcAddr, srcPort, ipv4HeadProto)
-		if natPortMappingEntry == nil {
-			natFlow := outNetIf.NatGetFlowByHash(ipv4DstAddr, dstPort, ipv4SrcAddr, srcPort, ipv4HeadProto)
-			if natFlow == nil {
-				natFlow = outNetIf.NatAddFlow(ipv4SrcAddr, ipv4DstAddr, srcPort, dstPort, ipv4HeadProto)
-				if natFlow == nil {
-					// nat端口分配失败
-					return true
-				}
-			}
-			natFlow.LastAliveTime = i.Router.TimeNow
-			ethPayload = protocol.NatChangeSrc(ethPayload, protocol.UToIpAddr(natFlow.WanIpAddr), natFlow.WanPort)
+		// 端口映射回程恢复公网源地址和端口
+		if outNatPortMappingFlow != nil {
+			ethPayload = protocol.NatChangeSrc(ethPayload, outNetIf.IpAddr, outNatPortMappingFlow.WanPort)
 		} else {
-			ethPayload = protocol.NatChangeSrc(ethPayload, outNetIf.IpAddr, natPortMappingEntry.WanPort)
+			srcPort, dstPort := protocol.NatGetSrcDstPort(ethPayload)
+			outNatPortMappingEntry := outNetIf.CheckNatPortMapping(LanToWan, ipv4SrcAddr, srcPort, ipv4HeadProto)
+			if outNatPortMappingEntry == nil {
+				natFlow := outNetIf.NatGetFlowByHash(ipv4DstAddr, dstPort, ipv4SrcAddr, srcPort, ipv4HeadProto)
+				if natFlow == nil {
+					natFlow = outNetIf.NatAddFlow(ipv4SrcAddr, ipv4DstAddr, srcPort, dstPort, ipv4HeadProto)
+					if natFlow == nil {
+						// nat端口分配失败
+						return true
+					}
+				}
+				natFlow.LastAliveTime = i.Router.TimeNow
+				ethPayload = protocol.NatChangeSrc(ethPayload, protocol.UToIpAddr(natFlow.WanIpAddr), natFlow.WanPort)
+			} else {
+				ethPayload = protocol.NatChangeSrc(ethPayload, outNetIf.IpAddr, outNatPortMappingEntry.WanPort)
+			}
 		}
 	}
 	// 二层封装
@@ -191,6 +221,35 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr []byte, ipv4DstA
 	if arpCache == nil {
 		// 二层地址查询失败
 		return true
+	}
+	// 端口映射首包转发前尽量记录回程NAT流
+	if inNatPortMappingEntry != nil {
+		remotePort, _ := protocol.NatGetSrcDstPort(ethPayload)
+		natFlowHash := NatFlowHash{
+			RemoteIpAddr:  protocol.IpAddrToU(ipv4SrcAddr),
+			RemotePort:    remotePort,
+			LanHostIpAddr: inNatPortMappingEntry.LanHostIpAddr,
+			LanHostPort:   inNatPortMappingEntry.LanHostPort,
+			Ipv4HeadProto: ipv4HeadProto,
+		}
+		i.Router.NatPortMappingFlowLock.Lock()
+		inNatPortMappingFlow, exist := i.Router.NatPortMappingFlowTable.Get(natFlowHash)
+		if !exist {
+			inNatPortMappingFlow = mem.MallocType[NatPortMappingFlow](i.Router.StaticAllocator, 1)
+			if inNatPortMappingFlow == nil {
+				i.Router.NatPortMappingFlowLock.Unlock()
+				return true
+			}
+			if !i.Router.NatPortMappingFlowTable.Set(natFlowHash, inNatPortMappingFlow) {
+				mem.FreeType[NatPortMappingFlow](i.Router.StaticAllocator, inNatPortMappingFlow)
+				i.Router.NatPortMappingFlowLock.Unlock()
+				return true
+			}
+		}
+		inNatPortMappingFlow.WanNetIf = i.Config.Name
+		inNatPortMappingFlow.WanPort = inNatPortMappingEntry.WanPort
+		inNatPortMappingFlow.LastAliveTime = i.Router.TimeNow
+		i.Router.NatPortMappingFlowLock.Unlock()
 	}
 	outNetIf.TxEthernet(ethPayload, arpCache.MacAddr[:], protocol.ETH_PROTO_IPV4)
 	return true
@@ -401,6 +460,34 @@ type NatPortMappingEntry struct {
 	Ipv4HeadProto uint8  // ip头部协议
 }
 
+// NatPortMappingFlow 记录静态DNAT连接的原始WAN口和映射端口。
+// 回包命中后优先从原WAN口返回，二层地址由ARP模块解析。
+type NatPortMappingFlow struct {
+	WanNetIf      string // wan接口名
+	WanPort       uint16 // wan接口端口
+	LastAliveTime uint32 // 上一次活跃时间
+}
+
+func (r *Router) NatPortMappingFlowClear() {
+	ticker := time.NewTicker(time.Second * 1)
+	for {
+		<-ticker.C
+		if r.Stop.Load() {
+			break
+		}
+		r.NatPortMappingFlowLock.Lock()
+		r.NatPortMappingFlowTable.For(func(natFlowHash NatFlowHash, natPortMappingFlow *NatPortMappingFlow) (next bool) {
+			if r.TimeNow-natPortMappingFlow.LastAliveTime > 60 {
+				r.NatPortMappingFlowTable.Del(natFlowHash)
+				mem.FreeType[NatPortMappingFlow](r.StaticAllocator, natPortMappingFlow)
+			}
+			return true
+		})
+		r.NatPortMappingFlowLock.Unlock()
+	}
+	r.StopWaitGroup.Done()
+}
+
 // PortAlloc 端口分配器
 type PortAlloc struct {
 	UsePortMap *hashmap.HashMap[PortHash, struct{}] // 已使用端口集合
@@ -483,19 +570,19 @@ func (i *NetIf) NatAddFlow(lanHostIpAddr []byte, remoteIpAddr []byte, lanHostPor
 	// nat端口分配
 	portAlloc, exist := i.NatPortAlloc.Get(IpAddrHash(_remoteIpAddrU))
 	if !exist {
-		portAlloc = mem.MallocType[PortAlloc](i.StaticAllocator, 1)
+		portAlloc = mem.MallocType[PortAlloc](i.Router.StaticAllocator, 1)
 		if portAlloc == nil {
 			return nil
 		}
-		portAlloc.UsePortMap = hashmap.NewHashMap[PortHash, struct{}](i.StaticAllocator)
+		portAlloc.UsePortMap = hashmap.NewHashMap[PortHash, struct{}](i.Router.StaticAllocator)
 		if portAlloc.UsePortMap == nil {
-			mem.FreeType[PortAlloc](i.StaticAllocator, portAlloc)
+			mem.FreeType[PortAlloc](i.Router.StaticAllocator, portAlloc)
 			return nil
 		}
 		ok := i.NatPortAlloc.Set(IpAddrHash(_remoteIpAddrU), portAlloc)
 		if !ok {
 			portAlloc.UsePortMap.Free()
-			mem.FreeType[PortAlloc](i.StaticAllocator, portAlloc)
+			mem.FreeType[PortAlloc](i.Router.StaticAllocator, portAlloc)
 			return nil
 		}
 	}
@@ -524,7 +611,7 @@ func (i *NetIf) NatAddFlow(lanHostIpAddr []byte, remoteIpAddr []byte, lanHostPor
 		LanHostPort:   lanHostPort,
 		Ipv4HeadProto: ipv4HeadProto,
 	}
-	natFlow := mem.MallocType[NatFlow](i.StaticAllocator, 1)
+	natFlow := mem.MallocType[NatFlow](i.Router.StaticAllocator, 1)
 	if natFlow == nil {
 		portAlloc.UsePortMap.Del(PortHash(wanPort))
 		return nil
@@ -613,7 +700,7 @@ func (i *NetIf) NatTableClear() {
 					WanPort:       natFlow.WanPort,
 					Ipv4HeadProto: natFlow.Ipv4HeadProto,
 				})
-				mem.FreeType[NatFlow](i.StaticAllocator, natFlow)
+				mem.FreeType[NatFlow](i.Router.StaticAllocator, natFlow)
 				portAlloc, exist := i.NatPortAlloc.Get(IpAddrHash(natFlow.RemoteIpAddr))
 				if !exist {
 					return true
@@ -622,7 +709,7 @@ func (i *NetIf) NatTableClear() {
 				if portAlloc.UsePortMap.Len() == 0 {
 					portAlloc.UsePortMap.Free()
 					i.NatPortAlloc.Del(IpAddrHash(natFlow.RemoteIpAddr))
-					mem.FreeType[PortAlloc](i.StaticAllocator, portAlloc)
+					mem.FreeType[PortAlloc](i.Router.StaticAllocator, portAlloc)
 				}
 			}
 			return true

@@ -33,6 +33,7 @@ const (
 
 var iphId uint16 = 0x0000
 
+// SetRandIpHeaderId 随机初始化 IPv4 报文标识
 func SetRandIpHeaderId() {
 	randByte := make([]byte, 2)
 	_, err := rand.Read(randByte)
@@ -43,6 +44,7 @@ func SetRandIpHeaderId() {
 	iphId = binary.BigEndian.Uint16([]byte{randByte[0], randByte[1]})
 }
 
+// ParseIpv4Pkt 解析固定 20 字节头部的 IPv4 报文
 func ParseIpv4Pkt(pkt []byte) (payload []byte, ipHeadProto uint8, srcAddr []byte, dstAddr []byte, err error) {
 	if len(pkt) < 20 || len(pkt) > 1500 {
 		return nil, IPH_PROTO_UNKNOWN, nil, nil, errors.New("ip packet len must >= 20 and <= 1500 bytes")
@@ -50,7 +52,8 @@ func ParseIpv4Pkt(pkt []byte) (payload []byte, ipHeadProto uint8, srcAddr []byte
 	if pkt[0] != 0x45 {
 		return nil, IPH_PROTO_UNKNOWN, nil, nil, errors.New("not support type of ip packet")
 	}
-	// 总长度
+	// 版本和首部长度固定为 IPv4 无选项的 20 字节头部
+	// 总长度限定本次解析返回的上层载荷范围
 	totalLen := int(binary.BigEndian.Uint16([]byte{pkt[2], pkt[3]}))
 	// 不支持分片
 	if (pkt[6] != 0x40 && pkt[6] != 0x00) || pkt[7] != 0x00 {
@@ -82,6 +85,7 @@ func ParseIpv4Pkt(pkt []byte) (payload []byte, ipHeadProto uint8, srcAddr []byte
 	return payload, ipHeadProto, srcAddr, dstAddr, nil
 }
 
+// BuildIpv4Pkt 构建固定 20 字节头部的 IPv4 报文
 func BuildIpv4Pkt(pkt []byte, payload []byte, ipHeadProto uint8, srcAddr []byte, dstAddr []byte) ([]byte, error) {
 	if pkt == nil {
 		pkt = make([]byte, 0, 20)
@@ -97,7 +101,7 @@ func BuildIpv4Pkt(pkt []byte, payload []byte, ipHeadProto uint8, srcAddr []byte,
 	// 总长度
 	ipPktLen := uint16(len(payload) + 20)
 	pkt = append(pkt, byte(ipPktLen>>8), byte(ipPktLen))
-	// 标识
+	// 每次构包递增进程级报文标识
 	iphId++
 	pkt = append(pkt, byte(iphId>>8), byte(iphId))
 	// 标志位+片偏移(不分片)
@@ -126,6 +130,7 @@ func BuildIpv4Pkt(pkt []byte, payload []byte, ipHeadProto uint8, srcAddr []byte,
 	return pkt, nil
 }
 
+// HandleIpv4PktTtl 递减 IPv4 生存时间并更新首部校验和
 func HandleIpv4PktTtl(pkt []byte) ([]byte, bool) {
 	if len(pkt) < 9 {
 		return nil, false
@@ -133,11 +138,13 @@ func HandleIpv4PktTtl(pkt []byte) ([]byte, bool) {
 	if pkt[8] <= 1 {
 		return pkt, false
 	}
+	// TTL 修改后 IPv4 首部校验和必须同步更新
 	pkt[8] -= 0x01
 	pkt = ReCalcIpv4CheckSum(pkt)
 	return pkt, true
 }
 
+// ReCalcIpv4CheckSum 重新计算 IPv4 首部校验和
 func ReCalcIpv4CheckSum(pkt []byte) []byte {
 	if len(pkt) < 20 {
 		return pkt
@@ -153,6 +160,7 @@ func ReCalcIpv4CheckSum(pkt []byte) []byte {
 	return pkt
 }
 
+// ReCalcIcmpCheckSum 重新计算 IPv4 报文中的 ICMP 校验和
 func ReCalcIcmpCheckSum(pkt []byte) []byte {
 	if len(pkt) < 24 {
 		return pkt
@@ -165,6 +173,7 @@ func ReCalcIcmpCheckSum(pkt []byte) []byte {
 	return pkt
 }
 
+// ReCalcTcpCheckSum 重新计算 IPv4 报文中的 TCP 校验和
 func ReCalcTcpCheckSum(pkt []byte) []byte {
 	if len(pkt) < 38 {
 		return pkt
@@ -174,6 +183,7 @@ func ReCalcTcpCheckSum(pkt []byte) []byte {
 	if !CheckSumEnable {
 		return pkt
 	}
+	// 从 IPv4 首部提取地址并构造 TCP 伪首部
 	fakeHeader := make([]byte, 0, 12)
 	fakeHeader = append(fakeHeader, pkt[12:16]...)
 	fakeHeader = append(fakeHeader, pkt[16:20]...)
@@ -189,6 +199,7 @@ func ReCalcTcpCheckSum(pkt []byte) []byte {
 	return pkt
 }
 
+// ReCalcUdpCheckSum 重新计算 IPv4 报文中的 UDP 校验和
 func ReCalcUdpCheckSum(pkt []byte) []byte {
 	if len(pkt) < 28 {
 		return pkt
@@ -198,6 +209,7 @@ func ReCalcUdpCheckSum(pkt []byte) []byte {
 	if !CheckSumEnable {
 		return pkt
 	}
+	// 从 IPv4 首部提取地址并构造 UDP 伪首部
 	fakeHeader := make([]byte, 0, 12)
 	fakeHeader = append(fakeHeader, pkt[12:16]...)
 	fakeHeader = append(fakeHeader, pkt[16:20]...)
@@ -213,12 +225,14 @@ func ReCalcUdpCheckSum(pkt []byte) []byte {
 	return pkt
 }
 
+// NatGetSrcDstPort 提取 NAT 使用的源端口和目的端口
 func NatGetSrcDstPort(pkt []byte) (srcPort uint16, dstPort uint16) {
 	if len(pkt) < 26 {
 		return 0, 0
 	}
 	switch pkt[9] {
 	case IPH_PROTO_ICMP:
+		// ICMP 没有端口 NAT 使用 Echo 标识作为双向键
 		srcPort = binary.BigEndian.Uint16(pkt[24:26])
 		dstPort = binary.BigEndian.Uint16(pkt[24:26])
 	case IPH_PROTO_TCP:
@@ -231,6 +245,7 @@ func NatGetSrcDstPort(pkt []byte) (srcPort uint16, dstPort uint16) {
 	return srcPort, dstPort
 }
 
+// NatChangeSrc 修改 IPv4 报文的源地址和源端口并更新校验和
 func NatChangeSrc(pkt []byte, ipAddr []byte, port uint16) []byte {
 	if len(pkt) < 26 {
 		return pkt
@@ -239,6 +254,7 @@ func NatChangeSrc(pkt []byte, ipAddr []byte, port uint16) []byte {
 	pkt[13] = ipAddr[1]
 	pkt[14] = ipAddr[2]
 	pkt[15] = ipAddr[3]
+	// 地址和传输层键修改后分别更新对应校验和
 	pkt = ReCalcIpv4CheckSum(pkt)
 	switch pkt[9] {
 	case IPH_PROTO_ICMP:
@@ -257,6 +273,7 @@ func NatChangeSrc(pkt []byte, ipAddr []byte, port uint16) []byte {
 	return pkt
 }
 
+// NatChangeDst 修改 IPv4 报文的目的地址和目的端口并更新校验和
 func NatChangeDst(pkt []byte, ipAddr []byte, port uint16) []byte {
 	if len(pkt) < 26 {
 		return pkt
@@ -265,6 +282,7 @@ func NatChangeDst(pkt []byte, ipAddr []byte, port uint16) []byte {
 	pkt[17] = ipAddr[1]
 	pkt[18] = ipAddr[2]
 	pkt[19] = ipAddr[3]
+	// 地址和传输层键修改后分别更新对应校验和
 	pkt = ReCalcIpv4CheckSum(pkt)
 	switch pkt[9] {
 	case IPH_PROTO_ICMP:

@@ -5,6 +5,7 @@ import (
 	"time"
 )
 
+// TestHeapAllocator 验证堆分配器的大块内存读写
 func TestHeapAllocator(t *testing.T) {
 	var heapAllocator Allocator = GetHeapAllocator()
 	ptr := heapAllocator.Malloc(8 * GB)

@@ -7,6 +7,7 @@ import (
 	"github.com/flswld/halo/mem"
 )
 
+// TestArrayList 验证动态数组的增改和遍历
 func TestArrayList(t *testing.T) {
 	heapAllocator := mem.GetHeapAllocator()
 	ptr := heapAllocator.Malloc(1 * mem.GB)

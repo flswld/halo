@@ -22,6 +22,7 @@ const (
 	ERROR
 )
 
+// ParseLevel 将日志级别名称转换为级别值
 func ParseLevel(level string) int {
 	switch strings.ToUpper(level) {
 	case "DEBUG":
@@ -75,54 +76,60 @@ var (
 	config *Config = nil
 )
 
+// GetLogger 返回全局日志器
 func GetLogger() *Logger {
 	return logger
 }
 
+// GetConfig 返回全局日志配置
 func GetConfig() *Config {
 	return config
 }
 
+// Config 定义日志器配置
 type Config struct {
-	AppName      string
-	Level        int
-	TrackLine    bool
-	TrackThread  bool
-	EnableFile   bool
-	FilePath     string
-	FileSizeCut  bool
-	FileMaxSize  int32
-	FileTimeCut  bool
-	DisableColor bool
-	EnableJson   bool
-	FullPath     bool
+	AppName      string // 应用名称
+	Level        int    // 最低输出级别
+	TrackLine    bool   // 是否记录调用位置
+	TrackThread  bool   // 是否记录协程和线程信息
+	EnableFile   bool   // 是否写入日志文件
+	FilePath     string // 日志目录
+	FileSizeCut  bool   // 是否按文件大小切分
+	FileMaxSize  int32  // 单个日志文件最大字节数
+	FileTimeCut  bool   // 是否按日期切分
+	DisableColor bool   // 是否禁用终端颜色
+	EnableJson   bool   // 是否将格式化参数编码为 JSON
+	FullPath     bool   // 是否记录完整源文件路径
 }
 
+// Logger 保存异步日志器的运行状态
 type Logger struct {
-	FileTagMap      map[string]*os.File
-	LastLogTime     time.Time
-	LogInfoChan     chan *LogInfo
-	WriteBuf        []byte
-	WriteCacheNum   int32
-	CloseChan       chan struct{}
-	RemoteLogWriter io.Writer
+	FileTagMap      map[string]*os.File // 日志标签对应的文件
+	LastLogTime     time.Time           // 上一条日志时间
+	LogInfoChan     chan *LogInfo       // 待写日志队列
+	WriteBuf        []byte              // 批量写入缓冲区
+	WriteCacheNum   int32               // 缓冲的日志条数
+	CloseChan       chan struct{}       // 关闭握手管道
+	RemoteLogWriter io.Writer           // 远程日志输出器
 }
 
+// LogInfo 保存一条待输出日志的元数据
 type LogInfo struct {
-	Time        time.Time
-	Level       int
-	Msg         *[]byte
-	Raw         bool
-	FileName    string
-	FuncName    string
-	Line        int
-	GoroutineId string
-	ThreadId    string
-	TrackLine   bool
-	TrackThread bool
-	Tag         string
+	Time        time.Time // 日志时间
+	Level       int       // 日志级别
+	Msg         *[]byte   // 日志内容
+	Raw         bool      // 是否直接输出原始内容
+	FileName    string    // 调用源文件名
+	FuncName    string    // 调用函数名
+	Line        int       // 调用行号
+	GoroutineId string    // 协程 ID
+	ThreadId    string    // 线程 ID
+	TrackLine   bool      // 是否输出调用位置
+	TrackThread bool      // 是否输出协程和线程信息
+	Tag         string    // 日志文件标签
 }
 
+// InitLogger 初始化全局异步日志器
 func InitLogger(cfg *Config) {
 	if cfg == nil {
 		cfg = &Config{
@@ -165,11 +172,13 @@ func InitLogger(cfg *Config) {
 	go logger.doLog()
 }
 
+// CloseLogger 排空日志队列并关闭全局日志器
 func CloseLogger() {
 	logger.CloseChan <- struct{}{}
 	<-logger.CloseChan
 }
 
+// doLog 消费日志队列并完成格式化与写入
 func (l *Logger) doLog() {
 	var logBuf bytes.Buffer
 	timeBuf := make([]byte, 0, 64)
@@ -178,11 +187,13 @@ func (l *Logger) doLog() {
 	for {
 		select {
 		case <-l.CloseChan:
+			// 关闭时记录队列剩余数量并继续消费 直到已提交日志全部写出
 			exit = true
 			exitCountDown = len(l.LogInfoChan)
 		case logInfo := <-l.LogInfoChan:
 			var logData []byte = nil
 			if !logInfo.Raw {
+				// 普通日志在后台统一拼接时间 级别 调用位置和线程信息
 				if !config.DisableColor {
 					logBuf.Write(cyan)
 				}
@@ -273,6 +284,7 @@ func (l *Logger) doLog() {
 	}
 }
 
+// writeLog 将日志写入启用的输出目标
 func (l *Logger) writeLog(logData []byte, logTag string, logTime time.Time) {
 	defer func() {
 		l.LastLogTime = logTime
@@ -294,12 +306,14 @@ func (l *Logger) writeLog(logData []byte, logTag string, logTime time.Time) {
 	}
 	l.WriteBuf = append(l.WriteBuf, logData...)
 	l.WriteCacheNum++
+	// 队列仍有积压且批次未满时延迟系统调用
 	if len(l.LogInfoChan) != 0 && l.WriteCacheNum < maxWriteCacheNum {
 		return
 	}
 	l.flushLog()
 }
 
+// flushLog 将批量日志缓冲区刷新到控制台和文件
 func (l *Logger) flushLog() {
 	l.writeLogConsole(l.WriteBuf)
 	if config.EnableFile {
@@ -309,10 +323,12 @@ func (l *Logger) flushLog() {
 	l.WriteCacheNum = 0
 }
 
+// writeLogConsole 将日志写入标准错误
 func (l *Logger) writeLogConsole(logData []byte) {
 	_, _ = os.Stderr.Write(logData)
 }
 
+// writeLogFile 将日志写入指定标签对应的文件
 func (l *Logger) writeLogFile(logData []byte, logTag string) {
 	logFile := l.FileTagMap[logTag]
 	if logFile == nil {
@@ -349,6 +365,7 @@ func (l *Logger) writeLogFile(logData []byte, logTag string) {
 	}
 }
 
+// cutLogFile 归档并重建指定标签的日志文件
 func (l *Logger) cutLogFile(logTag string) {
 	logFile := l.FileTagMap[logTag]
 	err := logFile.Close()
@@ -376,12 +393,14 @@ func (l *Logger) cutLogFile(logTag string) {
 
 var bufPool = sync.Pool{New: func() any { return new([]byte) }}
 
+// getBuf 从缓冲池获取空字节切片
 func getBuf() *[]byte {
 	p := bufPool.Get().(*[]byte)
 	*p = (*p)[0:0]
 	return p
 }
 
+// putBuf 将字节切片归还缓冲池
 func putBuf(p *[]byte) {
 	if cap(*p) > 64<<10 {
 		*p = nil
@@ -391,7 +410,9 @@ func putBuf(p *[]byte) {
 
 var logInfoPool = sync.Pool{New: func() any { return new(LogInfo) }}
 
+// formatLog 解析日志标志并构建待输出日志
 func formatLog(level int, msg string, param []any) {
+	// 消息前缀可覆盖单条日志的标签 JSON 行号和线程输出策略
 	newMsg, logFlag := parseLogFlag(msg)
 	logInfo := logInfoPool.Get().(*LogInfo)
 	logInfo.Time = time.Now()
@@ -421,13 +442,15 @@ func formatLog(level int, msg string, param []any) {
 	logger.LogInfoChan <- logInfo
 }
 
+// LogFlag 保存日志消息内嵌的输出控制标志
 type LogFlag struct {
-	LogTag    string
-	LogJson   string
-	LogLine   string
-	LogThread string
+	LogTag    string // 日志文件标签
+	LogJson   string // 是否使用 JSON 编码参数
+	LogLine   string // 是否记录调用位置
+	LogThread string // 是否记录协程和线程信息
 }
 
+// parseLogFlag 解析日志消息开头的输出控制标志
 func parseLogFlag(msg string) (string, LogFlag) {
 	if len(msg) == 0 || msg[0] != '@' {
 		return msg, LogFlag{}
@@ -479,6 +502,7 @@ func parseLogFlag(msg string) (string, LogFlag) {
 	return msg[end+1:], *logFlag
 }
 
+// Debug 输出调试级别日志
 func Debug(msg string, param ...any) {
 	if config.Level > DEBUG {
 		return
@@ -486,6 +510,7 @@ func Debug(msg string, param ...any) {
 	formatLog(DEBUG, msg, param)
 }
 
+// Info 输出信息级别日志
 func Info(msg string, param ...any) {
 	if config.Level > INFO {
 		return
@@ -493,6 +518,7 @@ func Info(msg string, param ...any) {
 	formatLog(INFO, msg, param)
 }
 
+// Warn 输出警告级别日志
 func Warn(msg string, param ...any) {
 	if config.Level > WARN {
 		return
@@ -500,6 +526,7 @@ func Warn(msg string, param ...any) {
 	formatLog(WARN, msg, param)
 }
 
+// Error 输出错误级别日志
 func Error(msg string, param ...any) {
 	if config.Level > ERROR {
 		return
@@ -507,6 +534,7 @@ func Error(msg string, param ...any) {
 	formatLog(ERROR, msg, param)
 }
 
+// Print 以调试级别输出参数列表
 func Print(param ...any) {
 	msg := make([]byte, 0, 32)
 	for i := 0; i < len(param); i++ {
@@ -518,6 +546,7 @@ func Print(param ...any) {
 	formatLog(DEBUG, string(msg), param)
 }
 
+// Raw 直接输出未经格式化的日志数据
 func Raw(data []byte) {
 	logInfo := logInfoPool.Get().(*LogInfo)
 	logInfo.Time = time.Now()
@@ -528,14 +557,16 @@ func Raw(data []byte) {
 	logger.LogInfoChan <- logInfo
 }
 
-type LogWriter struct {
-}
+// LogWriter 将 io.Writer 写入转换为原始日志
+type LogWriter struct{}
 
+// Write 将数据作为原始日志写入全局日志器
 func (l *LogWriter) Write(p []byte) (n int, err error) {
 	Raw(p)
 	return len(p), nil
 }
 
+// getGoroutineId 获取当前协程 ID
 func (l *Logger) getGoroutineId() (goroutineId string) {
 	buf := make([]byte, 32)
 	runtime.Stack(buf, false)
@@ -545,6 +576,7 @@ func (l *Logger) getGoroutineId() (goroutineId string) {
 	return goroutineId
 }
 
+// getLineFunc 获取日志调用位置和函数名
 func (l *Logger) getLineFunc(fullPath bool) (fileName string, line int, funcName string) {
 	var pc uintptr
 	var file string
@@ -566,6 +598,7 @@ func (l *Logger) getLineFunc(fullPath bool) (fileName string, line int, funcName
 	return fileName, line, funcName
 }
 
+// Stack 返回当前协程的调用栈
 func Stack() string {
 	buf := make([]byte, 1024)
 	for {
@@ -577,6 +610,7 @@ func Stack() string {
 	}
 }
 
+// StackAll 返回全部协程的调用栈
 func StackAll() string {
 	buf := make([]byte, 1024*16)
 	for {

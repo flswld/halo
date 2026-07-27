@@ -11,6 +11,7 @@ import (
 	"github.com/flswld/halo/cpu"
 )
 
+// TestRingBufferData 验证环形缓冲区的并发报文读写
 func TestRingBufferData(t *testing.T) {
 	memory := GetHeapAllocator().AlignedMalloc(SizeOf[RingBuffer]()+1*MB, 0)
 	rb := RingBufferCreate(memory, uint32(SizeOf[RingBuffer]()+1*MB))
@@ -74,10 +75,12 @@ func TestRingBufferData(t *testing.T) {
 	GetHeapAllocator().AlignedFree(memory)
 }
 
+// TestMsg 表示环形缓冲区结构体读写测试消息
 type TestMsg struct {
-	Seq uint64
+	Seq uint64 // 消息序号
 }
 
+// TestRingBufferStruct 验证结构体数据通过环形缓冲区并发传输
 func TestRingBufferStruct(t *testing.T) {
 	memory := GetHeapAllocator().AlignedMalloc(SizeOf[RingBuffer]()+1*MB, 0)
 	rb := RingBufferCreate(memory, uint32(SizeOf[RingBuffer]()+1*MB))
@@ -138,6 +141,7 @@ func TestRingBufferStruct(t *testing.T) {
 	GetHeapAllocator().AlignedFree(memory)
 }
 
+// TestRingBufferShmWrite 持续向共享内存环形缓冲区写入测试报文
 func TestRingBufferShmWrite(t *testing.T) {
 	memory := GetShareMem("RingBuffer", SizeOf[RingBuffer]()+1*MB)
 	offset := int64(0)
@@ -161,6 +165,7 @@ func TestRingBufferShmWrite(t *testing.T) {
 	}
 }
 
+// TestRingBufferShmRead 持续从共享内存环形缓冲区读取测试报文
 func TestRingBufferShmRead(t *testing.T) {
 	memory := GetShareMem("RingBuffer", SizeOf[RingBuffer]()+1*MB)
 	offset := int64(0)

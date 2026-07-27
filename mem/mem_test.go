@@ -5,6 +5,7 @@ import (
 	"time"
 )
 
+// TestMalloc 验证大块类型化内存的分配和释放
 func TestMalloc(t *testing.T) {
 	var heapAllocator Allocator = GetHeapAllocator()
 	p := MallocType[uint8](heapAllocator, 8*GB)
@@ -22,6 +23,7 @@ func TestMalloc(t *testing.T) {
 	FreeType[uint8](heapAllocator, p)
 }
 
+// TestMemCpy 验证大块内存复制
 func TestMemCpy(t *testing.T) {
 	var heapAllocator Allocator = GetHeapAllocator()
 	ptr1 := heapAllocator.Malloc(8 * GB)

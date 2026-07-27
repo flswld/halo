@@ -39,11 +39,14 @@ var (
 	byteCheckModeOnce   sync.Once
 )
 
+// SetByteCheckMode 配置 Halo 扩展的 KCP 载荷校验模式
 func SetByteCheckMode(mode int) {
+	// 报文头部长度属于全局协议参数 进程内只允许首次配置生效
 	byteCheckModeOnce.Do(func() {
 		byteCheckMode = mode
 		if mode != -1 {
 			byteCheckModeEnable = true
+			// 启用后每个 KCP 分片头部增加 4 字节校验值
 			IKCP_OVERHEAD += 4
 		}
 	})
@@ -147,6 +150,7 @@ type segment struct {
 
 // encode a segment into buffer
 func (seg *segment) encode(ptr []byte) []byte {
+	// Halo 将会话 ID 和 KCP 会话号组合为 64 位 conv 写入分片头部
 	ptr = ikcp_encode64u(ptr, seg.conv)
 	ptr = ikcp_encode8u(ptr, seg.cmd)
 	ptr = ikcp_encode8u(ptr, seg.frg)
@@ -156,6 +160,7 @@ func (seg *segment) encode(ptr []byte) []byte {
 	ptr = ikcp_encode32u(ptr, seg.una)
 	ptr = ikcp_encode32u(ptr, uint32(len(seg.data)))
 	if byteCheckModeEnable {
+		// 仅数据分片计算载荷校验 控制分片保留零值占位
 		if seg.cmd == IKCP_CMD_PUSH {
 			ptr = ikcp_encode32u(ptr, byte_check_hash(seg.data))
 		} else {
@@ -598,6 +603,7 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 		data = ikcp_decode32u(data, &una)
 		data = ikcp_decode32u(data, &length)
 		if byteCheckModeEnable {
+			// Halo 扩展在交给 KCP 重组前拒绝载荷校验不一致的数据分片
 			if cmd == IKCP_CMD_PUSH {
 				var hash uint32
 				data = ikcp_decode32u(data, &hash)

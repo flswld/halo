@@ -21,29 +21,32 @@ var (
 	DefaultLogWriter io.Writer = nil
 )
 
+// Log 将 DPDK 日志写入默认日志输出器
 func Log(msg string) {
 	if DefaultLogWriter != nil {
 		_, _ = DefaultLogWriter.Write([]byte(msg))
 	}
 }
 
+// Config 定义 DPDK 数据面的运行参数
 type Config struct {
-	DpdkCpuCoreList []int    // dpdk使用的核心编号列表 主线程第一个核心 每个网卡队列一个核心
-	DpdkMemChanNum  int      // dpdk内存通道数
-	PortIdList      []int    // 使用的网卡id列表
+	DpdkCpuCoreList []int    // DPDK 使用的核心编号列表 主线程使用第一个核心 每个网卡队列使用一个核心
+	DpdkMemChanNum  int      // DPDK 内存通道数
+	PortIdList      []int    // 使用的网卡 ID 列表
 	QueueNum        int      // 启用的网卡队列数
 	RingBufferSize  int      // 环状缓冲区大小
-	AfPacketDevList []string // 使用的af_packet虚拟网卡列表
+	AfPacketDevList []string // 使用的 AF_PACKET 虚拟网卡列表
 	StatsLog        bool     // 收发包统计日志
 	DebugLog        bool     // 收发包调试日志
-	IdleSleep       bool     // 空闲睡眠 降低cpu占用
-	SingleCore      bool     // 单核模式 只使用cpu0
-	KniEnable       bool     // 开启kni内核网卡
+	IdleSleep       bool     // 空闲时睡眠以降低 CPU 占用
+	SingleCore      bool     // 仅使用 CPU 0 的单核模式
+	KniEnable       bool     // 是否启用 KNI 内核网卡
 }
 
+// ring_buffer 保存一组 DPDK 收发环形缓冲区
 type ring_buffer struct {
-	send_ring_buffer *C.ring_buffer_t
-	recv_ring_buffer *C.ring_buffer_t
+	send_ring_buffer *C.ring_buffer_t // 发送环形缓冲区
+	recv_ring_buffer *C.ring_buffer_t // 接收环形缓冲区
 }
 
 var (
@@ -55,7 +58,7 @@ var (
 	running          atomic.Bool
 )
 
-// Run 启动DPDK
+// Run 启动 DPDK 数据面
 func Run(config *Config) {
 	conf = config
 	// 配置参数检查
@@ -85,6 +88,7 @@ func Run(config *Config) {
 	if conf.RingBufferSize&(conf.RingBufferSize-1) != 0 {
 		panic("ring buffer size error")
 	}
+	// C 主循环会阻塞当前线程 因此放入独立协程启动
 	go run_dpdk()
 	// 等待DPDK启动完成
 	for {
@@ -95,6 +99,7 @@ func Run(config *Config) {
 	}
 	port_ring_buffer = make([]ring_buffer, len(conf.PortIdList)*conf.QueueNum)
 	port_pkt_rx_buf = make([][]byte, len(conf.PortIdList)*conf.QueueNum)
+	// C 层拥有环形缓冲区内存 Go 层只保存映射指针和复用接收切片
 	for port_index := range conf.PortIdList {
 		for queue_id := 0; queue_id < conf.QueueNum; queue_id++ {
 			i := port_index*conf.QueueNum + queue_id
@@ -115,8 +120,9 @@ func Run(config *Config) {
 	}
 }
 
-// Exit 停止DPDK
+// Exit 停止 DPDK 数据面
 func Exit() {
+	// 先停止 Go 侧后台任务 再通知 C 层等待工作核心退出并释放资源
 	running.Store(false)
 	C.cgo_exit_signal_handler()
 	time.Sleep(time.Second * 1)
@@ -160,13 +166,14 @@ func EthQueueRxPkt(port_index int, queue_id int) (pkt []byte) {
 func EthQueueTxPkt(port_index int, queue_id int, pkt []byte) {
 	pkt_len := len(pkt)
 	buffer := &(port_ring_buffer[port_index*conf.QueueNum+queue_id])
+	// 环形缓冲区满时当前接口直接丢包 数据面不阻塞等待空间
 	mem.WritePacket((*mem.RingBuffer)(unsafe.Pointer(buffer.send_ring_buffer)), pkt, uint16(pkt_len))
 	if conf.DebugLog {
 		Log(fmt.Sprintf("[eth tx pkt] port_index: %v, len: %v, data: %02x\n", port_index, pkt_len, pkt))
 	}
 }
 
-// KniRxPkt KNI网卡收包
+// KniRxPkt 从 KNI 网卡接收报文
 func KniRxPkt() (pkt []byte) {
 	if !conf.KniEnable {
 		return nil
@@ -188,7 +195,7 @@ func KniRxPkt() (pkt []byte) {
 	return pkt
 }
 
-// KniTxPkt KNI网卡发包
+// KniTxPkt 通过 KNI 网卡发送报文
 func KniTxPkt(pkt []byte) {
 	if !conf.KniEnable {
 		return
@@ -201,7 +208,7 @@ func KniTxPkt(pkt []byte) {
 	}
 }
 
-// 打印网卡收发包统计信息
+// print_port_stats 定时打印网卡收发包统计信息
 func print_port_stats(port_list []int) {
 	ticker := time.NewTicker(time.Second)
 	for {
@@ -221,7 +228,7 @@ func print_port_stats(port_list []int) {
 	}
 }
 
-// 处理KNI内核网卡数据包
+// kni_handle 定时处理 KNI 内核网卡数据包
 func kni_handle() {
 	ticker := time.NewTicker(time.Millisecond * 100)
 	for {
@@ -234,7 +241,7 @@ func kni_handle() {
 	}
 }
 
-// 构建EAL参数
+// build_eal_arg 构建 DPDK EAL 启动参数
 func build_eal_arg() (int, []*C.char) {
 	eal_argc := 0
 	eal_argv := make([]*C.char, 0)
@@ -261,10 +268,11 @@ func build_eal_arg() (int, []*C.char) {
 	}
 	eal_argc++
 	eal_argv = append(eal_argv, C.CString("--"))
+	// 返回的 C 字符串由 run_dpdk 在 C 主循环退出后统一释放
 	return eal_argc, eal_argv
 }
 
-// 运行DPDK
+// run_dpdk 组装 C 层配置并运行 DPDK
 func run_dpdk() {
 	var pinner runtime.Pinner
 	var config C.struct_dpdk_config
@@ -274,6 +282,7 @@ func run_dpdk() {
 	for i, v := range eal_argv {
 		_eal_argv[i] = v
 	}
+	// C 主循环存续期间固定 Go 数组地址 防止运行时移动或回收传入内存
 	pinner.Pin(&_eal_argv[0])
 	config.eal_argv = &_eal_argv[0]
 	config.cpu_core_num = C.int(len(conf.DpdkCpuCoreList))
@@ -297,6 +306,7 @@ func run_dpdk() {
 	config.single_core = C.bool(conf.SingleCore)
 	config.kni_enable = C.bool(conf.KniEnable)
 	C.cgo_dpdk_main(&config)
+	// cgo_dpdk_main 返回后 C 层不再持有参数数组和字符串
 	for _, arg := range eal_argv {
 		C.free(unsafe.Pointer(arg))
 	}

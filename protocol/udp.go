@@ -17,6 +17,7 @@ import (
 +-----------------------------------------------+
 */
 
+// ParseUdpPkt 解析 UDP 报文并按配置验证校验和
 func ParseUdpPkt(pkt []byte, srcAddr []byte, dstAddr []byte) (payload []byte, srcPort uint16, dstPort uint16, err error) {
 	if len(pkt) < 8 || len(pkt) > 1480 {
 		return nil, 0, 0, errors.New("udp packet len must >= 8 and <= 1480 bytes")
@@ -29,6 +30,7 @@ func ParseUdpPkt(pkt []byte, srcAddr []byte, dstAddr []byte) (payload []byte, sr
 	totalLen := int(binary.BigEndian.Uint16([]byte{pkt[4], pkt[5]}))
 	// 检查校验和
 	if CheckSumEnable {
+		// UDP 校验和覆盖 IPv4 伪首部和完整 UDP 报文
 		fakeHeader := make([]byte, 0, 12)
 		fakeHeader = append(fakeHeader, srcAddr...)
 		fakeHeader = append(fakeHeader, dstAddr...)
@@ -46,6 +48,7 @@ func ParseUdpPkt(pkt []byte, srcAddr []byte, dstAddr []byte) (payload []byte, sr
 	return payload, srcPort, dstPort, nil
 }
 
+// BuildUdpPkt 构建 UDP 报文并按配置计算校验和
 func BuildUdpPkt(pkt []byte, payload []byte, srcPort uint16, dstPort uint16, srcAddr []byte, dstAddr []byte) ([]byte, error) {
 	if pkt == nil {
 		pkt = make([]byte, 0, 8)
@@ -66,6 +69,7 @@ func BuildUdpPkt(pkt []byte, payload []byte, srcPort uint16, dstPort uint16, src
 	pkt = append(pkt, payload...)
 	// 计算校验和
 	if CheckSumEnable {
+		// IPv4 伪首部参与校验但不会写入实际报文
 		fakeHeader := make([]byte, 0, 12)
 		fakeHeader = append(fakeHeader, srcAddr...)
 		fakeHeader = append(fakeHeader, dstAddr...)

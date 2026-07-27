@@ -21,30 +21,37 @@ var (
 	DefaultLogWriter io.Writer = nil
 )
 
+// Log 将引擎日志写入默认日志输出器
 func Log(msg string) {
 	if DefaultLogWriter != nil {
 		_, _ = DefaultLogWriter.Write([]byte(msg))
 	}
 }
 
+// IpAddrHash 表示可计算哈希值的 IPv4 地址
 type IpAddrHash uint32
 
+// GetHashCode 计算 IPv4 地址的哈希值
 func (h IpAddrHash) GetHashCode() uint64 {
 	data := make([]byte, 4)
 	binary.LittleEndian.PutUint32(data, uint32(h))
 	return hashmap.GetHashCode(data)
 }
 
+// PortHash 表示可计算哈希值的端口号
 type PortHash uint16
 
+// GetHashCode 计算端口号的哈希值
 func (h PortHash) GetHashCode() uint64 {
 	data := make([]byte, 2)
 	binary.LittleEndian.PutUint16(data, uint16(h))
 	return hashmap.GetHashCode(data)
 }
 
+// MacAddrHash 表示可计算哈希值的 MAC 地址
 type MacAddrHash [6]byte
 
+// GetHashCode 计算 MAC 地址的哈希值
 func (h MacAddrHash) GetHashCode() uint64 {
 	return hashmap.GetHashCode(h[:])
 }
@@ -54,67 +61,67 @@ type RouterConfig struct {
 	DebugLog      bool                // 调试日志
 	NetIfList     []*NetIfConfig      // 网卡列表
 	RouteList     []*RouteEntryConfig // 静态路由列表
-	StaticMemSize int                 // 静态内存大小
+	StaticMemSize int                 // 静态内存池大小
 }
 
 // NetIfConfig 网卡配置
 type NetIfConfig struct {
 	Name               string                       // 网卡名
-	MacAddr            string                       // mac地址
-	IpAddr             string                       // ip地址
+	MacAddr            string                       // MAC 地址
+	IpAddr             string                       // IP 地址
 	NetworkMask        string                       // 子网掩码
 	Gateway            string                       // 网关地址
-	NatEnable          bool                         // 开启网络地址转换
+	NatEnable          bool                         // 是否开启网络地址转换
 	NatType            int                          // 网络地址转换类型
 	NatPortMappingList []*NatPortMappingEntryConfig // 网络地址转换端口映射表
-	DnsServerAddr      string                       // dns服务器地址
-	DhcpServerEnable   bool                         // 开启dhcp服务器
-	DhcpClientEnable   bool                         // 开启dhcp客户端
+	DnsServerAddr      string                       // DNS 服务器地址
+	DhcpServerEnable   bool                         // 是否开启 DHCP 服务器
+	DhcpClientEnable   bool                         // 是否开启 DHCP 客户端
 	EthRxFunc          func() (pkt []byte)          // 网卡收包方法
 	EthTxFunc          func(pkt []byte)             // 网卡发包方法
-	BindCpuCore        int                          // 绑定的cpu核心
+	BindCpuCore        int                          // 绑定的 CPU 核心 负值表示不绑核
 }
 
 // NatPortMappingEntryConfig NAT端口映射配置
 type NatPortMappingEntryConfig struct {
-	WanPort       uint16 // wan口端口
-	LanHostIpAddr string // lan口主机ip地址
-	LanHostPort   uint16 // lan口主机端口
-	Ipv4HeadProto uint8  // ip头部协议
+	WanPort       uint16 // WAN 口端口
+	LanHostIpAddr string // LAN 侧主机 IP 地址
+	LanHostPort   uint16 // LAN 侧主机端口
+	Ipv4HeadProto uint8  // IPv4 上层协议
 }
 
 // RouteEntryConfig 路由条目配置
 type RouteEntryConfig struct {
-	DstIpAddr   string // 目的ip地址
+	DstIpAddr   string // 目的 IP 地址
 	NetworkMask string // 网络掩码
-	NextHop     string // 下一跳
-	NetIf       string // 出接口
+	NextHop     string // 下一跳地址
+	NetIf       string // 出接口名称
 }
 
 // NetIf 网卡
 type NetIf struct {
 	Config                  *NetIfConfig                               // 配置
-	MacAddr                 []byte                                     // mac地址
-	IpAddr                  []byte                                     // ip地址
+	MacAddr                 []byte                                     // MAC 地址
+	IpAddr                  []byte                                     // IP 地址
 	NetworkMask             []byte                                     // 子网掩码
 	Gateway                 []byte                                     // 网关地址
 	EthTxBuffer             []byte                                     // 网卡发包缓冲区
 	EthTxLock               cpu.SpinLock                               // 网卡发包锁
 	LoChan                  chan []byte                                // 本地回环管道
-	Router                  *Router                                    // 归属Router指针
-	ArpCacheTable           *hashmap.HashMap[IpAddrHash, *ArpCache]    // arp缓存表 key:ip value:mac
-	ArpLock                 sync.RWMutex                               // arp锁
-	NatFlowTable            *hashmap.HashMap[NatFlowHash, *NatFlow]    // nat流表 key:流摘要 value:流信息
-	NatWanFlowTable         *hashmap.HashMap[NatWanFlowHash, *NatFlow] // wan口回程包nat流映射表 key:wan口流摘要 value:流信息
-	NatPortAlloc            *hashmap.HashMap[IpAddrHash, *PortAlloc]   // nat端口分配表 key:远程ip value:端口分配信息
+	Router                  *Router                                    // 归属路由器
+	ArpCacheTable           *hashmap.HashMap[IpAddrHash, *ArpCache]    // ARP 缓存表 键为 IP 地址 值为缓存项
+	ArpLock                 sync.RWMutex                               // ARP 表读写锁
+	NatFlowTable            *hashmap.HashMap[NatFlowHash, *NatFlow]    // NAT 流表 键为流摘要 值为流信息
+	NatWanFlowTable         *hashmap.HashMap[NatWanFlowHash, *NatFlow] // WAN 口回程包 NAT 流表 键为 WAN 流摘要 值为流信息
+	NatPortAlloc            *hashmap.HashMap[IpAddrHash, *PortAlloc]   // NAT 端口分配表 键为远程 IP 地址 值为端口分配信息
 	NatPortMappingTable     []*NatPortMappingEntry                     // 网络地址转换端口映射表
-	NatLock                 sync.RWMutex                               // nat锁
-	DnsServerAddr           []byte                                     // dns服务器地址
-	DhcpLeaseTable          *hashmap.HashMap[IpAddrHash, *DhcpLease]   // dhcp租期表 key:ip value:租期信息
-	DhcpLock                sync.RWMutex                               // dhcp锁
-	DhcpClientTransactionId []byte                                     // dhcp客户端事务id
-	UdpServiceMap           map[uint16]UdpHandleFunc                   // udp服务集合 key:端口 value:处理函数
-	TcpServiceMap           map[uint16]TcpHandleFunc                   // tcp服务集合 key:端口 value:处理函数
+	NatLock                 sync.RWMutex                               // NAT 表读写锁
+	DnsServerAddr           []byte                                     // DNS 服务器地址
+	DhcpLeaseTable          *hashmap.HashMap[IpAddrHash, *DhcpLease]   // DHCP 租期表 键为 IP 地址 值为租期信息
+	DhcpLock                sync.RWMutex                               // DHCP 表读写锁
+	DhcpClientTransactionId []byte                                     // DHCP 客户端事务 ID
+	UdpServiceMap           map[uint16]UdpHandleFunc                   // UDP 服务集合 键为端口 值为处理函数
+	TcpServiceMap           map[uint16]TcpHandleFunc                   // TCP 服务集合 键为端口 值为处理函数
 }
 
 // Router 路由器
@@ -122,24 +129,27 @@ type Router struct {
 	Config                  *RouterConfig                                      // 配置
 	Stop                    atomic.Bool                                        // 停止标志
 	StopWaitGroup           sync.WaitGroup                                     // 停止等待组
-	NetIfMap                map[string]*NetIf                                  // 网络接口集合 key:接口名 value:接口实例
+	NetIfMap                map[string]*NetIf                                  // 网络接口集合 键为接口名 值为接口实例
 	RouteTable              *RouteTable                                        // 路由表
-	NatPortMappingFlowTable *hashmap.HashMap[NatFlowHash, *NatPortMappingFlow] // 端口映射回程NAT流表 key:流摘要 value:流信息
-	NatPortMappingFlowLock  sync.RWMutex                                       // 端口映射回程NAT流锁
-	Ipv4PktFwdHook          func(raw []byte, dir int) (drop bool, mod []byte)  // ip报文转发钩子
+	NatPortMappingFlowTable *hashmap.HashMap[NatFlowHash, *NatPortMappingFlow] // 端口映射回程 NAT 流表 键为流摘要 值为流信息
+	NatPortMappingFlowLock  sync.RWMutex                                       // 端口映射回程 NAT 流表读写锁
+	Ipv4PktFwdHook          func(raw []byte, dir int) (drop bool, mod []byte)  // IPv4 报文转发钩子
 	StaticAllocatorPtr      unsafe.Pointer                                     // 静态内存分配器指针
 	StaticAllocator         mem.Allocator                                      // 静态内存分配器
-	TimeNow                 uint32                                             // 当前毫秒时间戳
+	TimeNow                 uint32                                             // 当前 Unix 秒级时间戳
 }
 
+// InitRouter 根据配置初始化路由器
 func InitRouter(config *RouterConfig) (*Router, error) {
 	if config.StaticMemSize == 0 {
 		config.StaticMemSize = 8 * mem.MB
 	}
+	// 路由器级静态内存池由所有接口的 ARP NAT DHCP 和端口映射表共享
 	heapAllocator := mem.GetHeapAllocator()
 	staticAllocatorPtr := heapAllocator.Malloc(uint64(config.StaticMemSize))
 	staticAllocator := mem.NewStaticAllocator(staticAllocatorPtr, uint64(config.StaticMemSize))
 	initSuccess := false
+	// 任一配置解析失败时回收尚未移交给路由器生命周期的内存池
 	defer func() {
 		if !initSuccess {
 			heapAllocator.Free(staticAllocatorPtr)
@@ -160,6 +170,7 @@ func InitRouter(config *RouterConfig) (*Router, error) {
 	}
 	// 网卡列表
 	for _, netIfConfig := range config.NetIfList {
+		// 配置中的文本地址在初始化阶段统一转换为数据面使用的定长字节表示
 		macAddr, err := protocol.ParseMacAddr(netIfConfig.MacAddr)
 		if err != nil {
 			return nil, err
@@ -212,6 +223,7 @@ func InitRouter(config *RouterConfig) (*Router, error) {
 			UdpServiceMap:           make(map[uint16]UdpHandleFunc),
 			TcpServiceMap:           make(map[uint16]TcpHandleFunc),
 		}
+		// 静态端口映射预先转换 LAN 地址 避免转发热路径重复解析字符串
 		for _, natPortMappingEntryConfig := range netIfConfig.NatPortMappingList {
 			lanHostIpAddr, err := protocol.ParseIpAddr(natPortMappingEntryConfig.LanHostIpAddr)
 			if err != nil {
@@ -228,6 +240,7 @@ func InitRouter(config *RouterConfig) (*Router, error) {
 	}
 	// 路由表
 	for _, routingEntryConfig := range config.RouteList {
+		// 静态路由保持配置顺序写入 相同前缀由流哈希选择等价路径
 		dstIpAddr, err := protocol.ParseIpAddr(routingEntryConfig.DstIpAddr)
 		if err != nil {
 			return nil, err
@@ -249,6 +262,7 @@ func InitRouter(config *RouterConfig) (*Router, error) {
 	}
 	// 直连路由
 	for _, netIf := range r.NetIfMap {
+		// DHCP 接口在获得地址和掩码后再安装直连路由
 		if netIf.Config.DhcpClientEnable {
 			continue
 		}
@@ -266,12 +280,17 @@ func InitRouter(config *RouterConfig) (*Router, error) {
 	return r, nil
 }
 
+// RunRouter 启动路由器及各网络接口的后台处理任务
 func (r *Router) RunRouter() {
 	r.Stop.Store(false)
+	// Monitor 为各老化任务提供统一的秒级时间基准
 	go r.Monitor()
+	r.StopWaitGroup.Add(1)
+	// 端口映射回程流属于路由器级状态 只启动一个清理任务
 	go r.NatPortMappingFlowClear()
 	r.StopWaitGroup.Add(1)
 	for _, netIf := range r.NetIfMap {
+		// DHCP WAN 先发现地址 静态地址接口则主动通告本机地址
 		if netIf.Config.DhcpClientEnable {
 			netIf.DhcpDiscover()
 		} else {
@@ -294,6 +313,7 @@ func (r *Router) RunRouter() {
 	}
 }
 
+// Monitor 更新路由器使用的当前时间
 func (r *Router) Monitor() {
 	ticker := time.NewTicker(time.Second * 1)
 	for {
@@ -306,10 +326,12 @@ func (r *Router) Monitor() {
 	r.StopWaitGroup.Done()
 }
 
+// GetNetIf 按名称获取路由器网络接口
 func (r *Router) GetNetIf(name string) *NetIf {
 	return r.NetIfMap[name]
 }
 
+// StopRouter 停止路由器并释放静态内存池
 func (r *Router) StopRouter() {
 	r.Stop.Store(true)
 	r.StopWaitGroup.Wait()
@@ -317,6 +339,7 @@ func (r *Router) StopRouter() {
 	heapAllocator.Free(r.StaticAllocatorPtr)
 }
 
+// PacketHandle 持续接收并分发网络接口报文
 func (i *NetIf) PacketHandle() {
 	if i.Config.BindCpuCore >= 0 {
 		cpu.BindCpuCore(i.Config.BindCpuCore)
@@ -332,6 +355,7 @@ func (i *NetIf) PacketHandle() {
 		}
 		n++
 		if n == 100-1 {
+			// 每处理一批外部轮询后集中排空本地回环 避免回环流量长期饥饿
 			for {
 				if n == 0 {
 					break
@@ -369,20 +393,20 @@ type SwitchPortConfig struct {
 	Name        string              // 端口名
 	EthRxFunc   func() (pkt []byte) // 端口收包方法
 	EthTxFunc   func(pkt []byte)    // 端口发包方法
-	VlanId      uint16              // vlan号
-	BindCpuCore int                 // 绑定的cpu核心
+	VlanId      uint16              // VLAN 编号
+	BindCpuCore int                 // 绑定的 CPU 核心 负值表示不绑核
 }
 
 // SwitchConfig 交换机配置
 type SwitchConfig struct {
 	SwitchPortList []*SwitchPortConfig // 端口列表
-	StaticMemSize  int                 // 静态内存大小
+	StaticMemSize  int                 // 静态内存池大小
 }
 
 // SwitchPort 交换机端口
 type SwitchPort struct {
 	Config      *SwitchPortConfig // 配置
-	Switch      *Switch           // 归属Switch指针
+	Switch      *Switch           // 归属交换机
 	EthTxBuffer []byte            // 端口发包缓冲区
 	EthTxLock   cpu.SpinLock      // 端口发包锁
 }
@@ -392,18 +416,20 @@ type Switch struct {
 	Config             *SwitchConfig                                 // 配置
 	Stop               atomic.Bool                                   // 停止标志
 	StopWaitGroup      sync.WaitGroup                                // 停止等待组
-	SwitchPortMap      map[string]*SwitchPort                        // 交换机端口集合 key:端口名 value:端口实例
-	SwitchMacAddrTable *hashmap.HashMap[MacAddrHash, *SwitchMacAddr] // 交换机mac地址表 key:mac地址 value:地址信息
-	SwitchMacAddrLock  sync.RWMutex                                  // 交换机mac地址锁
+	SwitchPortMap      map[string]*SwitchPort                        // 交换机端口集合 键为端口名 值为端口实例
+	SwitchMacAddrTable *hashmap.HashMap[MacAddrHash, *SwitchMacAddr] // 交换机 MAC 地址表 键为 MAC 地址 值为地址信息
+	SwitchMacAddrLock  sync.RWMutex                                  // 交换机 MAC 地址表读写锁
 	StaticAllocatorPtr unsafe.Pointer                                // 静态内存分配器指针
 	StaticAllocator    mem.Allocator                                 // 静态内存分配器
-	TimeNow            uint32                                        // 当前毫秒时间戳
+	TimeNow            uint32                                        // 当前 Unix 秒级时间戳
 }
 
+// InitSwitch 根据配置初始化交换机
 func InitSwitch(config *SwitchConfig) (*Switch, error) {
 	if config.StaticMemSize == 0 {
 		config.StaticMemSize = 8 * mem.MB
 	}
+	// 交换机 MAC 表及其条目统一从交换机级静态内存池分配
 	heapAllocator := mem.GetHeapAllocator()
 	staticAllocatorPtr := heapAllocator.Malloc(uint64(config.StaticMemSize))
 	staticAllocator := mem.NewStaticAllocator(staticAllocatorPtr, uint64(config.StaticMemSize))
@@ -426,6 +452,7 @@ func InitSwitch(config *SwitchConfig) (*Switch, error) {
 	return s, nil
 }
 
+// RunSwitch 启动交换机及各端口的后台处理任务
 func (s *Switch) RunSwitch() {
 	s.Stop.Store(false)
 	go s.Monitor()
@@ -438,6 +465,7 @@ func (s *Switch) RunSwitch() {
 	s.StopWaitGroup.Add(1)
 }
 
+// Monitor 更新交换机使用的当前时间
 func (s *Switch) Monitor() {
 	ticker := time.NewTicker(time.Second * 1)
 	for {
@@ -450,10 +478,12 @@ func (s *Switch) Monitor() {
 	s.StopWaitGroup.Done()
 }
 
+// GetSwitchPort 按名称获取交换机端口
 func (s *Switch) GetSwitchPort(name string) *SwitchPort {
 	return s.SwitchPortMap[name]
 }
 
+// StopSwitch 停止交换机并释放静态内存池
 func (s *Switch) StopSwitch() {
 	s.Stop.Store(true)
 	s.StopWaitGroup.Wait()
@@ -461,6 +491,7 @@ func (s *Switch) StopSwitch() {
 	heapAllocator.Free(s.StaticAllocatorPtr)
 }
 
+// PacketHandle 持续接收并分发交换机端口报文
 func (s *SwitchPort) PacketHandle() {
 	if s.Config.BindCpuCore >= 0 {
 		cpu.BindCpuCore(s.Config.BindCpuCore)
@@ -477,14 +508,17 @@ func (s *SwitchPort) PacketHandle() {
 	s.Switch.StopWaitGroup.Done()
 }
 
+// Wire 提供基于内存环形缓冲区的虚拟链路
 type Wire struct {
-	Memory     unsafe.Pointer
-	RingBuffer *mem.RingBuffer
-	Data       []byte
-	IdleSleep  bool
+	Memory     unsafe.Pointer  // 环形缓冲区使用的底层内存
+	RingBuffer *mem.RingBuffer // 环形缓冲区
+	Data       []byte          // 接收报文缓冲区
+	IdleSleep  bool            // 空闲时是否睡眠
 }
 
+// NewWire 创建虚拟链路
 func NewWire(idleSleep bool) *Wire {
+	// Wire 同时持有环形缓冲区头部和 8 MiB 数据区的底层内存
 	memory := mem.GetHeapAllocator().Malloc(mem.SizeOf[mem.RingBuffer]() + 8*mem.MB)
 	ringBuffer := mem.RingBufferCreate(memory, uint32(mem.SizeOf[mem.RingBuffer]()+8*mem.MB))
 	return &Wire{
@@ -495,6 +529,7 @@ func NewWire(idleSleep bool) *Wire {
 	}
 }
 
+// Rx 从虚拟链路接收一个报文
 func (w *Wire) Rx() (pkt []byte) {
 	dataLen := uint16(0)
 	mem.ReadPacket(w.RingBuffer, w.Data, &dataLen)
@@ -507,10 +542,12 @@ func (w *Wire) Rx() (pkt []byte) {
 	return w.Data[:dataLen]
 }
 
+// Tx 向虚拟链路发送一个报文
 func (w *Wire) Tx(pkt []byte) {
 	mem.WritePacket(w.RingBuffer, pkt, uint16(len(pkt)))
 }
 
+// Destroy 销毁虚拟链路并释放底层内存
 func (w *Wire) Destroy() {
 	mem.RingBufferDestroy(w.RingBuffer)
 	mem.GetHeapAllocator().Free(w.Memory)

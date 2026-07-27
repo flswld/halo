@@ -14,6 +14,7 @@ const (
 	__NCPUBITS  = 64
 )
 
+// BindCpuCore 将当前操作系统线程绑定到指定 CPU 核心
 func BindCpuCore(core int) bool {
 	runtime.LockOSThread()
 	var mask [CPU_SETSIZE / __NCPUBITS]uint64
@@ -25,6 +26,7 @@ func BindCpuCore(core int) bool {
 	return true
 }
 
+// UnbindCpuCore 解除当前操作系统线程的 CPU 核心绑定
 func UnbindCpuCore() bool {
 	var mask [CPU_SETSIZE / __NCPUBITS]uint64
 	num_cpu := runtime.NumCPU()

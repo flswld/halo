@@ -18,6 +18,7 @@ static unsigned long long thread_id() {
 */
 import "C"
 
+// getThreadId 获取当前 Darwin 线程 ID
 func (l *Logger) getThreadId() (threadId string) {
 	return strconv.FormatUint(uint64(C.thread_id()), 10)
 }

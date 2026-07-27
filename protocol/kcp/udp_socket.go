@@ -7,14 +7,14 @@ import (
 	"golang.org/x/net/ipv4"
 )
 
-// 客户端收包循环
+// defaultRx 使用通用 PacketConn 执行客户端收包循环
 func (s *UDPSession) defaultRx() {
 	buf := make([]byte, mtuLimit)
 	var src string
 	for {
 		if n, addr, err := s.conn.ReadFrom(buf); err == nil {
 			udpPayload := buf[:n]
-			// make sure the packet is from the same source
+			// Halo 网络切换保持扩展允许已建立会话更新远端地址
 			if src == "" { // set source address
 				src = addr.String()
 			} else if addr.String() != src {
@@ -22,6 +22,7 @@ func (s *UDPSession) defaultRx() {
 				src = addr.String()
 			}
 			if n == 20 {
+				// 固定长度报文按 Enet 控制包解析并校验组合会话标识
 				connType, enetType, sessionId, conv, _, err := ParseEnet(udpPayload)
 				if err != nil {
 					continue
@@ -42,7 +43,7 @@ func (s *UDPSession) defaultRx() {
 	}
 }
 
-// 服务器全局收包循环
+// defaultRx 使用通用 PacketConn 执行服务端全局收包循环
 func (l *Listener) defaultRx() {
 	buf := make([]byte, mtuLimit)
 	for {
@@ -55,13 +56,14 @@ func (l *Listener) defaultRx() {
 	}
 }
 
-// 公共发包接口
+// defaultTx 逐包发送 KCP 输出队列并更新统计
 func (s *UDPSession) defaultTx(txqueue []ipv4.Message) {
 	nbytes := 0
 	npkts := 0
 	for k := range txqueue {
 		var n = 0
 		var err error = nil
+		// 服务端共享 PacketConn 客户端使用已连接 UDP 套接字
 		if s.l != nil {
 			n, err = s.conn.WriteTo(txqueue[k].Buffers[0], txqueue[k].Addr)
 		} else {
@@ -79,7 +81,7 @@ func (s *UDPSession) defaultTx(txqueue []ipv4.Message) {
 	atomic.AddUint64(&DefaultSnmp.OutBytes, uint64(nbytes))
 }
 
-// 服务器Enet事件发送接口
+// defaultSendEnetNotifyToPeer 通过服务端 PacketConn 发送 Enet 控制包
 func (l *Listener) defaultSendEnetNotifyToPeer(enet *Enet) {
 	data := BuildEnet(enet.ConnType, enet.EnetType, enet.SessionId, enet.Conv)
 	if data == nil {
@@ -92,7 +94,7 @@ func (l *Listener) defaultSendEnetNotifyToPeer(enet *Enet) {
 	_, _ = l.conn.WriteTo(data, remoteAddr)
 }
 
-// 客户端Enet事件发送接口
+// defaultSendEnetNotifyToPeer 通过客户端连接发送 Enet 控制包
 func (s *UDPSession) defaultSendEnetNotifyToPeer(enet *Enet) {
 	data := BuildEnet(enet.ConnType, enet.EnetType, enet.SessionId, enet.Conv)
 	if data == nil {
@@ -105,13 +107,14 @@ func (s *UDPSession) defaultSendEnetNotifyToPeer(enet *Enet) {
 	}
 }
 
+// rxChanConn 执行 Halo 内存管道客户端收包循环
 func (s *UDPSession) rxChanConn() {
 	buf := make([]byte, mtuLimit)
 	var src string
 	for {
 		if n, addr, err := s.conn.ReadFrom(buf); err == nil {
 			udpPayload := buf[:n]
-			// make sure the packet is from the same source
+			// 管道端点变化与 UDP 网络切换使用相同的会话保持语义
 			if src == "" { // set source address
 				src = addr.String()
 			} else if addr.String() != src {
@@ -119,6 +122,7 @@ func (s *UDPSession) rxChanConn() {
 				src = addr.String()
 			}
 			if n == 20 {
+				// 仅处理属于当前组合会话标识的 Enet 控制包
 				connType, enetType, sessionId, conv, _, err := ParseEnet(udpPayload)
 				if err != nil {
 					continue
@@ -139,6 +143,7 @@ func (s *UDPSession) rxChanConn() {
 	}
 }
 
+// rxChanConn 执行 Halo 内存管道服务端全局收包循环
 func (l *Listener) rxChanConn() {
 	buf := make([]byte, mtuLimit)
 	for {
@@ -151,6 +156,7 @@ func (l *Listener) rxChanConn() {
 	}
 }
 
+// txChanConn 将 KCP 输出队列逐包写入 Halo 内存管道
 func (s *UDPSession) txChanConn(txqueue []ipv4.Message) {
 	nbytes := 0
 	npkts := 0
@@ -170,6 +176,7 @@ func (s *UDPSession) txChanConn(txqueue []ipv4.Message) {
 	atomic.AddUint64(&DefaultSnmp.OutBytes, uint64(nbytes))
 }
 
+// sendEnetNotifyToPeerChanConn 通过服务端内存管道发送 Enet 控制包
 func (l *Listener) sendEnetNotifyToPeerChanConn(enet *Enet) {
 	data := BuildEnet(enet.ConnType, enet.EnetType, enet.SessionId, enet.Conv)
 	if data == nil {
@@ -178,6 +185,7 @@ func (l *Listener) sendEnetNotifyToPeerChanConn(enet *Enet) {
 	_, _ = l.conn.WriteTo(data, enet.Addr)
 }
 
+// sendEnetNotifyToPeerChanConn 通过客户端内存管道发送 Enet 控制包
 func (s *UDPSession) sendEnetNotifyToPeerChanConn(enet *Enet) {
 	data := BuildEnet(enet.ConnType, enet.EnetType, enet.SessionId, enet.Conv)
 	if data == nil {

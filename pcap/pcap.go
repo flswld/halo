@@ -165,12 +165,16 @@ func timeoutMillis(timeout time.Duration) int {
 	return int(timeout / time.Millisecond)
 }
 
+// OpenDevice 是 Halo 扩展的跨平台设备名打开入口
+// Windows 按设备描述匹配 其他平台按接口名称匹配
 func OpenDevice(name string) (*Handle, error) {
 	ifs, err := FindAllDevs()
 	if err != nil {
 		return nil, err
 	}
+	// 匹配成功后统一使用全长抓包 混杂模式和永久等待参数
 	for _, dev := range ifs {
+		// Npcap 的可读名称位于 Description 实际打开时仍使用内部设备名
 		if runtime.GOOS == "windows" {
 			if dev.Description == name {
 				return OpenLive(dev.Name, 65535, true, BlockForever)

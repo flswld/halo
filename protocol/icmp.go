@@ -29,6 +29,7 @@ const (
 	ICMP_UNKNOWN uint8 = 0xff
 )
 
+// ParseIcmpPkt 解析受支持的 ICMP 报文并验证校验和
 func ParseIcmpPkt(pkt []byte) (payload []byte, icmpType uint8, icmpId []byte, icmpSeq uint16, err error) {
 	if len(pkt) < 8 || len(pkt) > 1480 {
 		return nil, ICMP_UNKNOWN, nil, 0, errors.New("icmp packet len must >= 8 and <= 1480 bytes")
@@ -48,7 +49,7 @@ func ParseIcmpPkt(pkt []byte) (payload []byte, icmpType uint8, icmpId []byte, ic
 	if pkt[1] != 0x00 {
 		return nil, ICMP_UNKNOWN, nil, 0, errors.New("not support type of icmp packet")
 	}
-	// 检查校验和
+	// 完整报文包含原校验和时计算结果应为零
 	if GetCheckSum(pkt) != 0 {
 		return nil, ICMP_UNKNOWN, nil, 0, errors.New("check sum error")
 	}
@@ -61,6 +62,7 @@ func ParseIcmpPkt(pkt []byte) (payload []byte, icmpType uint8, icmpId []byte, ic
 	return payload, icmpType, icmpId, icmpSeq, nil
 }
 
+// BuildIcmpPkt 构建 ICMP 报文并计算校验和
 func BuildIcmpPkt(pkt []byte, payload []byte, icmpType uint8, icmpId []byte, icmpSeq uint16) ([]byte, error) {
 	if pkt == nil {
 		pkt = make([]byte, 0, 40)
@@ -72,7 +74,7 @@ func BuildIcmpPkt(pkt []byte, payload []byte, icmpType uint8, icmpId []byte, icm
 	pkt = append(pkt, icmpType)
 	// 代码
 	pkt = append(pkt, 0x00)
-	// 校验和(填充零)
+	// 校验和字段先清零再对完整 ICMP 报文计算
 	pkt = append(pkt, 0x00, 0x00)
 	// 标识
 	pkt = append(pkt, icmpId...)
@@ -80,7 +82,6 @@ func BuildIcmpPkt(pkt []byte, payload []byte, icmpType uint8, icmpId []byte, icm
 	pkt = append(pkt, uint8(icmpSeq>>8), uint8(icmpSeq))
 	// 数据
 	pkt = append(pkt, payload...)
-	// 计算校验和
 	sum := GetCheckSum(pkt)
 	pkt[2] = byte(sum >> 8)
 	pkt[3] = byte(sum)

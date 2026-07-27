@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 
+// bind_cpu_core 将当前线程绑定到指定 CPU 核心集合
 int bind_cpu_core(int *core_list, int len) {
     DWORD_PTR mask = 0;
     for (int i = 0; i < len; i++) {
@@ -21,6 +22,7 @@ int bind_cpu_core(int *core_list, int len) {
 #include <sched.h>
 #include <pthread.h>
 
+// bind_cpu_core 将当前线程绑定到指定 CPU 核心集合
 int bind_cpu_core(int *core_list, int len) {
     cpu_set_t mask;
     CPU_ZERO(&mask);
@@ -35,6 +37,7 @@ int bind_cpu_core(int *core_list, int len) {
 
 #else
 
+// bind_cpu_core 在不支持的平台报告 CPU 核心绑定失败
 int bind_cpu_core(int *core_list, int len) {
     return -1;
 }

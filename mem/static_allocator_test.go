@@ -6,6 +6,7 @@ import (
 	"unsafe"
 )
 
+// TestStaticAllocator 验证静态分配器的大块内存分配和回收
 func TestStaticAllocator(t *testing.T) {
 	var heapAllocator Allocator = GetHeapAllocator()
 	p := heapAllocator.Malloc(8 * GB)

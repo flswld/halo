@@ -142,6 +142,7 @@ func newUDPSession(conv uint64, l *Listener, conn net.PacketConn, ownConn bool, 
 		}
 	}
 	if _, ok := conn.(*ChanConn); ok {
+		// Halo 扩展允许 KCP 复用内存管道而不经过 UDP 套接字
 		sess.isChanConn = true
 	}
 
@@ -153,6 +154,7 @@ func newUDPSession(conv uint64, l *Listener, conn net.PacketConn, ownConn bool, 
 	sess.kcp.ReserveBytes(sess.headerSize)
 
 	if sess.l == nil { // it's a client connection
+		// 客户端独占收包循环 服务端会话由 Listener 统一分发报文
 		if !sess.isChanConn {
 			go sess.rx()
 		} else {
@@ -241,7 +243,7 @@ func (s *UDPSession) Read(b []byte) (n int, err error) {
 	}
 }
 
-// GetMaxPayloadLen 获取最大载荷长度
+// GetMaxPayloadLen 获取单条 KCP 消息允许的最大载荷长度
 func (s *UDPSession) GetMaxPayloadLen() int {
 	return 256 * int(s.kcp.mss)
 }
@@ -326,12 +328,13 @@ func (s *UDPSession) WriteBuffers(v [][]byte) (n int, err error) {
 // uncork sends data in txqueue if there is any
 func (s *UDPSession) uncork() {
 	if len(s.txqueue) > 0 {
+		// Halo 管道传输与 UDP 传输共享同一批 KCP 输出队列
 		if !s.isChanConn {
 			s.tx(s.txqueue)
 		} else {
 			s.txChanConn(s.txqueue)
 		}
-		// recycle
+		// 发送完成后归还每个报文缓冲区
 		for k := range s.txqueue {
 			xmitBuf.Put(s.txqueue[k].Buffers[0])
 			s.txqueue[k].Buffers = nil
@@ -340,7 +343,7 @@ func (s *UDPSession) uncork() {
 	}
 }
 
-// CloseReason 关闭连接附带原因
+// CloseReason 关闭连接并通过 Halo Enet 扩展通知关闭原因
 func (s *UDPSession) CloseReason(enetType uint32) error {
 	var once bool
 	s.dieOnce.Do(func() {
@@ -349,6 +352,7 @@ func (s *UDPSession) CloseReason(enetType uint32) error {
 	})
 
 	if once {
+		// 只有首次关闭负责发送 FIN 并冲刷待发送数据
 		enet := &Enet{
 			Addr:      s.remote,
 			SessionId: s.GetSessionId(),
@@ -361,14 +365,14 @@ func (s *UDPSession) CloseReason(enetType uint32) error {
 		} else {
 			s.sendEnetNotifyToPeerChanConn(enet)
 		}
-		// try best to send all queued messages
+		// 尽力发出已有 KCP 数据后释放尚未确认的发送段
 		s.mu.Lock()
 		s.kcp.flush(false)
 		s.uncork()
-		// release pending segments
 		s.kcp.ReleaseTX()
 		s.mu.Unlock()
 
+		// 服务端会话只从 Listener 移除 客户端仅关闭自己创建的底层连接
 		if s.l != nil { // belongs to listener
 			s.l.closeSession(s.kcp.conv)
 			return nil
@@ -571,19 +575,19 @@ func (s *UDPSession) update() {
 	}
 }
 
-// GetRawConv 获取KCP组合会话id
+// GetRawConv 获取 Halo 扩展的 64 位 KCP 组合会话标识
 func (s *UDPSession) GetRawConv() uint64 {
 	return s.kcp.conv
 }
 
-// GetSessionId 获取会话id
+// GetSessionId 获取组合会话标识低 32 位的会话序号
 func (s *UDPSession) GetSessionId() uint32 {
 	rawConvData := make([]byte, 8)
 	binary.LittleEndian.PutUint64(rawConvData, s.kcp.conv)
 	return binary.LittleEndian.Uint32(rawConvData[0:4])
 }
 
-// GetConv 获取KCP会话id
+// GetConv 获取组合会话标识高 32 位的随机 KCP 会话号
 func (s *UDPSession) GetConv() uint32 {
 	rawConvData := make([]byte, 8)
 	binary.LittleEndian.PutUint64(rawConvData, s.kcp.conv)
@@ -675,11 +679,12 @@ type (
 		conn    net.PacketConn // the underlying packet connection
 		ownConn bool           // true if we created conn internally, false if provided by caller
 
-		// 网络切换会话保持改造 将convId作为会话的唯一标识 不再校验源地址
-		sessions        map[uint64]*UDPSession // all sessions accepted by this Listener
-		sessionLock     sync.RWMutex
-		chAccepts       chan *UDPSession // Listen() backlog
-		chSessionClosed chan net.Addr    // session close queue
+		// Halo 网络切换保持扩展仅以 64 位组合会话标识索引会话
+		// 报文命中已有会话后允许更新远端地址
+		sessions        map[uint64]*UDPSession // 当前 Listener 接受的全部会话
+		sessionLock     sync.RWMutex           // 会话表读写锁
+		chAccepts       chan *UDPSession       // Listen() backlog
+		chSessionClosed chan net.Addr          // session close queue
 
 		die     chan struct{} // notify the listener has closed
 		dieOnce sync.Once
@@ -694,24 +699,24 @@ type (
 		xconn           batchConn // for x/net
 		xconnWriteError error
 
-		enetNotifyChan           chan *Enet          // Enet事件上报管道
-		sessionIdCounter         uint32              // 会话id自增计数器
-		remoteAddrEnetSynMap     map[string]*EnetSyn // 客户端Enet握手包集合
-		remoteAddrEnetSynMapLock sync.RWMutex
+		enetNotifyChan           chan *Enet          // Halo Enet 连接控制事件队列
+		sessionIdCounter         uint32              // 服务端会话序号自增计数器
+		remoteAddrEnetSynMap     map[string]*EnetSyn // 等待首个 KCP 数据包的握手状态
+		remoteAddrEnetSynMapLock sync.RWMutex        // 握手状态表读写锁
 
-		isChanConn bool // 是否为管道连接模式
+		isChanConn bool // 是否使用 Halo 内存管道传输
 	}
 )
 
-// EnetSyn 客户端Enet握手包
+// EnetSyn 保存客户端 Halo Enet 握手分配的会话状态
 type EnetSyn struct {
-	sessionId  uint32
-	conv       uint32
-	rawConv    uint64
-	createTime uint32
+	sessionId  uint32 // 服务端分配的会话序号
+	conv       uint32 // 随机 KCP 会话号
+	rawConv    uint64 // 由会话序号和 KCP 会话号组合的 64 位标识
+	createTime uint32 // 握手状态创建时间戳
 }
 
-// Enet事件处理
+// enetHandle 处理 Halo Enet 握手 关闭和探活事件
 func (l *Listener) enetHandle() {
 	ticker := time.NewTicker(time.Second)
 	defer func() {
@@ -722,7 +727,7 @@ func (l *Listener) enetHandle() {
 		case <-l.die:
 			return
 		case <-ticker.C:
-			// 定时清理超时的客户端Enet握手包
+			// 首个 KCP 数据包超过 60 秒仍未到达时丢弃握手状态
 			now := uint32(time.Now().Unix())
 			l.remoteAddrEnetSynMapLock.Lock()
 			for remoteAddr, enetSyn := range l.remoteAddrEnetSynMap {
@@ -732,7 +737,6 @@ func (l *Listener) enetHandle() {
 			}
 			l.remoteAddrEnetSynMapLock.Unlock()
 		case enetNotify := <-l.enetNotifyChan:
-			// Enet事件
 			switch enetNotify.ConnType {
 			case ConnEnetSyn:
 				if enetNotify.EnetType != EnetClientConnectKey {
@@ -741,9 +745,11 @@ func (l *Listener) enetHandle() {
 				l.remoteAddrEnetSynMapLock.Lock()
 				enetSyn, exist := l.remoteAddrEnetSynMap[enetNotify.Addr.String()]
 				if !exist {
+					// 相同远端重复发送 SYN 时复用分配结果
 					sessionId := atomic.AddUint32(&l.sessionIdCounter, 1)
 					var conv uint32
 					_ = binary.Read(rand.Reader, binary.LittleEndian, &conv)
+					// 低 32 位保存会话序号 高 32 位保存随机 KCP 会话号
 					rawConvData := make([]byte, 8)
 					binary.LittleEndian.PutUint32(rawConvData[0:4], sessionId)
 					binary.LittleEndian.PutUint32(rawConvData[4:8], conv)
@@ -757,6 +763,7 @@ func (l *Listener) enetHandle() {
 					l.remoteAddrEnetSynMap[enetNotify.Addr.String()] = enetSyn
 				}
 				l.remoteAddrEnetSynMapLock.Unlock()
+				// EST 通过当前底层传输返回同一组会话参数
 				enet := &Enet{
 					Addr:      enetNotify.Addr,
 					SessionId: enetSyn.sessionId,
@@ -770,6 +777,7 @@ func (l *Listener) enetHandle() {
 					l.sendEnetNotifyToPeerChanConn(enet)
 				}
 			case ConnEnetFin:
+				// FIN 中的两个 32 位字段恢复为会话表使用的组合标识
 				rawConvData := make([]byte, 8)
 				binary.LittleEndian.PutUint32(rawConvData[0:4], enetNotify.SessionId)
 				binary.LittleEndian.PutUint32(rawConvData[4:8], enetNotify.Conv)
@@ -782,6 +790,7 @@ func (l *Listener) enetHandle() {
 				}
 				_ = conn.CloseReason(enetNotify.EnetType)
 			case ConnEnetPing:
+				// PING 原样回显业务类型用于链路探活
 				enet := &Enet{
 					Addr:      enetNotify.Addr,
 					SessionId: 0,
@@ -800,10 +809,10 @@ func (l *Listener) enetHandle() {
 	}
 }
 
-// packet input stage
+// packetInput 分流 Halo Enet 控制包和 KCP 数据包
 func (l *Listener) packetInput(data []byte, addr net.Addr) {
 	if len(data) == 20 {
-		// 连接控制协议
+		// Halo Enet 控制包固定为 20 字节
 		connType, enetType, sessionId, conv, _, err := ParseEnet(data)
 		if err != nil {
 			return
@@ -821,12 +830,13 @@ func (l *Listener) packetInput(data []byte, addr net.Addr) {
 			return
 		}
 	} else if len(data) >= IKCP_OVERHEAD {
-		// 正常KCP包
+		// Halo KCP 头直接携带 64 位组合会话标识
 		conv := binary.LittleEndian.Uint64(data)
 		l.sessionLock.RLock()
 		s, ok := l.sessions[conv]
 		l.sessionLock.RUnlock()
 		if ok { // existing connection
+			// 组合会话标识命中后允许网络切换产生的远端地址变化
 			if s.remote.String() != addr.String() {
 				s.remote = addr
 			}
@@ -835,6 +845,7 @@ func (l *Listener) packetInput(data []byte, addr net.Addr) {
 			}
 		}
 		if s == nil { // new session
+			// 新会话必须先完成 Enet 握手且首包会话标识完全匹配
 			l.remoteAddrEnetSynMapLock.Lock()
 			enetSyn, exist := l.remoteAddrEnetSynMap[addr.String()]
 			if exist {
@@ -842,6 +853,7 @@ func (l *Listener) packetInput(data []byte, addr net.Addr) {
 			}
 			l.remoteAddrEnetSynMapLock.Unlock()
 			if exist && enetSyn.rawConv == conv {
+				// 接收队列满时拒绝创建会话 避免未消费连接耗尽内存
 				if len(l.chAccepts) < cap(l.chAccepts) { // do not let the new sessions overwhelm accept queue
 					s := newUDPSession(conv, l, l.conn, false, addr)
 					s.kcpInput(data)
@@ -1030,9 +1042,11 @@ func serveConn(conn net.PacketConn, ownConn bool) (*Listener, error) {
 		}
 	}
 	if _, ok := l.conn.(*ChanConn); ok {
+		// Halo 内存管道使用专用收发实现
 		l.isChanConn = true
 	}
 
+	// UDP 与内存管道只替换传输层 共享会话和 Enet 状态机
 	if !l.isChanConn {
 		go l.rx()
 	} else {
@@ -1058,6 +1072,7 @@ func DialKCP(raddr string) (*UDPSession, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Halo 扩展先通过 Enet SYN 获取服务端分配的组合会话参数
 	data := BuildEnet(ConnEnetSyn, EnetClientConnectKey, 0, 0)
 	_, err = conn.Write(data)
 	if err != nil {
@@ -1085,6 +1100,7 @@ func DialKCP(raddr string) (*UDPSession, error) {
 		return nil, errors.New("recv packet format error")
 	}
 
+	// 与服务端相同方式组合会话序号和随机 KCP 会话号
 	rawConvData := make([]byte, 8)
 	binary.LittleEndian.PutUint32(rawConvData[0:4], sessionId)
 	binary.LittleEndian.PutUint32(rawConvData[4:8], conv)
@@ -1116,34 +1132,37 @@ func NewConn(raddr string, conn net.PacketConn) (*UDPSession, error) {
 
 var errChanConnAlreadyClose = errors.New("chan conn already close")
 
-// ChanConnAddr 管道连接地址
+// ChanConnAddr 表示 Halo 内存管道端点地址
 type ChanConnAddr struct {
-	Ip   uint32
-	Port uint16
+	Ip   uint32 // IPv4 地址
+	Port uint16 // 端口
 }
 
+// Network 返回内存管道网络类型
 func (a ChanConnAddr) Network() string {
 	return "chan"
 }
 
+// String 返回可读的内存管道端点地址
 func (a ChanConnAddr) String() string {
 	return strconv.Itoa(int(a.Ip>>24)) + "." + strconv.Itoa(int(a.Ip>>16)) + "." + strconv.Itoa(int(a.Ip>>8)) + "." + strconv.Itoa(int(a.Ip>>0)) + ":" + strconv.Itoa(int(a.Port))
 }
 
-// ChanConnMsg 管道连接消息
+// ChanConnMsg 表示 Halo 内存管道中的单个数据报
 type ChanConnMsg struct {
-	Addr ChanConnAddr
-	Pkt  []byte
+	Addr ChanConnAddr // 对端地址
+	Pkt  []byte       // 独立持有的数据报
 }
 
-// ChanConn 管道连接
+// ChanConn 使用通道实现 net PacketConn 语义
 type ChanConn struct {
-	RxChan  chan ChanConnMsg
-	TxChan  chan ChanConnMsg
-	Addr    ChanConnAddr
-	isClose atomic.Uint32
+	RxChan  chan ChanConnMsg // 接收数据报通道
+	TxChan  chan ChanConnMsg // 发送数据报通道
+	Addr    ChanConnAddr     // 本地端点地址
+	isClose atomic.Uint32    // 原子关闭标记
 }
 
+// ReadFrom 从接收通道复制一个完整数据报
 func (c *ChanConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	if c.isClose.Load() == 1 {
 		return 0, nil, errChanConnAlreadyClose
@@ -1156,6 +1175,7 @@ func (c *ChanConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	return len(msg.Pkt), msg.Addr, nil
 }
 
+// WriteTo 复制数据报后移交给发送通道
 func (c *ChanConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	if c.isClose.Load() == 1 {
 		return 0, errChanConnAlreadyClose
@@ -1169,6 +1189,7 @@ func (c *ChanConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	return len(pkt), nil
 }
 
+// Close 原子关闭发送方向并防止重复关闭通道
 func (c *ChanConn) Close() error {
 	ok := c.isClose.CompareAndSwap(0, 1)
 	if !ok {
@@ -1178,23 +1199,27 @@ func (c *ChanConn) Close() error {
 	return nil
 }
 
+// LocalAddr 返回内存管道本地端点地址
 func (c *ChanConn) LocalAddr() net.Addr {
 	return c.Addr
 }
 
+// SetDeadline 表示内存管道不支持统一截止时间
 func (c *ChanConn) SetDeadline(t time.Time) error {
 	return errInvalidOperation
 }
 
+// SetReadDeadline 表示内存管道不支持读取截止时间
 func (c *ChanConn) SetReadDeadline(t time.Time) error {
 	return errInvalidOperation
 }
 
+// SetWriteDeadline 表示内存管道不支持写入截止时间
 func (c *ChanConn) SetWriteDeadline(t time.Time) error {
 	return errInvalidOperation
 }
 
-// ListenChanConn 监听管道连接
+// ListenChanConn 在 Halo 内存管道上监听 KCP 会话
 func ListenChanConn(conn *ChanConn) (*Listener, error) {
 	if conn == nil || conn.RxChan == nil || conn.TxChan == nil {
 		return nil, errChanConnAlreadyClose
@@ -1203,12 +1228,13 @@ func ListenChanConn(conn *ChanConn) (*Listener, error) {
 	return serveConn(conn, true)
 }
 
-// DialChanConn 发起管道连接
+// DialChanConn 通过 Halo Enet 握手在内存管道上建立 KCP 会话
 func DialChanConn(conn *ChanConn, addr ChanConnAddr) (*UDPSession, error) {
 	if conn == nil || conn.RxChan == nil || conn.TxChan == nil {
 		return nil, errChanConnAlreadyClose
 	}
 	conn.isClose.Store(0)
+	// 管道模式沿用 UDP 模式相同的 Enet SYN 和 EST 交换
 	data := BuildEnet(ConnEnetSyn, EnetClientConnectKey, 0, 0)
 	_, err := conn.WriteTo(data, addr)
 	if err != nil {
@@ -1225,6 +1251,7 @@ func DialChanConn(conn *ChanConn, addr ChanConnAddr) (*UDPSession, error) {
 		return nil, errors.New("recv packet format error")
 	}
 
+	// 组合字段布局必须与服务端和 UDP 拨号路径一致
 	rawConvData := make([]byte, 8)
 	binary.LittleEndian.PutUint32(rawConvData[0:4], sessionId)
 	binary.LittleEndian.PutUint32(rawConvData[4:8], conv)

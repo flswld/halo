@@ -25,7 +25,9 @@ var (
 	BROADCAST_MAC_ADDR = []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 )
 
+// ParseEthFrm 解析以太网帧头部和载荷
 func ParseEthFrm(frm []byte) (payload []byte, dstMac []byte, srcMac []byte, ethProto uint16, err error) {
+	// 当前引擎只接受不带 VLAN 标签的标准以太网帧
 	if len(frm) < 42 || len(frm) > 1514 {
 		return nil, nil, nil, ETH_PROTO_UNKNOWN, errors.New("ethernet frame len must >= 42 and <= 1514 bytes")
 	}
@@ -52,6 +54,7 @@ func ParseEthFrm(frm []byte) (payload []byte, dstMac []byte, srcMac []byte, ethP
 	return payload, dstMac, srcMac, ethProto, nil
 }
 
+// BuildEthFrm 构建以太网帧并按最小帧长填充
 func BuildEthFrm(frm []byte, payload []byte, dstMac []byte, srcMac []byte, ethProto uint16) ([]byte, error) {
 	if frm == nil {
 		frm = make([]byte, 0, 60)
@@ -70,7 +73,7 @@ func BuildEthFrm(frm []byte, payload []byte, dstMac []byte, srcMac []byte, ethPr
 	frm = append(frm, byte(ethProto>>8), byte(ethProto))
 	// 上层数据
 	frm = append(frm, payload...)
-	// 小于60字节填充0
+	// 不含 FCS 的帧不足 60 字节时补零到最小长度
 	n := 60 - len(frm)
 	for i := 0; i < n; i++ {
 		frm = append(frm, 0x00)

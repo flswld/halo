@@ -10,6 +10,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// BindCpuCore 将当前操作系统线程绑定到指定 CPU 核心
 func BindCpuCore(core int) bool {
 	runtime.LockOSThread()
 	var mask uintptr
@@ -24,6 +25,7 @@ func BindCpuCore(core int) bool {
 	return true
 }
 
+// UnbindCpuCore 解除当前操作系统线程的 CPU 核心绑定
 func UnbindCpuCore() bool {
 	var mask uintptr
 	num_cpu := runtime.NumCPU()

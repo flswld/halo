@@ -27,31 +27,34 @@ const char *APP_VERSION = "1.1.1";
 #define BURST_SIZE 32
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
 
+// dpdk_config 保存 Go 层传入的 DPDK 运行参数
 struct dpdk_config {
-    int eal_argc;
-    char **eal_argv;
-    int cpu_core_num;
-    int *cpu_core_list;
-    int port_num;
-    int *port_list;
-    int queue_num;
-    int ring_buffer_size;
-    bool debug_log;
-    bool idle_sleep;
-    bool single_core;
-    bool kni_enable;
+    int eal_argc; // EAL 参数数量
+    char **eal_argv; // EAL 参数列表
+    int cpu_core_num; // CPU 核心数量
+    int *cpu_core_list; // CPU 核心编号列表
+    int port_num; // 网卡端口数量
+    int *port_list; // 网卡端口 ID 列表
+    int queue_num; // 每个网卡端口的队列数量
+    int ring_buffer_size; // 环形缓冲区数据区字节大小
+    bool debug_log; // 是否输出调试日志
+    bool idle_sleep; // 空闲时是否睡眠
+    bool single_core; // 是否使用单核模式
+    bool kni_enable; // 是否启用 KNI
 };
 
+// ring_buffer 保存一组 DPDK 收发环形缓冲区
 struct ring_buffer {
-    void *send_ring_mem;
-    void *recv_ring_mem;
-    ring_buffer_t *send_ring_buffer;
-    ring_buffer_t *recv_ring_buffer;
+    void *send_ring_mem; // 发送环形缓冲区底层内存
+    void *recv_ring_mem; // 接收环形缓冲区底层内存
+    ring_buffer_t *send_ring_buffer; // 发送环形缓冲区
+    ring_buffer_t *recv_ring_buffer; // 接收环形缓冲区
 };
 
+// lcore_arg 保存工作核心处理的网卡端口和队列索引
 struct lcore_arg {
-    int port_index;
-    int queue_id;
+    int port_index; // 网卡端口配置索引
+    int queue_id; // 网卡队列 ID
 };
 
 _Atomic
@@ -65,27 +68,27 @@ struct rte_mempool *mbuf_pool = NULL;
 struct rte_eth_stats *port_stats = NULL;
 static struct rte_kni *kni = NULL;
 
-// 获取网卡发包环状缓冲区
+// cgo_port_send_ring_buffer 获取网卡队列的发送环形缓冲区
 ring_buffer_t *cgo_port_send_ring_buffer(const int port_index, const int queue_id) {
     return port_ring_buffer[port_index * global_config.queue_num + queue_id].send_ring_buffer;
 }
 
-// 获取网卡收包环状缓冲区
+// cgo_port_recv_ring_buffer 获取网卡队列的接收环形缓冲区
 ring_buffer_t *cgo_port_recv_ring_buffer(const int port_index, const int queue_id) {
     return port_ring_buffer[port_index * global_config.queue_num + queue_id].recv_ring_buffer;
 }
 
-// 获取KNI发包环状缓冲区
+// cgo_kni_send_ring_buffer 获取 KNI 发送环形缓冲区
 ring_buffer_t *cgo_kni_send_ring_buffer() {
     return kni_ring_buffer.send_ring_buffer;
 }
 
-// 获取KNI收包环状缓冲区
+// cgo_kni_recv_ring_buffer 获取 KNI 接收环形缓冲区
 ring_buffer_t *cgo_kni_recv_ring_buffer() {
     return kni_ring_buffer.recv_ring_buffer;
 }
 
-// 打印网卡收发包统计信息
+// cgo_print_stats 输出网卡收发包速率统计信息
 void cgo_print_stats(const int port_index, char *msg) {
     const uint16_t port_id = global_config.port_list[port_index];
     const struct rte_eth_stats old_stats = port_stats[port_index];
@@ -101,10 +104,11 @@ void cgo_print_stats(const int port_index, char *msg) {
     port_stats[port_index] = new_stats;
 }
 
-// 处理退出信号并终止程序
+// cgo_exit_signal_handler 停止数据面并释放 DPDK 资源
 void cgo_exit_signal_handler(void) {
     RTE_LOG(INFO, APP, "exit signal received, exit...\n");
     atomic_store(&running, false);
+    // 先等待所有工作核心停止访问共享对象 再释放网卡和环形缓冲区
     rte_eal_mp_wait_lcore();
     if (global_config.kni_enable) {
         if (rte_kni_release(kni)) {
@@ -139,11 +143,12 @@ void cgo_exit_signal_handler(void) {
     kni = NULL;
 }
 
-// KNI回调处理
+// cgo_kni_handle 处理 KNI 控制请求
 void cgo_kni_handle(void) {
     rte_kni_handle_request(kni);
 }
 
+// port_init 配置并启动指定 DPDK 网卡端口
 int port_init(const int port_index, const uint16_t port_id, const uint16_t queue_num) {
     // 配置设备
     struct rte_eth_dev_info dev_info;
@@ -153,6 +158,7 @@ int port_init(const int port_index, const uint16_t port_id, const uint16_t queue
         return ret;
     }
     port_conf[port_index].rxmode.max_rx_pkt_len = 1518;
+    // 仅启用设备明确声明支持的校验和与 RSS 卸载能力
     if (dev_info.rx_offload_capa & DEV_RX_OFFLOAD_IPV4_CKSUM) {
         port_conf[port_index].rxmode.offloads |= DEV_RX_OFFLOAD_IPV4_CKSUM;
     }
@@ -213,16 +219,19 @@ int port_init(const int port_index, const uint16_t port_id, const uint16_t queue
     return 0;
 }
 
+// kni_change_mtu 处理 KNI 修改 MTU 的回调
 static int kni_change_mtu(const uint16_t port_id, const unsigned int new_mtu) {
     RTE_LOG(INFO, APP, "kni change mtu of port: %u, mtu: %u\n", port_id, new_mtu);
     return 0;
 }
 
+// kni_config_network_if 处理 KNI 网络接口状态变更回调
 static int kni_config_network_if(const uint16_t port_id, const uint8_t if_up) {
     RTE_LOG(INFO, APP, "kni config network if of port: %u if_up: %d\n", port_id, if_up);
     return 0;
 }
 
+// kni_config_mac_address 处理 KNI MAC 地址变更回调
 static int kni_config_mac_address(const uint16_t port_id, uint8_t mac_addr[]) {
     char mac[64];
     sprintf(mac, "%02X:%02X:%02X:%02X:%02X:%02X", mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
@@ -230,11 +239,13 @@ static int kni_config_mac_address(const uint16_t port_id, uint8_t mac_addr[]) {
     return 0;
 }
 
+// kni_config_promiscusity 处理 KNI 混杂模式变更回调
 static int kni_config_promiscusity(const uint16_t port_id, const uint8_t to_on) {
     RTE_LOG(INFO, APP, "kni config promiscusity of port: %u to_on: %d\n", port_id, to_on);
     return 0;
 }
 
+// kni_init 初始化 KNI 虚拟网卡
 int kni_init() {
     rte_kni_init(1);
     struct rte_kni_conf conf = {0};
@@ -263,6 +274,7 @@ int kni_init() {
     return 0;
 }
 
+// eth_rx 从网卡队列批量接收报文并写入环形缓冲区
 static bool eth_rx(const int port_index, const uint16_t port_id, const uint16_t queue_id) {
     // 接收多个网卡数据帧
     struct rte_mbuf *mbuf_recv[BURST_SIZE];
@@ -292,6 +304,7 @@ static bool eth_rx(const int port_index, const uint16_t port_id, const uint16_t 
     return true;
 }
 
+// eth_tx 从环形缓冲区读取报文并批量发送到网卡队列
 static bool eth_tx(const int port_index, const uint16_t port_id, const uint16_t queue_id) {
     // 环状缓冲区数据接收
     struct rte_mbuf *mbuf_send[BURST_SIZE];
@@ -311,6 +324,7 @@ static bool eth_tx(const int port_index, const uint16_t port_id, const uint16_t 
         struct rte_ether_hdr *ether_hdr = rte_pktmbuf_mtod(mbuf_send[i], struct rte_ether_hdr *);
         // 校验和
         if (rte_be_to_cpu_16(ether_hdr->ether_type) == RTE_ETHER_TYPE_IPV4) {
+            // 同时设置 mbuf 分层长度和卸载标志 供硬件定位 IPv4 与四层头部
             mbuf_send[i]->l2_len = sizeof(struct rte_ether_hdr);
             mbuf_send[i]->l3_len = sizeof(struct rte_ipv4_hdr);
             mbuf_send[i]->ol_flags = 0;
@@ -368,6 +382,7 @@ static bool eth_tx(const int port_index, const uint16_t port_id, const uint16_t 
     return true;
 }
 
+// kni_rx 从 KNI 批量接收报文并写入环形缓冲区
 static bool kni_rx() {
     // KNI数据接收
     struct rte_mbuf *mbuf_recv[BURST_SIZE];
@@ -397,6 +412,7 @@ static bool kni_rx() {
     return true;
 }
 
+// kni_tx 从环形缓冲区读取报文并批量发送到 KNI
 static bool kni_tx() {
     // KNI环状缓冲区数据接收
     struct rte_mbuf *mbuf_send[BURST_SIZE];
@@ -455,6 +471,7 @@ static bool kni_tx() {
     return true;
 }
 
+// lcore_rx 在工作核心上持续执行指定网卡队列的收包任务
 int lcore_rx(void *arg_ptr) {
     const unsigned int lcore_id = rte_lcore_id();
     const struct lcore_arg *arg = arg_ptr;
@@ -473,6 +490,7 @@ int lcore_rx(void *arg_ptr) {
     return 0;
 }
 
+// lcore_tx 在工作核心上持续执行指定网卡队列的发包任务
 int lcore_tx(void *arg_ptr) {
     const unsigned int lcore_id = rte_lcore_id();
     const struct lcore_arg *arg = arg_ptr;
@@ -491,6 +509,7 @@ int lcore_tx(void *arg_ptr) {
     return 0;
 }
 
+// lcore_rx_tx 在当前核心上轮询处理网卡和 KNI 收发
 int lcore_rx_tx(const bool handle_eth, const bool handle_kni) {
     const unsigned int lcore_id = rte_lcore_id();
     RTE_LOG(INFO, APP, "lcore_rx_tx run in lcore: %u\n", lcore_id);
@@ -522,6 +541,7 @@ int lcore_rx_tx(const bool handle_eth, const bool handle_kni) {
     return 0;
 }
 
+// cgo_dpdk_main 初始化 DPDK 资源并运行数据面
 int cgo_dpdk_main(const struct dpdk_config *config) {
     printf("dpdk start, app version: %s\n", APP_VERSION);
     printf("eal argc: %d\n", config->eal_argc);
@@ -558,6 +578,7 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
     printf("single core: %d\n", config->single_core);
     printf("kni enable: %d\n", config->kni_enable);
     printf("\n");
+    // Go 传入的数组由调用方固定 整个主循环期间只读配置
     global_config = *config;
 
     // 初始化DPDK
@@ -606,6 +627,7 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
 
     // 分配环状缓冲区内存
     const uint32_t ring_buffer_size = config->ring_buffer_size + sizeof(ring_buffer_t);
+    // 每个端口队列分别持有一对 Go 到 DPDK 和 DPDK 到 Go 的环形缓冲区
     port_ring_buffer = (struct ring_buffer *) malloc(sizeof(struct ring_buffer) * config->port_num * config->queue_num);
     memset(port_ring_buffer, 0x00, sizeof(struct ring_buffer) * config->port_num * config->queue_num);
     for (int port_index = 0; port_index < config->port_num; port_index++) {
@@ -645,8 +667,10 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
     port_stats = (struct rte_eth_stats *) malloc(sizeof(struct rte_eth_stats) * config->port_num);
     memset(port_stats, 0x00, sizeof(struct rte_eth_stats) * config->port_num);
     if (config->single_core) {
+        // 单核模式在当前 EAL 核心串行轮询全部端口和 KNI
         lcore_rx_tx(true, config->kni_enable);
     } else {
+        // 多核模式为每个端口队列分别启动收包和发包工作核心
         struct lcore_arg arg_list[128] = {0};
         for (int port_index = 0; port_index < config->port_num; port_index++) {
             for (int queue_id = 0; queue_id < config->queue_num; queue_id++) {

@@ -8,14 +8,17 @@ import (
 	"github.com/flswld/halo/mem"
 )
 
+// Key 表示哈希表测试使用的键
 type Key uint32
 
+// GetHashCode 计算测试键的哈希值
 func (k Key) GetHashCode() uint64 {
 	data := make([]byte, 4)
 	binary.LittleEndian.PutUint32(data, uint32(k))
 	return GetHashCode(data)
 }
 
+// TestHashMap 验证哈希表的增删改查和遍历
 func TestHashMap(t *testing.T) {
 	heapAllocator := mem.GetHeapAllocator()
 	ptr := heapAllocator.Malloc(1 * mem.GB)

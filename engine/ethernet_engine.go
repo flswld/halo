@@ -9,6 +9,7 @@ import (
 	"github.com/flswld/halo/protocol"
 )
 
+// RxEthernet 接收并分发网络接口的以太网帧
 func (i *NetIf) RxEthernet(ethFrm []byte) {
 	if i.Router.Config.DebugLog {
 		Log(fmt.Sprintf("rx eth frm, if: %v, len: %v, data: %02x\n", i.Config.Name, len(ethFrm), ethFrm))
@@ -29,6 +30,7 @@ func (i *NetIf) RxEthernet(ethFrm []byte) {
 	}
 }
 
+// TxEthernet 封装并发送网络接口的以太网帧
 func (i *NetIf) TxEthernet(ethPayload []byte, ethDstMac []byte, ethProto uint16) bool {
 	i.EthTxLock.Lock()
 	i.EthTxBuffer = i.EthTxBuffer[0:0]
@@ -46,12 +48,14 @@ func (i *NetIf) TxEthernet(ethPayload []byte, ethDstMac []byte, ethProto uint16)
 	return true
 }
 
+// SwitchMacAddr 保存交换机学习到的 MAC 地址记录
 type SwitchMacAddr struct {
-	MacAddr    [6]byte            // mac地址
-	NetIf      mem.StaticString64 // 网卡名
+	MacAddr    [6]byte            // MAC 地址
+	NetIf      mem.StaticString64 // 交换机端口名
 	CreateTime uint32             // 创建时间
 }
 
+// RxEthernet 接收并解析交换机端口的以太网帧
 func (s *SwitchPort) RxEthernet(ethFrm []byte) {
 	ethPayload, ethDstMac, ethSrcMac, ethProto, err := protocol.ParseEthFrm(ethFrm)
 	if err != nil {
@@ -61,7 +65,9 @@ func (s *SwitchPort) RxEthernet(ethFrm []byte) {
 	s.HandleEthernet(ethPayload, ethDstMac, ethSrcMac, ethProto)
 }
 
+// HandleEthernet 学习源 MAC 地址并转发以太网帧
 func (s *SwitchPort) HandleEthernet(ethPayload []byte, ethDstMac []byte, ethSrcMac []byte, ethProto uint16) {
+	// 组播源地址不具备可学习性
 	if ethSrcMac[0]&0x01 == 0x01 {
 		return
 	}
@@ -90,9 +96,11 @@ func (s *SwitchPort) HandleEthernet(ethPayload []byte, ethDstMac []byte, ethSrcM
 	dstMacAddr, exist := s.Switch.SwitchMacAddrTable.Get(MacAddrHash(ethDstMac))
 	s.Switch.SwitchMacAddrLock.RUnlock()
 	if exist {
+		// 已学习目的地址时直接单播到对应端口
 		switchPort := s.Switch.GetSwitchPort(dstMacAddr.NetIf.Get())
 		switchPort.TxEthernet(ethPayload, ethDstMac, ethSrcMac, ethProto)
 	} else {
+		// 未学习目的地址时仅在相同端口 VLAN 内泛洪
 		for _, switchPort := range s.Switch.SwitchPortMap {
 			if switchPort.Config.Name == s.Config.Name {
 				continue
@@ -105,6 +113,7 @@ func (s *SwitchPort) HandleEthernet(ethPayload []byte, ethDstMac []byte, ethSrcM
 	}
 }
 
+// TxEthernet 封装并发送交换机端口的以太网帧
 func (s *SwitchPort) TxEthernet(ethPayload []byte, ethDstMac []byte, ethSrcMac []byte, ethProto uint16) bool {
 	s.EthTxLock.Lock()
 	s.EthTxBuffer = s.EthTxBuffer[0:0]
@@ -119,6 +128,7 @@ func (s *SwitchPort) TxEthernet(ethPayload []byte, ethDstMac []byte, ethSrcMac [
 	return true
 }
 
+// SwitchMacAddrClear 定期清理过期的交换机 MAC 地址记录
 func (s *Switch) SwitchMacAddrClear() {
 	ticker := time.NewTicker(time.Second * 1)
 	for {
@@ -139,6 +149,7 @@ func (s *Switch) SwitchMacAddrClear() {
 	s.StopWaitGroup.Done()
 }
 
+// ListSwitchMacAddr 返回当前交换机 MAC 地址表的副本
 func (s *Switch) ListSwitchMacAddr() []*SwitchMacAddr {
 	s.SwitchMacAddrLock.Lock()
 	defer s.SwitchMacAddrLock.Unlock()

@@ -129,6 +129,7 @@ var (
 	pcapFreealldevsPtr,
 	pcapFindalldevsPtr,
 	pcapSendpacketPtr,
+	// Halo 扩展的 Npcap 批量发包函数地址
 	pcapSendqueueAllocPtr,
 	pcapSendqueueQueuePtr,
 	pcapSendqueueTransmitPtr,
@@ -225,6 +226,7 @@ func LoadWinPCAP() error {
 	pcapFreealldevsPtr = mustLoad("pcap_freealldevs")
 	pcapFindalldevsPtr = mustLoad("pcap_findalldevs")
 	pcapSendpacketPtr = mustLoad("pcap_sendpacket")
+	// 批量发包扩展要求运行环境提供完整 Npcap 发送队列接口
 	pcapSendqueueAllocPtr = mustLoad("pcap_sendqueue_alloc")
 	pcapSendqueueQueuePtr = mustLoad("pcap_sendqueue_queue")
 	pcapSendqueueTransmitPtr = mustLoad("pcap_sendqueue_transmit")
@@ -668,27 +670,33 @@ func (p *Handle) pcapSendpacket(data []byte) error {
 	return nil
 }
 
+// PcapSendqueueAlloc 是 Halo 扩展的 Npcap 发送队列分配入口
 func (p *Handle) PcapSendqueueAlloc(memsize uint32) *PcapSendQueue {
 	ret, _, _ := syscall.Syscall(pcapSendqueueAllocPtr, 1, uintptr(memsize), uintptr(0), uintptr(0))
 	return (*PcapSendQueue)(unsafe.Pointer(ret))
 }
 
+// PcapSendqueueQueue 是 Halo 扩展的 Npcap 报文入队入口
 func (p *Handle) PcapSendqueueQueue(queue *PcapSendQueue, data []byte) int32 {
+	// Npcap 队列记录需要同时携带捕获长度和原始报文长度
 	var header pcapPkthdr
 	header.Caplen = uint32(len(data))
 	header.Len = uint32(len(data))
 	var pinner runtime.Pinner
+	// syscall 返回前固定头部地址 保证本次调用期间 C 侧指针有效
 	pinner.Pin(&header)
 	ret, _, _ := syscall.Syscall(pcapSendqueueQueuePtr, 3, uintptr(unsafe.Pointer(queue)), uintptr(unsafe.Pointer(&header)), uintptr(unsafe.Pointer(&data[0])))
 	pinner.Unpin()
 	return int32(ret)
 }
 
+// PcapSendqueueTransmit 是 Halo 扩展的 Npcap 队列批量发送入口
 func (p *Handle) PcapSendqueueTransmit(queue *PcapSendQueue) uint32 {
 	ret, _, _ := syscall.Syscall(pcapSendqueueTransmitPtr, 3, uintptr(p.cptr), uintptr(unsafe.Pointer(queue)), uintptr(0))
 	return uint32(ret)
 }
 
+// PcapSendqueueDestroy 是 Halo 扩展的 Npcap 发送队列释放入口
 func (p *Handle) PcapSendqueueDestroy(queue *PcapSendQueue) {
 	_, _, _ = syscall.Syscall(pcapSendqueueDestroyPtr, 1, uintptr(unsafe.Pointer(queue)), uintptr(0), uintptr(0))
 }

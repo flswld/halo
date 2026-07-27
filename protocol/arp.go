@@ -31,6 +31,7 @@ const (
 	ARP_UNKNOWN uint16 = 0xffff
 )
 
+// ParseArpPkt 解析 ARP 报文的操作类型和地址字段
 func ParseArpPkt(pkt []byte) (option uint16, srcMac []byte, srcAddr []byte, dstMac []byte, dstAddr []byte, err error) {
 	if len(pkt) < 28 {
 		return ARP_UNKNOWN, nil, nil, nil, nil, errors.New("arp packet len < 28 bytes")
@@ -52,6 +53,7 @@ func ParseArpPkt(pkt []byte) (option uint16, srcMac []byte, srcAddr []byte, dstM
 	return option, srcMac, srcAddr, dstMac, dstAddr, nil
 }
 
+// BuildArpPkt 构建以太网和 IPv4 使用的 ARP 报文
 func BuildArpPkt(pkt []byte, option uint16, srcMac []byte, srcAddr []byte, dstMac []byte, dstAddr []byte) ([]byte, error) {
 	if pkt == nil {
 		pkt = make([]byte, 0, 28)
@@ -62,7 +64,7 @@ func BuildArpPkt(pkt []byte, option uint16, srcMac []byte, srcAddr []byte, dstMa
 	if len(srcAddr) != 4 || len(dstAddr) != 4 {
 		return nil, errors.New("src ip addr or dst ip addr len is not 4 bytes")
 	}
-	// 硬件类型+协议类型+硬件地址长度+协议长度
+	// 固定编码以太网和 IPv4 的硬件类型 协议类型及地址长度
 	pkt = append(pkt, 0x00, 0x01, 0x08, 0x00, 0x06, 0x04)
 	// 操作类型
 	pkt = append(pkt, byte(option>>8), byte(option))

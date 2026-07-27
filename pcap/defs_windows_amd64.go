@@ -40,10 +40,12 @@ type pcapPkthdr struct {
 	Caplen uint32
 	Len    uint32
 }
+
+// PcapSendQueue 是 Halo 为 Npcap 批量发包扩展的发送队列布局
 type PcapSendQueue struct {
-	Maxlen uint32
-	Len    uint32
-	Buffer uintptr
+	Maxlen uint32  // 队列缓冲区最大字节数
+	Len    uint32  // 当前已使用字节数
+	Buffer uintptr // Npcap 队列缓冲区地址
 }
 type pcapTPtr uintptr
 type pcapBpfInstruction struct {

@@ -32,6 +32,7 @@ const (
 	TCP_FLAGS_FIN = 0x01
 )
 
+// ParseTcpPkt 解析 TCP 报文并按配置验证校验和
 func ParseTcpPkt(pkt []byte, srcAddr []byte, dstAddr []byte) (payload []byte, srcPort uint16, dstPort uint16, seqNum uint32, ackNum uint32, flags uint8, err error) {
 	if len(pkt) < 20 || len(pkt) > 1480 {
 		return nil, 0, 0, 0, 0, 0, errors.New("tcp packet len must >= 20 and <= 1480 bytes")
@@ -44,11 +45,12 @@ func ParseTcpPkt(pkt []byte, srcAddr []byte, dstAddr []byte) (payload []byte, sr
 	seqNum = binary.BigEndian.Uint32([]byte{pkt[4], pkt[5], pkt[6], pkt[7]})
 	// 确认号
 	ackNum = binary.BigEndian.Uint32([]byte{pkt[8], pkt[9], pkt[10], pkt[11]})
-	// 数据偏移+保留+FLAGS
+	// 数据偏移字段决定当前实现使用的载荷起点
 	headerLen := int(pkt[12] >> 4)
 	flags = pkt[13]
 	// 检查校验和
 	if CheckSumEnable {
+		// TCP 校验和覆盖 IPv4 伪首部和完整 TCP 报文
 		totalLen := len(pkt)
 		fakeHeader := make([]byte, 0, 12)
 		fakeHeader = append(fakeHeader, srcAddr...)
@@ -67,6 +69,7 @@ func ParseTcpPkt(pkt []byte, srcAddr []byte, dstAddr []byte) (payload []byte, sr
 	return payload, srcPort, dstPort, seqNum, ackNum, flags, nil
 }
 
+// BuildTcpPkt 构建固定 20 字节头部的 TCP 报文
 func BuildTcpPkt(pkt []byte, payload []byte, srcPort uint16, dstPort uint16, srcAddr []byte, dstAddr []byte, seqNum uint32, ackNum uint32, flags uint8) ([]byte, error) {
 	if pkt == nil {
 		pkt = make([]byte, 0, 20)
@@ -97,6 +100,7 @@ func BuildTcpPkt(pkt []byte, payload []byte, srcPort uint16, dstPort uint16, src
 	pkt = append(pkt, payload...)
 	// 计算校验和
 	if CheckSumEnable {
+		// IPv4 伪首部参与校验但不会写入实际报文
 		fakeHeader := make([]byte, 0, 12)
 		fakeHeader = append(fakeHeader, srcAddr...)
 		fakeHeader = append(fakeHeader, dstAddr...)

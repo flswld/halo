@@ -11,14 +11,14 @@ import (
 	"golang.org/x/net/ipv4"
 )
 
-// the read loop for a client session
+// rx 使用 Linux 批量接口执行客户端收包循环
 func (s *UDPSession) rx() {
-	// default version
+	// 不具备批量接口时回退到通用 PacketConn 实现
 	if s.xconn == nil {
 		s.defaultRx()
 		return
 	}
-	// x/net version
+	// 每个批量槽位长期复用一个最大报文缓冲区
 	msgs := make([]ipv4.Message, batchSize)
 	for k := range msgs {
 		msgs[k].Buffers = [][]byte{make([]byte, mtuLimit)}
@@ -29,7 +29,7 @@ func (s *UDPSession) rx() {
 			for i := 0; i < count; i++ {
 				msg := &msgs[i]
 				udpPayload := msg.Buffers[0][:msg.N]
-				// make sure the packet is from the same source
+				// Halo 网络切换保持扩展允许已建立会话更新远端地址
 				if src == "" { // set source address if nil
 					src = msg.Addr.String()
 				} else if msg.Addr.String() != src {
@@ -37,6 +37,7 @@ func (s *UDPSession) rx() {
 					src = msg.Addr.String()
 				}
 				if msg.N == 20 {
+					// Enet 控制包必须属于当前组合会话标识
 					connType, enetType, sessionId, conv, _, err := ParseEnet(udpPayload)
 					if err != nil {
 						continue
@@ -49,7 +50,6 @@ func (s *UDPSession) rx() {
 						continue
 					}
 				}
-				// source and size has validated
 				s.packetInput(udpPayload)
 			}
 		} else {
@@ -70,14 +70,14 @@ func (s *UDPSession) rx() {
 	}
 }
 
-// monitor incoming data for all connections of server
+// rx 使用 Linux 批量接口执行服务端全局收包循环
 func (l *Listener) rx() {
-	// default version
+	// 不具备批量接口时回退到通用 PacketConn 实现
 	if l.xconn == nil {
 		l.defaultRx()
 		return
 	}
-	// x/net version
+	// Listener 统一读取后按组合会话标识分发
 	msgs := make([]ipv4.Message, batchSize)
 	for k := range msgs {
 		msgs[k].Buffers = [][]byte{make([]byte, mtuLimit)}
@@ -106,13 +106,13 @@ func (l *Listener) rx() {
 	}
 }
 
+// tx 使用 Linux 批量接口发送 KCP 输出队列
 func (s *UDPSession) tx(txqueue []ipv4.Message) {
-	// default version
+	// 批量接口不可用或已确认不兼容时回退到逐包发送
 	if s.xconn == nil || s.xconnWriteError != nil {
 		s.defaultTx(txqueue)
 		return
 	}
-	// x/net version
 	nbytes := 0
 	npkts := 0
 	for len(txqueue) > 0 {
@@ -143,8 +143,9 @@ func (s *UDPSession) tx(txqueue []ipv4.Message) {
 	atomic.AddUint64(&DefaultSnmp.OutBytes, uint64(nbytes))
 }
 
+// sendEnetNotifyToPeer 使用服务端 Linux 批量接口发送 Enet 控制包
 func (l *Listener) sendEnetNotifyToPeer(enet *Enet) {
-	// default version
+	// 与 KCP 数据相同地记住批量发送兼容性结果
 	if l.xconn == nil || l.xconnWriteError != nil {
 		l.defaultSendEnetNotifyToPeer(enet)
 		return
@@ -174,8 +175,9 @@ func (l *Listener) sendEnetNotifyToPeer(enet *Enet) {
 	}
 }
 
+// sendEnetNotifyToPeer 使用客户端 Linux 批量接口发送 Enet 控制包
 func (s *UDPSession) sendEnetNotifyToPeer(enet *Enet) {
-	// default version
+	// 与 KCP 数据相同地记住批量发送兼容性结果
 	if s.xconn == nil || s.xconnWriteError != nil {
 		s.defaultSendEnetNotifyToPeer(enet)
 		return

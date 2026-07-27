@@ -22,39 +22,29 @@ High-performance lightweight Golang network packet send/receive framework
 
 ### Want to try it quickly on Windows/macOS? Npcap/libpcap driver support has been added! Go install Wireshark.
 
+`pcap.OpenDevice` matches the device description on Windows and the interface name on macOS and Linux
+
 ```go
-// UsePcapDev Use a pcap device
+// UsePcapDev uses a pcap device
 func UsePcapDev() {
 	logger.InitLogger(nil)
 	defer logger.CloseLogger()
 
-	// Start pcap device
-	devList, err := pcap.FindAllDevs()
+	// Use a device description on Windows and an interface name on macOS and Linux
+	pcapHandle, err := pcap.OpenDevice("Realtek PCIe GbE Family Controller")
 	if err != nil {
 		panic(err)
 	}
-	devName := ""
-	for _, dev := range devList {
-		if dev.Description == "Realtek PCIe GbE Family Controller" {
-			devName = dev.Name
-		}
-	}
-	if devName == "" {
-		panic("dev not found")
-	}
-	pcapHandle, err := pcap.OpenLive(devName, 65536, true, pcap.BlockForever)
-	if err != nil {
-		panic(err)
-	}
+	defer pcapHandle.Close()
+
 	selfMacAddr, _ := protocol.ParseMacAddr("AA:AA:AA:AA:AA:AA")
 	devRxFunc := func() (pkt []byte) {
-		data, ci, err := pcapHandle.ReadPacketData()
-		_ = ci
+		data, _, err := pcapHandle.ReadPacketData()
 		if err != nil {
 			logger.Error("pcap handle read packet error: %v", err)
 			return nil
 		}
-		if bytes.Equal(data[6:12], selfMacAddr) {
+		if len(data) >= 12 && bytes.Equal(data[6:12], selfMacAddr) {
 			return nil
 		}
 		return data
@@ -100,11 +90,7 @@ func UsePcapDev() {
 
 	// Stop router
 	r.StopRouter()
-
-	// Close pcap device
-	pcapHandle.Close()
 }
-
 ```
 
 ### Linux DPDK environment setup
@@ -236,7 +222,8 @@ func EthernetRouter() {
 	// Initialize router
 	engine.DefaultLogWriter = new(logger.LogWriter)
 	r, err := engine.InitRouter(&engine.RouterConfig{
-		DebugLog: false, // debug logging
+		DebugLog:      false,      // Debug logging
+		StaticMemSize: 8 * mem.MB, // Shared static memory pool size for the router
 		// Network interface list
 		NetIfList: []*engine.NetIfConfig{
 			{
@@ -244,6 +231,7 @@ func EthernetRouter() {
 				MacAddr:     "AA:AA:AA:AA:AA:AA",    // MAC address
 				IpAddr:      "192.168.100.100",      // IP address
 				NetworkMask: "255.255.255.0",        // Network mask
+				Gateway:     "192.168.100.1",        // Static WAN gateway
 				NatEnable:   true,                   // Enable network address translation (NAT)
 				NatType:     engine.NatTypeFullCone, // NAT type
 				// NAT port mapping table
@@ -261,7 +249,6 @@ func EthernetRouter() {
 				EthRxFunc:        func() (pkt []byte) { return dpdk.EthRxPkt(0) }, // NIC receive function
 				EthTxFunc:        func(pkt []byte) { dpdk.EthTxPkt(0, pkt) },      // NIC transmit function
 				BindCpuCore:      0,                                               // Bound CPU core
-				StaticMemSize:    8 * mem.MB,                                      // Static memory size
 			},
 			{
 				Name:             "wan1",

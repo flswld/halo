@@ -7,18 +7,22 @@ import (
 
 var CheckSumEnable = false
 
+// GetCheckSum 计算网络字节序的互联网校验和
 func GetCheckSum(data []byte) uint16 {
 	sum := uint32(0)
 	length := len(data)
 	index := 0
+	// 以网络字节序累加所有完整的 16 位字
 	for length > 1 {
 		sum += uint32(data[index])<<8 + uint32(data[index+1])
 		index += 2
 		length -= 2
 	}
 	if length > 0 {
+		// 奇数字节载荷将末字节放在高八位参与计算
 		sum += uint32(data[index]) << 8
 	}
+	// 反复折叠高 16 位直到不再产生进位
 	for sum>>16 != 0 {
 		sum = (sum & 0xffff) + (sum >> 16)
 	}
@@ -26,6 +30,7 @@ func GetCheckSum(data []byte) uint16 {
 	return sum16
 }
 
+// IpAddrToU 将四字节 IPv4 地址转换为整数
 func IpAddrToU(ipAddr []byte) uint32 {
 	if len(ipAddr) != 4 {
 		return 0
@@ -38,6 +43,7 @@ func IpAddrToU(ipAddr []byte) uint32 {
 	return ipAddrU
 }
 
+// UToIpAddr 将整数转换为四字节 IPv4 地址
 func UToIpAddr(ipAddrU uint32) []byte {
 	ipAddr := make([]byte, 4)
 	ipAddr[0] = uint8(ipAddrU >> 24)
@@ -47,6 +53,7 @@ func UToIpAddr(ipAddrU uint32) []byte {
 	return ipAddr
 }
 
+// ParseMacAddr 解析冒号分隔的 MAC 地址
 func ParseMacAddr(macAddrStr string) ([]byte, error) {
 	macAddrSplit := strings.Split(macAddrStr, ":")
 	macAddr := make([]byte, 6)
@@ -60,6 +67,7 @@ func ParseMacAddr(macAddrStr string) ([]byte, error) {
 	return macAddr, nil
 }
 
+// ParseIpAddr 解析点分十进制 IPv4 地址
 func ParseIpAddr(ipAddrStr string) ([]byte, error) {
 	ipAddrSplit := strings.Split(ipAddrStr, ".")
 	ipAddr := make([]byte, 4)

@@ -8,6 +8,7 @@ import (
 	"github.com/flswld/halo/protocol"
 )
 
+// RxIcmp 接收 ICMP 报文并回应回显请求
 func (i *NetIf) RxIcmp(ipv4Payload []byte, ipv4SrcAddr []byte) {
 	icmpPayload, icmpType, icmpId, icmpSeq, err := protocol.ParseIcmpPkt(ipv4Payload)
 	if err != nil {
@@ -21,6 +22,7 @@ func (i *NetIf) RxIcmp(ipv4Payload []byte, ipv4SrcAddr []byte) {
 	}
 }
 
+// TxIcmp 构建并发送 ICMP 报文
 func (i *NetIf) TxIcmp(icmpPayload []byte, icmpType uint8, icmpId []byte, icmpSeq uint16, ipv4DstAddr []byte) bool {
 	icmpPkt := make([]byte, 0, 1480)
 	icmpPkt, err := protocol.BuildIcmpPkt(icmpPkt, icmpPayload, icmpType, icmpId, icmpSeq)
@@ -31,6 +33,7 @@ func (i *NetIf) TxIcmp(icmpPayload []byte, icmpType uint8, icmpId []byte, icmpSe
 	return i.TxIpv4(icmpPkt, protocol.IPH_PROTO_ICMP, ipv4DstAddr)
 }
 
+// Ping 向目标 IPv4 地址发送指定次数的 ICMP 回显请求
 func (i *NetIf) Ping(ipv4DstAddr []byte, count int) {
 	randByte := make([]byte, 2)
 	_, err := rand.Read(randByte)
@@ -48,6 +51,7 @@ func (i *NetIf) Ping(ipv4DstAddr []byte, count int) {
 	ticker.Stop()
 }
 
+// IcmpTtlDeepNat 修正 ICMP 超时报文中携带的 NAT 原始流信息
 func (i *NetIf) IcmpTtlDeepNat(ethPayload []byte) ([]byte, bool) {
 	ipv4Payload, ipv4HeadProto, _, _, err := protocol.ParseIpv4Pkt(ethPayload)
 	if err != nil {

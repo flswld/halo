@@ -15,7 +15,7 @@ import (
 	"github.com/flswld/halo/protocol/kcp"
 )
 
-// DirectDpdk 直接使用dpdk收发网络报文
+// DirectDpdk 直接使用 DPDK 收发网络报文
 func DirectDpdk() {
 	// 启动dpdk
 	dpdk.Run(&dpdk.Config{
@@ -416,7 +416,7 @@ func DDoS() {
 	dpdk.Exit()
 }
 
-// KcpServerClient KCP协议栈
+// KcpServerClient 演示 KCP 协议栈的服务端和客户端
 func KcpServerClient() {
 	logger.InitLogger(nil)
 	defer logger.CloseLogger()
@@ -613,7 +613,7 @@ func KcpServerClient() {
 	dpdk.Exit()
 }
 
-// MagicPacketModifier 魔法(HuLuan)改包器
+// MagicPacketModifier 演示魔法 HuLuan 改包器
 func MagicPacketModifier() {
 	// 启动dpdk
 	dpdk.Run(&dpdk.Config{
@@ -715,7 +715,7 @@ func MagicPacketModifier() {
 	dpdk.Exit()
 }
 
-// UsePcapDev 使用pcap设备
+// UsePcapDev 使用 pcap 设备收发网络报文
 func UsePcapDev() {
 	logger.InitLogger(nil)
 	defer logger.CloseLogger()

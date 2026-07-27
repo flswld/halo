@@ -10,6 +10,7 @@ import (
 // #include "../cgo/cpu.h"
 import "C"
 
+// BindCpuCore 将当前操作系统线程绑定到指定 CPU 核心
 func BindCpuCore(core int) bool {
 	runtime.LockOSThread()
 	var core_list [64]C.int
@@ -21,6 +22,7 @@ func BindCpuCore(core int) bool {
 	return true
 }
 
+// UnbindCpuCore 解除当前操作系统线程的 CPU 核心绑定
 func UnbindCpuCore() bool {
 	var core_list [64]C.int
 	num_cpu := runtime.NumCPU()

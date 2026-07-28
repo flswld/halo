@@ -10,8 +10,8 @@ import (
 // TestArrayList 验证动态数组的增改和遍历
 func TestArrayList(t *testing.T) {
 	heapAllocator := mem.GetHeapAllocator()
-	ptr := heapAllocator.Malloc(1 * mem.GB)
-	staticAllocator := mem.NewStaticAllocator(ptr, 1*mem.GB)
+	ptr := heapAllocator.Malloc(1 * mem.MB)
+	staticAllocator := mem.NewStaticAllocator(ptr, 1*mem.MB)
 	arrayList := NewArrayList[uint64](staticAllocator)
 	for i := 0; i < 100; i++ {
 		arrayList.Add(uint64(i))

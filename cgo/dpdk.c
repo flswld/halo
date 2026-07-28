@@ -25,22 +25,26 @@ const char *APP_VERSION = "1.1.1";
 #define RX_RING_SIZE 1024
 #define TX_RING_SIZE 1024
 #define BURST_SIZE 32
+#define MAX_PACKET_SIZE 1514
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
 
 // dpdk_config 保存 Go 层传入的 DPDK 运行参数
 struct dpdk_config {
     int eal_argc; // EAL 参数数量
     char **eal_argv; // EAL 参数列表
-    int cpu_core_num; // CPU 核心数量
-    int *cpu_core_list; // CPU 核心编号列表
-    int port_num; // 网卡端口数量
-    int *port_list; // 网卡端口 ID 列表
+    int dpdk_cpu_core_num; // DPDK 使用的 CPU 核心数量
+    int *dpdk_cpu_core_list; // DPDK 使用的 CPU 核心编号列表
+    int port_id_num; // 网卡端口 ID 数量
+    int *port_id_list; // 使用的网卡端口 ID 列表
     int queue_num; // 每个网卡端口的队列数量
     int ring_buffer_size; // 环形缓冲区数据区字节大小
     bool debug_log; // 是否输出调试日志
     bool idle_sleep; // 空闲时是否睡眠
     bool single_core; // 是否使用单核模式
     bool kni_enable; // 是否启用 KNI
+    bool rx_checksum; // 是否启用接收硬件校验和
+    bool tx_checksum; // 是否启用发送硬件校验和
+    bool tx_only; // 是否仅启动网卡发包工作线程
 };
 
 // ring_buffer 保存一组 DPDK 收发环形缓冲区
@@ -49,6 +53,8 @@ struct ring_buffer {
     void *recv_ring_mem; // 接收环形缓冲区底层内存
     ring_buffer_t *send_ring_buffer; // 发送环形缓冲区
     ring_buffer_t *recv_ring_buffer; // 接收环形缓冲区
+    ring_buffer_consumer_t send_consumer; // Go 到 DPDK 的独占消费者
+    ring_buffer_producer_t recv_producer; // DPDK 到 Go 的独占生产者
 };
 
 // lcore_arg 保存工作核心处理的网卡端口和队列索引
@@ -65,8 +71,16 @@ struct rte_eth_conf *port_conf = NULL;
 struct ring_buffer *port_ring_buffer = NULL;
 struct ring_buffer kni_ring_buffer = {0};
 struct rte_mempool *mbuf_pool = NULL;
-struct rte_eth_stats *port_stats = NULL;
 static struct rte_kni *kni = NULL;
+
+// cgo_get_stats 获取指定网卡端口的累计统计信息
+int cgo_get_stats(const int port_index, struct rte_eth_stats *stats) {
+    if (!stats || port_index < 0 || port_index >= global_config.port_id_num) {
+        return -1;
+    }
+    memset(stats, 0x00, sizeof(struct rte_eth_stats));
+    return rte_eth_stats_get(global_config.port_id_list[port_index], stats);
+}
 
 // cgo_port_send_ring_buffer 获取网卡队列的发送环形缓冲区
 ring_buffer_t *cgo_port_send_ring_buffer(const int port_index, const int queue_id) {
@@ -88,22 +102,6 @@ ring_buffer_t *cgo_kni_recv_ring_buffer() {
     return kni_ring_buffer.recv_ring_buffer;
 }
 
-// cgo_print_stats 输出网卡收发包速率统计信息
-void cgo_print_stats(const int port_index, char *msg) {
-    const uint16_t port_id = global_config.port_list[port_index];
-    const struct rte_eth_stats old_stats = port_stats[port_index];
-    struct rte_eth_stats new_stats = {0};
-    rte_eth_stats_get(port_id, &new_stats);
-    sprintf(msg, "[rte_eth_stats]\tport:%2u | rx:%10lu (pps) | tx:%10lu (pps) | drop:%10lu (pps) | rx:%20lu (byte/s) | tx:%20lu (byte/s)\n",
-            port_id,
-            new_stats.ipackets - old_stats.ipackets,
-            new_stats.opackets - old_stats.opackets,
-            new_stats.imissed - old_stats.imissed,
-            new_stats.ibytes - old_stats.ibytes,
-            new_stats.obytes - old_stats.obytes);
-    port_stats[port_index] = new_stats;
-}
-
 // cgo_exit_signal_handler 停止数据面并释放 DPDK 资源
 void cgo_exit_signal_handler(void) {
     RTE_LOG(INFO, APP, "exit signal received, exit...\n");
@@ -119,8 +117,8 @@ void cgo_exit_signal_handler(void) {
         rte_free(kni_ring_buffer.send_ring_mem);
         rte_free(kni_ring_buffer.recv_ring_mem);
     }
-    for (int port_index = 0; port_index < global_config.port_num; port_index++) {
-        const uint16_t port_id = global_config.port_list[port_index];
+    for (int port_index = 0; port_index < global_config.port_id_num; port_index++) {
+        const uint16_t port_id = global_config.port_id_list[port_index];
         rte_eth_dev_stop(port_id);
         rte_eth_dev_close(port_id);
         for (int queue_id = 0; queue_id < global_config.queue_num; queue_id++) {
@@ -134,12 +132,10 @@ void cgo_exit_signal_handler(void) {
     memset(&global_config, 0x00, sizeof(struct dpdk_config));
     free(port_conf);
     port_conf = NULL;
-    free(port_ring_buffer);
+    rte_free(port_ring_buffer);
     port_ring_buffer = NULL;
     memset(&kni_ring_buffer, 0x00, sizeof(struct ring_buffer));
     mbuf_pool = NULL;
-    free(port_stats);
-    port_stats = NULL;
     kni = NULL;
 }
 
@@ -158,32 +154,38 @@ int port_init(const int port_index, const uint16_t port_id, const uint16_t queue
         return ret;
     }
     port_conf[port_index].rxmode.max_rx_pkt_len = 1518;
-    // 仅启用设备明确声明支持的校验和与 RSS 卸载能力
-    if (dev_info.rx_offload_capa & DEV_RX_OFFLOAD_IPV4_CKSUM) {
-        port_conf[port_index].rxmode.offloads |= DEV_RX_OFFLOAD_IPV4_CKSUM;
-    }
-    if (dev_info.rx_offload_capa & DEV_RX_OFFLOAD_TCP_CKSUM) {
-        port_conf[port_index].rxmode.offloads |= DEV_RX_OFFLOAD_TCP_CKSUM;
-    }
-    if (dev_info.rx_offload_capa & DEV_RX_OFFLOAD_UDP_CKSUM) {
-        port_conf[port_index].rxmode.offloads |= DEV_RX_OFFLOAD_UDP_CKSUM;
+    // 按应用配置启用设备明确声明支持的接收校验和卸载能力
+    if (global_config.rx_checksum) {
+        if (dev_info.rx_offload_capa & DEV_RX_OFFLOAD_IPV4_CKSUM) {
+            port_conf[port_index].rxmode.offloads |= DEV_RX_OFFLOAD_IPV4_CKSUM;
+        }
+        if (dev_info.rx_offload_capa & DEV_RX_OFFLOAD_TCP_CKSUM) {
+            port_conf[port_index].rxmode.offloads |= DEV_RX_OFFLOAD_TCP_CKSUM;
+        }
+        if (dev_info.rx_offload_capa & DEV_RX_OFFLOAD_UDP_CKSUM) {
+            port_conf[port_index].rxmode.offloads |= DEV_RX_OFFLOAD_UDP_CKSUM;
+        }
     }
     if (dev_info.rx_offload_capa & DEV_RX_OFFLOAD_RSS_HASH) {
         port_conf[port_index].rxmode.offloads |= DEV_RX_OFFLOAD_RSS_HASH;
         port_conf[port_index].rxmode.mq_mode = ETH_MQ_RX_RSS;
         port_conf[port_index].rx_adv_conf.rss_conf.rss_hf = dev_info.flow_type_rss_offloads;
     }
-    if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_IPV4_CKSUM) {
-        port_conf[port_index].txmode.offloads |= DEV_TX_OFFLOAD_IPV4_CKSUM;
+    // 按应用配置启用设备明确声明支持的发送校验和卸载能力
+    if (global_config.tx_checksum) {
+        if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_IPV4_CKSUM) {
+            port_conf[port_index].txmode.offloads |= DEV_TX_OFFLOAD_IPV4_CKSUM;
+        }
+        if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_TCP_CKSUM) {
+            port_conf[port_index].txmode.offloads |= DEV_TX_OFFLOAD_TCP_CKSUM;
+        }
+        if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_UDP_CKSUM) {
+            port_conf[port_index].txmode.offloads |= DEV_TX_OFFLOAD_UDP_CKSUM;
+        }
     }
-    if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_TCP_CKSUM) {
-        port_conf[port_index].txmode.offloads |= DEV_TX_OFFLOAD_TCP_CKSUM;
-    }
-    if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_UDP_CKSUM) {
-        port_conf[port_index].txmode.offloads |= DEV_TX_OFFLOAD_UDP_CKSUM;
-    }
-    RTE_LOG(INFO, APP, "port init, port_id: %u, queue_num: %u, rx_offload_capa: %lu, tx_offload_capa: %lu\n",
-            port_id, queue_num, dev_info.rx_offload_capa, dev_info.tx_offload_capa);
+    RTE_LOG(INFO, APP, "port init, port_id: %u, queue_num: %u, rx_offload_capa: %lu, tx_offload_capa: %lu, rx_offloads: %lu, tx_offloads: %lu\n",
+            port_id, queue_num, dev_info.rx_offload_capa, dev_info.tx_offload_capa,
+            port_conf[port_index].rxmode.offloads, port_conf[port_index].txmode.offloads);
     ret = rte_eth_dev_configure(port_id, queue_num, queue_num, port_conf + port_index);
     if (ret != 0) {
         RTE_LOG(ERR, APP, "rte_eth_dev_configure failed\n");
@@ -286,11 +288,11 @@ static bool eth_rx(const int port_index, const uint16_t port_id, const uint16_t 
     for (int i = 0; i < nb_rx; i++) {
         const uint8_t *recv_data = rte_pktmbuf_mtod(mbuf_recv[i], uint8_t *);
         const uint16_t recv_len = mbuf_recv[i]->data_len;
-        if (unlikely(recv_len > 1514)) {
+        if (unlikely(recv_len > MAX_PACKET_SIZE)) {
             rte_pktmbuf_free(mbuf_recv[i]);
             continue;
         }
-        write_packet(port_ring_buffer[port_index * global_config.queue_num + queue_id].recv_ring_buffer, recv_data, recv_len);
+        ring_buffer_producer_write_packet(&port_ring_buffer[port_index * global_config.queue_num + queue_id].recv_producer, recv_data, recv_len);
         // 打印网卡接收到的原始数据
         if (unlikely(global_config.debug_log)) {
             printf("[nic recv], port_index: %d, len: %d, data: ", port_index, mbuf_recv[i]->data_len);
@@ -315,20 +317,26 @@ static bool eth_tx(const int port_index, const uint16_t port_id, const uint16_t 
             break;
         }
         uint8_t *send_data = rte_pktmbuf_mtod(mbuf_send[i], uint8_t *);
-        uint16_t send_len = 0;
-        const bool ok = read_packet(port_ring_buffer[port_index * global_config.queue_num + queue_id].send_ring_buffer, send_data, &send_len);
+        uint32_t send_len = 0;
+        const uint32_t send_capacity = rte_pktmbuf_tailroom(mbuf_send[i]);
+        const bool ok = ring_buffer_consumer_read_packet(
+            &port_ring_buffer[port_index * global_config.queue_num + queue_id].send_consumer,
+            send_data, send_capacity, &send_len);
         if (unlikely(!ok)) {
             rte_pktmbuf_free(mbuf_send[i]);
             break;
         }
+        // 未启用硬件卸载时保持标志为零 使 PMD 可以选择无卸载发送快路径
+        mbuf_send[i]->ol_flags = 0;
         struct rte_ether_hdr *ether_hdr = rte_pktmbuf_mtod(mbuf_send[i], struct rte_ether_hdr *);
         // 校验和
         if (rte_be_to_cpu_16(ether_hdr->ether_type) == RTE_ETHER_TYPE_IPV4) {
-            // 同时设置 mbuf 分层长度和卸载标志 供硬件定位 IPv4 与四层头部
-            mbuf_send[i]->l2_len = sizeof(struct rte_ether_hdr);
-            mbuf_send[i]->l3_len = sizeof(struct rte_ipv4_hdr);
-            mbuf_send[i]->ol_flags = 0;
-            mbuf_send[i]->ol_flags |= PKT_TX_IPV4;
+            // 仅在实际启用发送卸载时设置分层长度和协议标志
+            if (port_conf[port_index].txmode.offloads != 0) {
+                mbuf_send[i]->l2_len = sizeof(struct rte_ether_hdr);
+                mbuf_send[i]->l3_len = sizeof(struct rte_ipv4_hdr);
+                mbuf_send[i]->ol_flags |= PKT_TX_IPV4;
+            }
             struct rte_ipv4_hdr *ipv4_hdr = (struct rte_ipv4_hdr *) ((uint8_t *) ether_hdr + sizeof(struct rte_ether_hdr));
             ipv4_hdr->hdr_checksum = 0;
             if (port_conf[port_index].txmode.offloads & DEV_TX_OFFLOAD_IPV4_CKSUM) {
@@ -357,12 +365,12 @@ static bool eth_tx(const int port_index, const uint16_t port_id, const uint16_t 
             }
         }
         mbuf_send[i]->pkt_len = send_len;
-        mbuf_send[i]->data_len = send_len;
+        mbuf_send[i]->data_len = (uint16_t) send_len;
         mbuf_send_size++;
         // 打印环状缓冲区数据
         if (unlikely(global_config.debug_log)) {
-            printf("[ring recv], port_index: %d, len: %d, data: ", port_index, send_len);
-            for (int j = 0; j < send_len; j++) {
+            printf("[ring recv], port_index: %d, len: %u, data: ", port_index, send_len);
+            for (uint32_t j = 0; j < send_len; j++) {
                 printf("%02x", send_data[j]);
             }
             printf("\n\n");
@@ -394,11 +402,11 @@ static bool kni_rx() {
     for (int i = 0; i < nb_rx; i++) {
         const uint8_t *recv_data = rte_pktmbuf_mtod(mbuf_recv[i], uint8_t *);
         const uint16_t recv_len = mbuf_recv[i]->data_len;
-        if (recv_len > 1514) {
+        if (recv_len > MAX_PACKET_SIZE) {
             rte_pktmbuf_free(mbuf_recv[i]);
             continue;
         }
-        write_packet(kni_ring_buffer.recv_ring_buffer, recv_data, recv_len);
+        ring_buffer_producer_write_packet(&kni_ring_buffer.recv_producer, recv_data, recv_len);
         // 打印KNI接收到的原始数据
         if (global_config.debug_log) {
             printf("[kni recv], len: %d, data: ", mbuf_recv[i]->data_len);
@@ -423,8 +431,10 @@ static bool kni_tx() {
             break;
         }
         uint8_t *send_data = rte_pktmbuf_mtod(mbuf_send[i], uint8_t *);
-        uint16_t send_len = 0;
-        const bool ok = read_packet(kni_ring_buffer.send_ring_buffer, send_data, &send_len);
+        uint32_t send_len = 0;
+        const uint32_t send_capacity = rte_pktmbuf_tailroom(mbuf_send[i]);
+        const bool ok = ring_buffer_consumer_read_packet(
+            &kni_ring_buffer.send_consumer, send_data, send_capacity, &send_len);
         if (!ok) {
             rte_pktmbuf_free(mbuf_send[i]);
             break;
@@ -446,12 +456,12 @@ static bool kni_tx() {
             }
         }
         mbuf_send[i]->pkt_len = send_len;
-        mbuf_send[i]->data_len = send_len;
+        mbuf_send[i]->data_len = (uint16_t) send_len;
         mbuf_send_size++;
         // 打印KNI环状缓冲区数据
         if (global_config.debug_log) {
-            printf("[kni ring recv], len: %d, data: ", send_len);
-            for (int j = 0; j < send_len; j++) {
+            printf("[kni ring recv], len: %u, data: ", send_len);
+            for (uint32_t j = 0; j < send_len; j++) {
                 printf("%02x", send_data[j]);
             }
             printf("\n\n");
@@ -476,7 +486,7 @@ int lcore_rx(void *arg_ptr) {
     const unsigned int lcore_id = rte_lcore_id();
     const struct lcore_arg *arg = arg_ptr;
     const int port_index = arg->port_index;
-    const uint16_t port_id = global_config.port_list[port_index];
+    const uint16_t port_id = global_config.port_id_list[port_index];
     const int queue_id = arg->queue_id;
     RTE_LOG(INFO, APP, "lcore_rx run in lcore: %u, port: %u, queue: %u\n", lcore_id, port_id, queue_id);
     while (atomic_load(&running)) {
@@ -495,7 +505,7 @@ int lcore_tx(void *arg_ptr) {
     const unsigned int lcore_id = rte_lcore_id();
     const struct lcore_arg *arg = arg_ptr;
     const int port_index = arg->port_index;
-    const uint16_t port_id = global_config.port_list[port_index];
+    const uint16_t port_id = global_config.port_id_list[port_index];
     const int queue_id = arg->queue_id;
     RTE_LOG(INFO, APP, "lcore_tx run in lcore: %u, port: %u, queue: %u\n", lcore_id, port_id, queue_id);
     while (atomic_load(&running)) {
@@ -509,17 +519,17 @@ int lcore_tx(void *arg_ptr) {
     return 0;
 }
 
-// lcore_rx_tx 在当前核心上轮询处理网卡和 KNI 收发
-int lcore_rx_tx(const bool handle_eth, const bool handle_kni) {
+// lcore_rx_tx 在当前核心上按配置轮询处理网卡和 KNI 收发
+int lcore_rx_tx(const bool handle_rx, const bool handle_tx, const bool handle_kni) {
     const unsigned int lcore_id = rte_lcore_id();
     RTE_LOG(INFO, APP, "lcore_rx_tx run in lcore: %u\n", lcore_id);
     while (atomic_load(&running)) {
         bool no_pkt = true;
-        if (handle_eth) {
-            for (int port_index = 0; port_index < global_config.port_num; port_index++) {
-                const uint16_t port_id = global_config.port_list[port_index];
-                const bool rx_pkt = eth_rx(port_index, port_id, 0);
-                const bool tx_pkt = eth_tx(port_index, port_id, 0);
+        if (handle_rx || handle_tx) {
+            for (int port_index = 0; port_index < global_config.port_id_num; port_index++) {
+                const uint16_t port_id = global_config.port_id_list[port_index];
+                const bool rx_pkt = handle_rx && eth_rx(port_index, port_id, 0);
+                const bool tx_pkt = handle_tx && eth_tx(port_index, port_id, 0);
                 if (rx_pkt || tx_pkt) {
                     no_pkt = false;
                 }
@@ -532,8 +542,8 @@ int lcore_rx_tx(const bool handle_eth, const bool handle_kni) {
                 no_pkt = false;
             }
         }
-        // 无包时短暂睡眠节省CPU资源
-        if (no_pkt && global_config.idle_sleep) {
+        // 主核心未承担数据面任务时必须休眠 避免无意义自旋争用同一物理核心
+        if (no_pkt && (global_config.idle_sleep || (!handle_rx && !handle_tx && !handle_kni))) {
             usleep(1000 * 10);
         }
     }
@@ -553,20 +563,20 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
         }
     }
     printf("\n");
-    printf("cpu core num: %d\n", config->cpu_core_num);
+    printf("cpu core num: %d\n", config->dpdk_cpu_core_num);
     printf("cpu core list: ");
-    for (int i = 0; i < config->cpu_core_num; i++) {
-        printf("%d", config->cpu_core_list[i]);
-        if (i < config->cpu_core_num - 1) {
+    for (int i = 0; i < config->dpdk_cpu_core_num; i++) {
+        printf("%d", config->dpdk_cpu_core_list[i]);
+        if (i < config->dpdk_cpu_core_num - 1) {
             printf(" ");
         }
     }
     printf("\n");
-    printf("port num: %d\n", config->port_num);
+    printf("port num: %d\n", config->port_id_num);
     printf("port list: ");
-    for (int i = 0; i < config->port_num; i++) {
-        printf("%d", config->port_list[i]);
-        if (i < config->port_num - 1) {
+    for (int i = 0; i < config->port_id_num; i++) {
+        printf("%d", config->port_id_list[i]);
+        if (i < config->port_id_num - 1) {
             printf(" ");
         }
     }
@@ -577,6 +587,9 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
     printf("idle sleep: %d\n", config->idle_sleep);
     printf("single core: %d\n", config->single_core);
     printf("kni enable: %d\n", config->kni_enable);
+    printf("rx checksum: %d\n", config->rx_checksum);
+    printf("tx checksum: %d\n", config->tx_checksum);
+    printf("tx only: %d\n", config->tx_only);
     printf("\n");
     // Go 传入的数组由调用方固定 整个主循环期间只读配置
     global_config = *config;
@@ -604,7 +617,7 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
     const int socket_id = (int) rte_socket_id();
     mbuf_pool = rte_pktmbuf_pool_create(
         "mbuf_pool",
-        NUM_MBUFS * config->port_num * config->queue_num,
+        NUM_MBUFS * config->port_id_num * config->queue_num,
         MBUF_CACHE_SIZE,
         0,
         RTE_MBUF_DEFAULT_BUF_SIZE,
@@ -615,10 +628,10 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
     }
 
     // 网卡初始化
-    port_conf = (struct rte_eth_conf *) malloc(sizeof(struct rte_eth_conf) * config->port_num);
-    memset(port_conf, 0x00, sizeof(struct rte_eth_conf) * config->port_num);
-    for (int port_index = 0; port_index < config->port_num; port_index++) {
-        const uint16_t port_id = config->port_list[port_index];
+    port_conf = (struct rte_eth_conf *) malloc(sizeof(struct rte_eth_conf) * config->port_id_num);
+    memset(port_conf, 0x00, sizeof(struct rte_eth_conf) * config->port_id_num);
+    for (int port_index = 0; port_index < config->port_id_num; port_index++) {
+        const uint16_t port_id = config->port_id_list[port_index];
         ret = port_init(port_index, port_id, config->queue_num);
         if (ret != 0) {
             rte_exit(EXIT_FAILURE, "port init failed, port: %u\n", port_id);
@@ -626,11 +639,15 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
     }
 
     // 分配环状缓冲区内存
-    const uint32_t ring_buffer_size = config->ring_buffer_size + sizeof(ring_buffer_t);
+    const uint64_t ring_buffer_size = (uint64_t) config->ring_buffer_size + sizeof(ring_buffer_t);
     // 每个端口队列分别持有一对 Go 到 DPDK 和 DPDK 到 Go 的环形缓冲区
-    port_ring_buffer = (struct ring_buffer *) malloc(sizeof(struct ring_buffer) * config->port_num * config->queue_num);
-    memset(port_ring_buffer, 0x00, sizeof(struct ring_buffer) * config->port_num * config->queue_num);
-    for (int port_index = 0; port_index < config->port_num; port_index++) {
+    port_ring_buffer = rte_zmalloc("port_ring_buffer",
+                                   sizeof(struct ring_buffer) * config->port_id_num * config->queue_num,
+                                   CACHE_LINE_SIZE);
+    if (!port_ring_buffer) {
+        rte_exit(EXIT_FAILURE, "port ring buffer metadata alloc failed\n");
+    }
+    for (int port_index = 0; port_index < config->port_id_num; port_index++) {
         for (int queue_id = 0; queue_id < config->queue_num; queue_id++) {
             const int i = port_index * config->queue_num + queue_id;
             port_ring_buffer[i].send_ring_mem = rte_malloc("send_ring_buffer", ring_buffer_size, CACHE_LINE_SIZE);
@@ -638,10 +655,16 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
             if (!port_ring_buffer[i].send_ring_buffer) {
                 rte_exit(EXIT_FAILURE, "send ring buffer create failed\n");
             }
+            if (!ring_buffer_consumer_init(&port_ring_buffer[i].send_consumer, port_ring_buffer[i].send_ring_buffer, 0)) {
+                rte_exit(EXIT_FAILURE, "send ring buffer consumer init failed\n");
+            }
             port_ring_buffer[i].recv_ring_mem = rte_malloc("recv_ring_buffer", ring_buffer_size, CACHE_LINE_SIZE);
             port_ring_buffer[i].recv_ring_buffer = ring_buffer_create(port_ring_buffer[i].recv_ring_mem, ring_buffer_size);
             if (!port_ring_buffer[i].recv_ring_buffer) {
                 rte_exit(EXIT_FAILURE, "recv ring buffer create failed\n");
+            }
+            if (!ring_buffer_producer_init(&port_ring_buffer[i].recv_producer, port_ring_buffer[i].recv_ring_buffer, 0)) {
+                rte_exit(EXIT_FAILURE, "recv ring buffer producer init failed\n");
             }
         }
     }
@@ -655,34 +678,42 @@ int cgo_dpdk_main(const struct dpdk_config *config) {
         if (!kni_ring_buffer.send_ring_buffer) {
             rte_exit(EXIT_FAILURE, "send ring buffer create failed\n");
         }
+        if (!ring_buffer_consumer_init(&kni_ring_buffer.send_consumer, kni_ring_buffer.send_ring_buffer, 0)) {
+            rte_exit(EXIT_FAILURE, "send ring buffer consumer init failed\n");
+        }
         kni_ring_buffer.recv_ring_mem = rte_malloc("recv_ring_buffer", ring_buffer_size, CACHE_LINE_SIZE);
         kni_ring_buffer.recv_ring_buffer = ring_buffer_create(kni_ring_buffer.recv_ring_mem, ring_buffer_size);
         if (!kni_ring_buffer.recv_ring_buffer) {
             rte_exit(EXIT_FAILURE, "recv ring buffer create failed\n");
         }
+        if (!ring_buffer_producer_init(&kni_ring_buffer.recv_producer, kni_ring_buffer.recv_ring_buffer, 0)) {
+            rte_exit(EXIT_FAILURE, "recv ring buffer producer init failed\n");
+        }
     }
 
     // 启动数据包处理核心线程
     atomic_store(&running, true);
-    port_stats = (struct rte_eth_stats *) malloc(sizeof(struct rte_eth_stats) * config->port_num);
-    memset(port_stats, 0x00, sizeof(struct rte_eth_stats) * config->port_num);
     if (config->single_core) {
         // 单核模式在当前 EAL 核心串行轮询全部端口和 KNI
-        lcore_rx_tx(true, config->kni_enable);
+        lcore_rx_tx(!config->tx_only, true, config->kni_enable);
     } else {
-        // 多核模式为每个端口队列分别启动收包和发包工作核心
+        // 多核模式按运行配置为每个端口队列启动工作核心
         struct lcore_arg arg_list[128] = {0};
-        for (int port_index = 0; port_index < config->port_num; port_index++) {
+        for (int port_index = 0; port_index < config->port_id_num; port_index++) {
             for (int queue_id = 0; queue_id < config->queue_num; queue_id++) {
                 const int arg_index = port_index * config->queue_num + queue_id;
                 arg_list[arg_index].port_index = port_index;
                 arg_list[arg_index].queue_id = queue_id;
-                const int cpu_core_index = 1 + port_index * config->queue_num * 2 + queue_id;
-                rte_eal_remote_launch(lcore_rx, arg_list + arg_index, config->cpu_core_list[cpu_core_index + 0]);
-                rte_eal_remote_launch(lcore_tx, arg_list + arg_index, config->cpu_core_list[cpu_core_index + config->queue_num]);
+                if (config->tx_only) {
+                    rte_eal_remote_launch(lcore_tx, arg_list + arg_index, config->dpdk_cpu_core_list[1 + arg_index]);
+                } else {
+                    const int cpu_core_index = 1 + port_index * config->queue_num * 2 + queue_id;
+                    rte_eal_remote_launch(lcore_rx, arg_list + arg_index, config->dpdk_cpu_core_list[cpu_core_index]);
+                    rte_eal_remote_launch(lcore_tx, arg_list + arg_index, config->dpdk_cpu_core_list[cpu_core_index + config->queue_num]);
+                }
             }
         }
-        lcore_rx_tx(false, config->kni_enable);
+        lcore_rx_tx(false, false, config->kni_enable);
     }
 
     rte_eal_mp_wait_lcore();

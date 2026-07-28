@@ -508,32 +508,38 @@ func (s *SwitchPort) PacketHandle() {
 	s.Switch.StopWaitGroup.Done()
 }
 
+const wireMaxPacketSize = 1514
+
 // Wire 提供基于内存环形缓冲区的虚拟链路
 type Wire struct {
-	Memory     unsafe.Pointer  // 环形缓冲区使用的底层内存
-	RingBuffer *mem.RingBuffer // 环形缓冲区
-	Data       []byte          // 接收报文缓冲区
-	IdleSleep  bool            // 空闲时是否睡眠
+	Memory     unsafe.Pointer          // 环形缓冲区使用的底层内存
+	RingBuffer *mem.RingBuffer         // 环形缓冲区
+	Data       []byte                  // 接收报文缓冲区
+	IdleSleep  bool                    // 空闲时是否睡眠
+	Producer   *mem.RingBufferProducer // 独占写入端的生产者上下文 直接写入时单包不得超过 1514 字节
+	Consumer   *mem.RingBufferConsumer // 独占读取端的消费者上下文
 }
 
 // NewWire 创建虚拟链路
 func NewWire(idleSleep bool) *Wire {
 	// Wire 同时持有环形缓冲区头部和 8 MiB 数据区的底层内存
 	memory := mem.GetHeapAllocator().Malloc(mem.SizeOf[mem.RingBuffer]() + 8*mem.MB)
-	ringBuffer := mem.RingBufferCreate(memory, uint32(mem.SizeOf[mem.RingBuffer]()+8*mem.MB))
+	ringBuffer := mem.RingBufferCreate(memory, mem.SizeOf[mem.RingBuffer]()+8*mem.MB)
 	return &Wire{
 		Memory:     memory,
 		RingBuffer: ringBuffer,
-		Data:       make([]byte, 1514),
+		Data:       make([]byte, wireMaxPacketSize),
 		IdleSleep:  idleSleep,
+		Producer:   mem.NewRingBufferProducer(ringBuffer, 0),
+		Consumer:   mem.NewRingBufferConsumer(ringBuffer, 0),
 	}
 }
 
 // Rx 从虚拟链路接收一个报文
 func (w *Wire) Rx() (pkt []byte) {
-	dataLen := uint16(0)
-	mem.ReadPacket(w.RingBuffer, w.Data, &dataLen)
-	if dataLen == 0 {
+	dataLen := uint32(0)
+	ok := w.Consumer.ReadPacket(w.Data, &dataLen)
+	if !ok {
 		if w.IdleSleep {
 			time.Sleep(time.Millisecond * 10)
 		}
@@ -544,7 +550,10 @@ func (w *Wire) Rx() (pkt []byte) {
 
 // Tx 向虚拟链路发送一个报文
 func (w *Wire) Tx(pkt []byte) {
-	mem.WritePacket(w.RingBuffer, pkt, uint16(len(pkt)))
+	if len(pkt) == 0 || len(pkt) > wireMaxPacketSize {
+		return
+	}
+	w.Producer.WritePacket(pkt)
 }
 
 // Destroy 销毁虚拟链路并释放底层内存

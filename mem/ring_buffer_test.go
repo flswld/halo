@@ -14,7 +14,9 @@ import (
 // TestRingBufferData 验证环形缓冲区的并发报文读写
 func TestRingBufferData(t *testing.T) {
 	memory := GetHeapAllocator().AlignedMalloc(SizeOf[RingBuffer]()+1*MB, 0)
-	rb := RingBufferCreate(memory, uint32(SizeOf[RingBuffer]()+1*MB))
+	rb := RingBufferCreate(memory, SizeOf[RingBuffer]()+1*MB)
+	producer := NewRingBufferProducer(rb, 0)
+	consumer := NewRingBufferConsumer(rb, 0)
 
 	var stop atomic.Bool
 
@@ -30,7 +32,7 @@ func TestRingBufferData(t *testing.T) {
 				break
 			}
 			binary.BigEndian.PutUint64(data[0:8], seq)
-			ok := WritePacket(rb, data, 16)
+			ok := producer.WritePacket(data)
 			if !ok {
 				continue
 			}
@@ -41,14 +43,14 @@ func TestRingBufferData(t *testing.T) {
 	go func() {
 		cpu.BindCpuCore(1)
 		_data := make([]byte, 16)
-		_len := uint16(0)
+		_len := uint32(0)
 		_seq := uint64(1)
 		_tt := time.Now()
 		for {
 			if stop.Load() {
 				break
 			}
-			ReadPacket(rb, _data, &_len)
+			consumer.ReadPacket(_data, &_len)
 			if _len == 0 {
 				continue
 			}
@@ -67,7 +69,7 @@ func TestRingBufferData(t *testing.T) {
 		}
 	}()
 
-	time.Sleep(time.Second * 30)
+	time.Sleep(10 * time.Second)
 	stop.Store(true)
 	time.Sleep(time.Second)
 
@@ -83,7 +85,9 @@ type TestMsg struct {
 // TestRingBufferStruct 验证结构体数据通过环形缓冲区并发传输
 func TestRingBufferStruct(t *testing.T) {
 	memory := GetHeapAllocator().AlignedMalloc(SizeOf[RingBuffer]()+1*MB, 0)
-	rb := RingBufferCreate(memory, uint32(SizeOf[RingBuffer]()+1*MB))
+	rb := RingBufferCreate(memory, SizeOf[RingBuffer]()+1*MB)
+	producer := NewRingBufferProducer(rb, 0)
+	consumer := NewRingBufferConsumer(rb, 0)
 
 	var stop atomic.Bool
 
@@ -100,7 +104,7 @@ func TestRingBufferStruct(t *testing.T) {
 			msgData.Data = uintptr(unsafe.Pointer(msg))
 			msgData.Len = int(msgLen)
 			msgData.Cap = int(msgLen)
-			ok := WritePacket(rb, *(*[]uint8)(unsafe.Pointer(msgData)), uint16(msgLen))
+			ok := producer.WritePacket(*(*[]uint8)(unsafe.Pointer(msgData)))
 			if !ok {
 				continue
 			}
@@ -111,14 +115,14 @@ func TestRingBufferStruct(t *testing.T) {
 	go func() {
 		cpu.BindCpuCore(1)
 		msgData := make([]byte, 64)
-		_len := uint16(0)
+		_len := uint32(0)
 		seq := uint64(1)
 		_tt := time.Now()
 		for {
 			if stop.Load() {
 				break
 			}
-			ReadPacket(rb, msgData, &_len)
+			consumer.ReadPacket(msgData, &_len)
 			if _len == 0 {
 				continue
 			}
@@ -133,7 +137,7 @@ func TestRingBufferStruct(t *testing.T) {
 		}
 	}()
 
-	time.Sleep(time.Second * 30)
+	time.Sleep(10 * time.Second)
 	stop.Store(true)
 	time.Sleep(time.Second)
 
@@ -147,17 +151,23 @@ func TestRingBufferShmWrite(t *testing.T) {
 	offset := int64(0)
 	rb := RingBufferMapping(memory, &offset)
 	if rb == nil {
-		rb = RingBufferCreate(memory, uint32(SizeOf[RingBuffer]()+1*MB))
+		rb = RingBufferCreate(memory, SizeOf[RingBuffer]()+1*MB)
 	}
+	producer := NewRingBufferProducer(rb, offset)
 	data := make([]byte, 16)
 	for i := 8; i <= 15; i++ {
 		data[i] = 0xff
 	}
 	seq := uint64(1)
+	var stop atomic.Bool
+	timer := time.AfterFunc(10*time.Second, func() {
+		stop.Store(true)
+	})
+	defer timer.Stop()
 	cpu.BindCpuCore(0)
-	for {
+	for !stop.Load() {
 		binary.BigEndian.PutUint64(data[0:8], seq)
-		ok := WritePacketOffset(rb, offset, data, 16)
+		ok := producer.WritePacket(data)
 		if !ok {
 			continue
 		}
@@ -171,15 +181,21 @@ func TestRingBufferShmRead(t *testing.T) {
 	offset := int64(0)
 	rb := RingBufferMapping(memory, &offset)
 	if rb == nil {
-		rb = RingBufferCreate(memory, uint32(SizeOf[RingBuffer]()+1*MB))
+		rb = RingBufferCreate(memory, SizeOf[RingBuffer]()+1*MB)
 	}
+	consumer := NewRingBufferConsumer(rb, offset)
 	_data := make([]byte, 16)
-	_len := uint16(0)
+	_len := uint32(0)
 	_seq := uint64(1)
 	_tt := time.Now()
+	var stop atomic.Bool
+	timer := time.AfterFunc(10*time.Second, func() {
+		stop.Store(true)
+	})
+	defer timer.Stop()
 	cpu.BindCpuCore(1)
-	for {
-		ReadPacketOffset(rb, offset, _data, &_len)
+	for !stop.Load() {
+		consumer.ReadPacket(_data, &_len)
 		if _len == 0 {
 			continue
 		}

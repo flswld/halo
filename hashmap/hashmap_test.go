@@ -21,8 +21,8 @@ func (k Key) GetHashCode() uint64 {
 // TestHashMap 验证哈希表的增删改查和遍历
 func TestHashMap(t *testing.T) {
 	heapAllocator := mem.GetHeapAllocator()
-	ptr := heapAllocator.Malloc(1 * mem.GB)
-	staticAllocator := mem.NewStaticAllocator(ptr, 1*mem.GB)
+	ptr := heapAllocator.Malloc(1 * mem.MB)
+	staticAllocator := mem.NewStaticAllocator(ptr, 1*mem.MB)
 	hashMap := NewHashMap[Key, uint64](staticAllocator)
 	for i := 0; i < 100; i++ {
 		hashMap.Set(Key(i), uint64(i+10000))

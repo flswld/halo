@@ -158,17 +158,20 @@ go get github.com/flswld/halo
 func DirectDpdk() {
 	// 启动dpdk
 	dpdk.Run(&dpdk.Config{
-		DpdkCpuCoreList: []int{0, 1, 2, 3, 4, 5, 6, 7, 8}, // dpdk使用的核心编号列表 主线程第一个核心 每个网卡队列一个核心
+		DpdkCpuCoreList: []int{0, 1, 2, 3, 4, 5, 6, 7, 8}, // dpdk使用的核心编号列表 主线程第一个核心 每个网卡队列收发各一个核心
 		DpdkMemChanNum:  4,                                // dpdk内存通道数
 		PortIdList:      []int{0, 1},                      // 使用的网卡id列表
 		QueueNum:        2,                                // 启用的网卡队列数
 		RingBufferSize:  128 * mem.MB,                     // 环状缓冲区大小
-		AfPacketDevList: nil,                              // 使用的af_packet虚拟网卡列表
+		EalArgs:         nil,                              // 追加的EAL参数列表
 		StatsLog:        true,                             // 收发包统计日志
 		DebugLog:        false,                            // 收发包调试日志
 		IdleSleep:       false,                            // 空闲睡眠 降低cpu占用
 		SingleCore:      false,                            // 单核模式 只使用cpu0
 		KniEnable:       false,                            // 开启kni内核网卡
+		RxChecksum:      true,                             // 开启接收硬件校验和
+		TxChecksum:      true,                             // 开启发送硬件校验和
+		TxOnly:          false,                            // 仅启动网卡发包工作线程
 	})
 
 	// 通过EthQueueRxPkt和EthQueueTxPkt方法发送接收原始以太网报文
@@ -211,7 +214,7 @@ func EthernetRouter() {
 		PortIdList:      []int{0, 1},
 		QueueNum:        1,
 		RingBufferSize:  128 * mem.MB,
-		AfPacketDevList: []string{"eth0", "wlan0"},
+		EalArgs:         []string{"--vdev=net_af_packet0,iface=eth0", "--vdev=net_af_packet1,iface=wlan0"},
 		StatsLog:        true,
 		DebugLog:        false,
 		IdleSleep:       true,

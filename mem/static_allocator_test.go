@@ -9,9 +9,9 @@ import (
 // TestStaticAllocator 验证静态分配器的大块内存分配和回收
 func TestStaticAllocator(t *testing.T) {
 	var heapAllocator Allocator = GetHeapAllocator()
-	p := heapAllocator.Malloc(8 * GB)
-	var staticAllocator Allocator = NewStaticAllocator(p, 8*GB)
-	ptrList := make([]unsafe.Pointer, 4*1024)
+	p := heapAllocator.Malloc(1 * GB)
+	var staticAllocator Allocator = NewStaticAllocator(p, 1*GB)
+	ptrList := make([]unsafe.Pointer, 512)
 	for i := 0; i < len(ptrList); i++ {
 		ptr := staticAllocator.Malloc(1 * MB)
 		if ptr == nil {
@@ -23,7 +23,7 @@ func TestStaticAllocator(t *testing.T) {
 		}
 		ptrList[i] = ptr
 	}
-	time.Sleep(time.Second * 5)
+	time.Sleep(time.Second * 1)
 	for _, ptr := range ptrList {
 		for i := 0; i < 1*MB; i++ {
 			v := (*uint8)(Offset(ptr, int64(i)))

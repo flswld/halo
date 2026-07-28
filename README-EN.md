@@ -158,17 +158,20 @@ go get github.com/flswld/halo
 func DirectDpdk() {
 	// Start DPDK
 	dpdk.Run(&dpdk.Config{
-		DpdkCpuCoreList: []int{0, 1, 2, 3, 4, 5, 6, 7, 8}, // List of CPU core IDs used by DPDK. The main thread uses the first core; each NIC queue uses one core
+		DpdkCpuCoreList: []int{0, 1, 2, 3, 4, 5, 6, 7, 8}, // List of CPU core IDs used by DPDK The first runs the main thread Each NIC queue uses one RX and one TX core
 		DpdkMemChanNum:  4,                                // Number of DPDK memory channels
 		PortIdList:      []int{0, 1},                      // List of NIC port IDs to use
 		QueueNum:        2,                                // Number of NIC queues to enable
 		RingBufferSize:  128 * mem.MB,                     // Ring buffer size
-		AfPacketDevList: nil,                              // List of af_packet virtual NICs to use
+		EalArgs:         nil,                              // Additional EAL arguments
 		StatsLog:        true,                             // Packet statistics logging
 		DebugLog:        false,                            // Packet debug logging
 		IdleSleep:       false,                            // Idle sleep to reduce CPU usage
 		SingleCore:      false,                            // Single-core mode, use only CPU 0
 		KniEnable:       false,                            // Enable KNI kernel NIC
+		RxChecksum:      true,                             // Enable RX hardware checksum
+		TxChecksum:      true,                             // Enable TX hardware checksum
+		TxOnly:          false,                            // Start only NIC transmit workers
 	})
 
 	// Use EthQueueRxPkt and EthQueueTxPkt methods to receive and transmit raw Ethernet frames
@@ -211,7 +214,7 @@ func EthernetRouter() {
 		PortIdList:      []int{0, 1},
 		QueueNum:        1,
 		RingBufferSize:  128 * mem.MB,
-		AfPacketDevList: []string{"eth0", "wlan0"},
+		EalArgs:         []string{"--vdev=net_af_packet0,iface=eth0", "--vdev=net_af_packet1,iface=wlan0"},
 		StatsLog:        true,
 		DebugLog:        false,
 		IdleSleep:       true,

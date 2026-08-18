@@ -7,8 +7,10 @@ import (
 	"time"
 )
 
-// SystemTimedSched is the library level timed-scheduler
-var SystemTimedSched = NewTimedSched(runtime.NumCPU())
+// SystemTimedSched 是全部 KCP 会话共享的定时调度器
+//
+// 单逻辑 CPU 环境至少保留两个 worker 避免回调阻塞时饿死其他会话
+var SystemTimedSched = NewTimedSched(max(runtime.NumCPU(), 2))
 
 type timedFunc struct {
 	execute func()
@@ -26,7 +28,7 @@ func (h *timedFuncHeap) Pop() interface{} {
 	old := *h
 	n := len(old)
 	x := old[n-1]
-	old[n-1].execute = nil // avoid memory leak
+	old[n-1] = timedFunc{}
 	*h = old[0 : n-1]
 	return x
 }
@@ -47,6 +49,9 @@ type TimedSched struct {
 
 // NewTimedSched creates a parallel-scheduler with given parallelization
 func NewTimedSched(parallel int) *TimedSched {
+	if parallel < 1 {
+		parallel = 1
+	}
 	ts := new(TimedSched)
 	ts.chTask = make(chan timedFunc)
 	ts.die = make(chan struct{})
@@ -62,6 +67,7 @@ func NewTimedSched(parallel int) *TimedSched {
 func (ts *TimedSched) sched() {
 	var tasks timedFuncHeap
 	timer := time.NewTimer(0)
+	defer timer.Stop()
 	drained := false
 	for {
 		select {
@@ -103,22 +109,14 @@ func (ts *TimedSched) prepend() {
 		select {
 		case <-ts.chPrependNotify:
 			ts.prependLock.Lock()
-			// keep cap to reuse slice
-			if cap(tasks) < cap(ts.prependTasks) {
-				tasks = make([]timedFunc, 0, cap(ts.prependTasks))
-			}
-			tasks = tasks[:len(ts.prependTasks)]
-			copy(tasks, ts.prependTasks)
-			for k := range ts.prependTasks {
-				ts.prependTasks[k].execute = nil // avoid memory leak
-			}
-			ts.prependTasks = ts.prependTasks[:0]
+			// 交换切片可缩短持锁时间并避免每轮复制待调度任务
+			tasks, ts.prependTasks = ts.prependTasks, tasks[:0]
 			ts.prependLock.Unlock()
 
 			for k := range tasks {
 				select {
 				case ts.chTask <- tasks[k]:
-					tasks[k].execute = nil // avoid memory leak
+					tasks[k] = timedFunc{}
 				case <-ts.die:
 					return
 				}

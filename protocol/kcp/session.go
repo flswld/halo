@@ -33,21 +33,20 @@ const (
 var (
 	errInvalidOperation = errors.New("invalid operation")
 	errPayloadTooLarge  = errors.New("message payload above 255*mss")
-	errTimeout          = errors.New("timeout")
+	errTimeout          = timeoutError{}
 )
 
-var (
-	// a system-wide packet buffer shared among sending, receiving and FEC
-	// to mitigate high-frequency memory allocation for packets, bytes from xmitBuf
-	// is aligned to 64bit
-	xmitBuf sync.Pool
-)
+// timeoutError 实现 net.Error 以便调用方识别 deadline 超时
+type timeoutError struct{}
 
-func init() {
-	xmitBuf.New = func() interface{} {
-		return make([]byte, mtuLimit)
-	}
-}
+// Error 返回超时错误文本
+func (timeoutError) Error() string { return "timeout" }
+
+// Timeout 表示当前错误由 deadline 到期产生
+func (timeoutError) Timeout() bool { return true }
+
+// Temporary 保留传统 net.Error 的临时错误语义
+func (timeoutError) Temporary() bool { return true }
 
 const (
 	batchSize = 16
@@ -180,6 +179,14 @@ func newUDPSession(conv uint64, l *Listener, conn net.PacketConn, ownConn bool, 
 
 // Read implements net.Conn
 func (s *UDPSession) Read(b []byte) (n int, err error) {
+	var timeout *time.Timer
+	var timeoutChannel <-chan time.Time
+	defer func() {
+		if timeout != nil {
+			timeout.Stop()
+		}
+	}()
+
 	for {
 		s.mu.Lock()
 		if len(s.bufptr) > 0 { // copy from buffer into b
@@ -214,27 +221,40 @@ func (s *UDPSession) Read(b []byte) (n int, err error) {
 		}
 
 		// deadline for current reading operation
-		var timeout *time.Timer
-		var c <-chan time.Time
+		timeoutChannel = nil
 		if !s.rd.IsZero() {
-			if time.Now().After(s.rd) {
+			delay := time.Until(s.rd)
+			if delay <= 0 {
 				s.mu.Unlock()
 				return 0, errTimeout
 			}
 
-			delay := time.Until(s.rd)
-			timeout = time.NewTimer(delay)
-			c = timeout.C
+			if timeout == nil {
+				timeout = time.NewTimer(delay)
+			} else {
+				if !timeout.Stop() {
+					select {
+					case <-timeout.C:
+					default:
+					}
+				}
+				timeout.Reset(delay)
+			}
+			timeoutChannel = timeout.C
+		} else if timeout != nil {
+			if !timeout.Stop() {
+				select {
+				case <-timeout.C:
+				default:
+				}
+			}
 		}
 		s.mu.Unlock()
 
 		// wait for read event or timeout or error
 		select {
 		case <-s.chReadEvent:
-			if timeout != nil {
-				timeout.Stop()
-			}
-		case <-c:
+		case <-timeoutChannel:
 			return 0, errTimeout
 		case <-s.chSocketReadError:
 			return 0, s.socketReadError.Load().(error)
@@ -258,6 +278,14 @@ func (s *UDPSession) Write(b []byte) (n int, err error) {
 
 // WriteBuffers write a vector of byte slices to the underlying connection
 func (s *UDPSession) WriteBuffers(v [][]byte) (n int, err error) {
+	var timeout *time.Timer
+	var timeoutChannel <-chan time.Time
+	defer func() {
+		if timeout != nil {
+			timeout.Stop()
+		}
+	}()
+
 	for {
 		select {
 		case <-s.chSocketWriteError:
@@ -304,25 +332,38 @@ func (s *UDPSession) WriteBuffers(v [][]byte) (n int, err error) {
 			return n, nil
 		}
 
-		var timeout *time.Timer
-		var c <-chan time.Time
+		timeoutChannel = nil
 		if !s.wd.IsZero() {
-			if time.Now().After(s.wd) {
+			delay := time.Until(s.wd)
+			if delay <= 0 {
 				s.mu.Unlock()
 				return 0, errTimeout
 			}
-			delay := time.Until(s.wd)
-			timeout = time.NewTimer(delay)
-			c = timeout.C
+			if timeout == nil {
+				timeout = time.NewTimer(delay)
+			} else {
+				if !timeout.Stop() {
+					select {
+					case <-timeout.C:
+					default:
+					}
+				}
+				timeout.Reset(delay)
+			}
+			timeoutChannel = timeout.C
+		} else if timeout != nil {
+			if !timeout.Stop() {
+				select {
+				case <-timeout.C:
+				default:
+				}
+			}
 		}
 		s.mu.Unlock()
 
 		select {
 		case <-s.chWriteEvent:
-			if timeout != nil {
-				timeout.Stop()
-			}
-		case <-c:
+		case <-timeoutChannel:
 			return 0, errTimeout
 		case <-s.chSocketWriteError:
 			return 0, s.socketWriteError.Load().(error)
@@ -372,11 +413,11 @@ func (s *UDPSession) CloseReason(enetType uint32) error {
 		} else {
 			s.sendEnetNotifyToPeerChanConn(enet)
 		}
-		// 尽力发出已有 KCP 数据后释放尚未确认的发送段
+		// 尽力发出已有 KCP 数据后回收当前会话持有的全部分片
 		s.mu.Lock()
 		s.kcp.flush(false)
 		s.uncork()
-		s.kcp.ReleaseTX()
+		s.kcp.release()
 		s.mu.Unlock()
 
 		// 服务端会话只从 Listener 移除 客户端仅关闭自己创建的底层连接
@@ -455,8 +496,7 @@ func (s *UDPSession) SetMtu(mtu int) bool {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.kcp.SetMtu(mtu)
-	return true
+	return s.kcp.SetMtu(mtu) == 0
 }
 
 // SetStreamMode toggles the stream mode on/off
@@ -556,7 +596,7 @@ func (s *UDPSession) SetWriteBuffer(bytes int) error {
 func (s *UDPSession) output(buf []byte) {
 	var msg ipv4.Message
 	for i := 0; i < s.dup+1; i++ {
-		bts := xmitBuf.Get().([]byte)[:len(buf)]
+		bts := xmitBuf.Get(len(buf))
 		copy(bts, buf)
 		msg.Buffers = [][]byte{bts}
 		msg.Addr = s.remote
@@ -660,6 +700,12 @@ func (s *UDPSession) packetInput(data []byte) {
 func (s *UDPSession) kcpInput(data []byte) {
 	var kcpInErrors uint64
 	s.mu.Lock()
+	select {
+	case <-s.die:
+		s.mu.Unlock()
+		return
+	default:
+	}
 	if ret := s.kcp.Input(data, true, s.ackNoDelay); ret != 0 {
 		kcpInErrors++
 	}

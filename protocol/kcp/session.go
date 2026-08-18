@@ -32,6 +32,7 @@ const (
 
 var (
 	errInvalidOperation = errors.New("invalid operation")
+	errPayloadTooLarge  = errors.New("message payload above 255*mss")
 	errTimeout          = errors.New("timeout")
 )
 
@@ -243,16 +244,15 @@ func (s *UDPSession) Read(b []byte) (n int, err error) {
 	}
 }
 
-// GetMaxPayloadLen 获取单条 KCP 消息允许的最大载荷长度
+// GetMaxPayloadLen 获取消息模式单次写入允许的最大载荷长度 流模式不受此返回值限制
 func (s *UDPSession) GetMaxPayloadLen() int {
-	return 256 * int(s.kcp.mss)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return 255 * int(s.kcp.mss)
 }
 
 // Write implements net.Conn
 func (s *UDPSession) Write(b []byte) (n int, err error) {
-	if len(b) > s.GetMaxPayloadLen() {
-		return 0, errors.New("send payload above 256*mss")
-	}
 	return s.WriteBuffers([][]byte{b})
 }
 
@@ -268,23 +268,30 @@ func (s *UDPSession) WriteBuffers(v [][]byte) (n int, err error) {
 		}
 
 		s.mu.Lock()
+		if s.kcp.stream == 0 {
+			maxPayloadLen := 255 * int(s.kcp.mss)
+			for _, b := range v {
+				if len(b) > maxPayloadLen {
+					s.mu.Unlock()
+					return 0, errPayloadTooLarge
+				}
+			}
+		}
 
 		// make sure write do not overflow the max sliding window on both side
 		waitsnd := s.kcp.WaitSnd()
 		if waitsnd < int(s.kcp.snd_wnd) && waitsnd < int(s.kcp.rmt_wnd) {
 			for _, b := range v {
+				if len(b) == 0 {
+					continue
+				}
+				// 每个切片独立交给 KCP 内核 流模式可继续合并相邻数据
+				if ret := s.kcp.Send(b); ret != 0 {
+					s.mu.Unlock()
+					atomic.AddUint64(&DefaultSnmp.BytesSent, uint64(n))
+					return n, errors.New("kcp send failed: " + strconv.Itoa(ret))
+				}
 				n += len(b)
-				// KCP消息模式 上层不要对消息进行分割 并且保证消息长度小于256*mss
-				// for {
-				//	if len(b) <= int(s.kcp.mss) {
-				//		s.kcp.Send(b)
-				//		break
-				//	} else {
-				//		s.kcp.Send(b[:s.kcp.mss])
-				//		b = b[s.kcp.mss:]
-				//	}
-				// }
-				s.kcp.Send(b)
 			}
 
 			waitsnd = s.kcp.WaitSnd()

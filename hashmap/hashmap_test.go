@@ -1,10 +1,10 @@
 package hashmap
 
 import (
-	"encoding/binary"
 	"log"
 	"testing"
 
+	"github.com/flswld/halo/hashcode"
 	"github.com/flswld/halo/mem"
 )
 
@@ -13,9 +13,7 @@ type Key uint32
 
 // GetHashCode 计算测试键的哈希值
 func (k Key) GetHashCode() uint64 {
-	data := make([]byte, 4)
-	binary.LittleEndian.PutUint32(data, uint32(k))
-	return GetHashCode(data)
+	return hashcode.GetHashCodeInt(uint64(k))
 }
 
 // TestHashMap 验证哈希表的增删改查和遍历

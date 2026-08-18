@@ -2,7 +2,6 @@ package engine
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -12,6 +11,7 @@ import (
 	"unsafe"
 
 	"github.com/flswld/halo/cpu"
+	"github.com/flswld/halo/hashcode"
 	"github.com/flswld/halo/hashmap"
 	"github.com/flswld/halo/mem"
 	"github.com/flswld/halo/protocol"
@@ -33,9 +33,7 @@ type IpAddrHash uint32
 
 // GetHashCode 计算 IPv4 地址的哈希值
 func (h IpAddrHash) GetHashCode() uint64 {
-	data := make([]byte, 4)
-	binary.LittleEndian.PutUint32(data, uint32(h))
-	return hashmap.GetHashCode(data)
+	return hashcode.GetHashCodeInt(uint64(h))
 }
 
 // PortHash 表示可计算哈希值的端口号
@@ -43,9 +41,7 @@ type PortHash uint16
 
 // GetHashCode 计算端口号的哈希值
 func (h PortHash) GetHashCode() uint64 {
-	data := make([]byte, 2)
-	binary.LittleEndian.PutUint16(data, uint16(h))
-	return hashmap.GetHashCode(data)
+	return hashcode.GetHashCodeInt(uint64(h))
 }
 
 // MacAddrHash 表示可计算哈希值的 MAC 地址
@@ -53,7 +49,7 @@ type MacAddrHash [6]byte
 
 // GetHashCode 计算 MAC 地址的哈希值
 func (h MacAddrHash) GetHashCode() uint64 {
-	return hashmap.GetHashCode(h[:])
+	return hashcode.GetHashCodeXXH3(h[:])
 }
 
 // RouterConfig 路由器配置

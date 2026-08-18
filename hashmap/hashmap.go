@@ -8,10 +8,7 @@ import (
 	"github.com/flswld/halo/mem"
 )
 
-const (
-	initBucketSize = 8
-	growBucketLoad = 0.75
-)
+const initBucketSize = 8
 
 // MapKey 约束可比较且可计算哈希值的键类型
 type MapKey interface {
@@ -23,7 +20,6 @@ type MapKey interface {
 // HashMap 提供使用自定义分配器的泛型哈希表
 type HashMap[K MapKey, V any] struct {
 	bucket    *list.ArrayList[*entry[K, V]] // 哈希桶数组
-	load      int                           // 非空哈希桶数量
 	len       int                           // 键值对数量
 	allocator mem.Allocator                 // 内存分配器
 }
@@ -58,7 +54,6 @@ func NewHashMapWithCap[K MapKey, V any](allocator mem.Allocator, cap int) *HashM
 	for i := 0; i < cap; i++ {
 		m.bucket.Add(nil)
 	}
-	m.load = 0
 	m.len = 0
 	m.allocator = allocator
 	return m
@@ -99,8 +94,10 @@ func (m *HashMap[K, V]) Set(key K, value V) bool {
 		ne.front = nil
 		ne.next = nil
 		m.bucket.Set(int(i), ne)
-		m.load++
 		m.len++
+		if m.len > m.bucket.Len()*3/4 {
+			m.Grow()
+		}
 		return true
 	}
 	for {
@@ -121,7 +118,7 @@ func (m *HashMap[K, V]) Set(key K, value V) bool {
 			ne.next = nil
 			e.next = ne
 			m.len++
-			if float32(m.load)/float32(m.bucket.Len()) > growBucketLoad {
+			if m.len > m.bucket.Len()*3/4 {
 				m.Grow()
 			}
 			return true
@@ -140,7 +137,6 @@ func (m *HashMap[K, V]) Grow() {
 	for i := 0; i < m.bucket.Len()*2; i++ {
 		b.Add(nil)
 	}
-	bl := 0
 	l := 0
 	fail := false
 	m.For(func(key K, value V) (next bool) {
@@ -157,7 +153,6 @@ func (m *HashMap[K, V]) Grow() {
 			ne.front = nil
 			ne.next = nil
 			b.Set(int(i), ne)
-			bl++
 			l++
 			return true
 		}
@@ -203,7 +198,6 @@ func (m *HashMap[K, V]) Grow() {
 	m.Clear()
 	m.bucket.Free()
 	m.bucket = b
-	m.load = bl
 	m.len = l
 }
 
@@ -216,9 +210,6 @@ func (m *HashMap[K, V]) Del(key K) {
 	}
 	if e.key == key {
 		m.bucket.Set(int(i), e.next)
-		if e.next == nil {
-			m.load--
-		}
 		mem.FreeType[entry[K, V]](m.allocator, e)
 		m.len--
 		return
@@ -281,7 +272,7 @@ func (m *HashMap[K, V]) Clear() {
 	for i := 0; i < m.bucket.Len(); i++ {
 		m.bucket.Set(i, nil)
 	}
-	m.load = 0
+	m.len = 0
 }
 
 // Free 释放哈希表占用的全部内存
@@ -316,13 +307,4 @@ func (m *HashMap[K, V]) UnmarshalJSON(data []byte) error {
 		}
 	}
 	return nil
-}
-
-// GetHashCode 使用乘法散列算法计算字节序列的哈希值
-func GetHashCode(data []byte) uint64 {
-	hashCode := uint64(0)
-	for _, v := range data {
-		hashCode = uint64(v) + 131*hashCode
-	}
-	return hashCode
 }

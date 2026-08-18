@@ -2,6 +2,7 @@ package kcp
 
 import (
 	"encoding/binary"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,27 +30,56 @@ const (
 	IKCP_PROBE_INIT  = 7000   // 7 secs to probe window size
 	IKCP_PROBE_LIMIT = 120000 // up to 120 secs to probe window
 	IKCP_SN_OFFSET   = 16
+
+	// ByteCheckModeDisabled 关闭 Halo 的 KCP 载荷校验扩展
+	ByteCheckModeDisabled = -1
+	// ByteCheckModeZero 固定使用四个零字节填充 KCP 数据分片校验字段
+	ByteCheckModeZero = 0
+	// ByteCheckModeCRC32 使用 IEEE CRC-32 校验 KCP 数据分片
+	ByteCheckModeCRC32 = 1
+	// ByteCheckModeXXH3 使用 XXH3 低 32 位校验 KCP 数据分片
+	ByteCheckModeXXH3 = 2
+
+	// IKCP_BASE_OVERHEAD 是 Halo 64 位 conv 使用的基础 KCP 头部长度
+	IKCP_BASE_OVERHEAD = 28
+	// IKCP_BYTE_CHECK_OVERHEAD 是 ByteCheck 扩展字段长度
+	IKCP_BYTE_CHECK_OVERHEAD = 4
 )
 
-var IKCP_OVERHEAD = 28
+// IKCP_OVERHEAD 保存当前进程配置使用的 KCP 头部长度
+var IKCP_OVERHEAD = IKCP_BASE_OVERHEAD
 
 var (
-	byteCheckModeEnable bool
-	byteCheckMode       int
-	byteCheckModeOnce   sync.Once
+	byteCheckConfigMu       sync.Mutex
+	byteCheckConfigFrozen   bool
+	byteCheckModeEnable     bool
+	byteCheckMode           = ByteCheckModeDisabled
+	errByteCheckModeLocked  = errors.New("byte check mode is locked after KCP initialization")
+	errByteCheckModeInvalid = errors.New("unsupported byte check mode")
 )
 
 // SetByteCheckMode 配置 Halo 扩展的 KCP 载荷校验模式
-func SetByteCheckMode(mode int) {
-	// 报文头部长度属于全局协议参数 进程内只允许首次配置生效
-	byteCheckModeOnce.Do(func() {
-		byteCheckMode = mode
-		if mode != -1 {
-			byteCheckModeEnable = true
-			// 启用后每个 KCP 分片头部增加 4 字节校验值
-			IKCP_OVERHEAD += 4
+func SetByteCheckMode(mode int) error {
+	if mode != ByteCheckModeDisabled && !byteCheckModeSupported(mode) {
+		return errByteCheckModeInvalid
+	}
+
+	byteCheckConfigMu.Lock()
+	defer byteCheckConfigMu.Unlock()
+	if byteCheckConfigFrozen {
+		if mode == byteCheckMode {
+			return nil
 		}
-	})
+		return errByteCheckModeLocked
+	}
+
+	byteCheckMode = mode
+	byteCheckModeEnable = mode != ByteCheckModeDisabled
+	IKCP_OVERHEAD = IKCP_BASE_OVERHEAD
+	if byteCheckModeEnable {
+		IKCP_OVERHEAD += IKCP_BYTE_CHECK_OVERHEAD
+	}
+	return nil
 }
 
 // monotonic reference time point
@@ -211,13 +241,19 @@ type ackItem struct {
 //
 // 'output' function will be called whenever these is data to be sent on wire.
 func NewKCP(conv uint64, output output_callback) *KCP {
+	// ByteCheck 会改变线上头部布局 首个实例创建后禁止再次切换
+	byteCheckConfigMu.Lock()
+	byteCheckConfigFrozen = true
+	overhead := IKCP_OVERHEAD
+	byteCheckConfigMu.Unlock()
+
 	kcp := new(KCP)
 	kcp.conv = conv
 	kcp.snd_wnd = IKCP_WND_SND
 	kcp.rcv_wnd = IKCP_WND_RCV
 	kcp.rmt_wnd = IKCP_WND_RCV
 	kcp.mtu = IKCP_MTU_DEF
-	kcp.mss = kcp.mtu - uint32(IKCP_OVERHEAD)
+	kcp.mss = kcp.mtu - uint32(overhead)
 	kcp.buffer = make([]byte, kcp.mtu)
 	kcp.rx_rto = IKCP_RTO_DEF
 	kcp.rx_minrto = IKCP_RTO_MIN
@@ -379,18 +415,9 @@ func (kcp *KCP) Send(buffer []byte) int {
 		}
 	}
 
-	if len(buffer) <= int(kcp.mss) {
-		count = 1
-	} else {
-		count = (len(buffer) + int(kcp.mss) - 1) / int(kcp.mss)
-	}
-
-	if count > 255 {
+	count = (len(buffer)-1)/int(kcp.mss) + 1
+	if kcp.stream == 0 && count > 255 {
 		return -2
-	}
-
-	if count == 0 {
-		count = 1
 	}
 
 	for i := 0; i < count; i++ {
@@ -602,15 +629,10 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 		data = ikcp_decode32u(data, &sn)
 		data = ikcp_decode32u(data, &una)
 		data = ikcp_decode32u(data, &length)
+		var hash uint32
 		if byteCheckModeEnable {
-			// Halo 扩展在交给 KCP 重组前拒绝载荷校验不一致的数据分片
-			if cmd == IKCP_CMD_PUSH {
-				var hash uint32
-				data = ikcp_decode32u(data, &hash)
-				if hash != byte_check_hash(data[:length]) {
-					return -4
-				}
-			}
+			// 所有命令都携带扩展字段 控制分片使用零值占位
+			data = ikcp_decode32u(data, &hash)
 		}
 		if len(data) < int(length) {
 			return -2
@@ -619,6 +641,12 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 		if cmd != IKCP_CMD_PUSH && cmd != IKCP_CMD_ACK &&
 			cmd != IKCP_CMD_WASK && cmd != IKCP_CMD_WINS {
 			return -3
+		}
+		if byteCheckModeEnable && cmd == IKCP_CMD_PUSH {
+			// 先验证声明长度再计算哈希 避免畸形报文触发越界切片
+			if hash != byte_check_hash(data[:int(length)]) {
+				return -4
+			}
 		}
 
 		// only trust window updates from regular packets. i.e: latest update

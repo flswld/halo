@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/flswld/halo/hashcode"
 	"github.com/flswld/halo/hashmap"
 	"github.com/flswld/halo/mem"
 	"github.com/flswld/halo/protocol"
@@ -454,7 +455,7 @@ func (h NatFlowHash) GetHashCode() uint64 {
 	binary.LittleEndian.PutUint32(data[6:10], h.LanHostIpAddr)
 	binary.LittleEndian.PutUint16(data[10:12], h.LanHostPort)
 	data[12] = h.Ipv4HeadProto
-	return hashmap.GetHashCode(data)
+	return hashcode.GetHashCodeXXH3(data)
 }
 
 // NatWanFlowHash 表示 WAN 口 NAT 流摘要
@@ -474,7 +475,7 @@ func (h NatWanFlowHash) GetHashCode() uint64 {
 	binary.LittleEndian.PutUint32(data[6:10], h.WanIpAddr)
 	binary.LittleEndian.PutUint16(data[10:12], h.WanPort)
 	data[12] = h.Ipv4HeadProto
-	return hashmap.GetHashCode(data)
+	return hashcode.GetHashCodeXXH3(data)
 }
 
 // NatPortMappingEntry 保存一条静态 NAT 端口映射

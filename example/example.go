@@ -2,6 +2,8 @@ package example
 
 import (
 	"bytes"
+	"context"
+	"net"
 	"sync/atomic"
 	"time"
 
@@ -10,6 +12,7 @@ import (
 	"github.com/flswld/halo/engine"
 	"github.com/flswld/halo/logger"
 	"github.com/flswld/halo/mem"
+	"github.com/flswld/halo/p2p"
 	"github.com/flswld/halo/pcap"
 	"github.com/flswld/halo/protocol"
 	"github.com/flswld/halo/protocol/kcp"
@@ -417,6 +420,101 @@ func DDoS() {
 
 	// 停止dpdk
 	dpdk.Exit()
+}
+
+// P2PDiscoveryServer 演示启动无状态公网端点发现服务
+func P2PDiscoveryServer(ctx context.Context, listenAddr *net.UDPAddr) error {
+	conn, err := net.ListenUDP("udp4", listenAddr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	return p2p.ServeDiscovery(ctx, conn)
+}
+
+// P2PHolePunching 演示 IPv4 公网端点发现、UDP 打洞和 KCP 直连衔接
+func P2PHolePunching() {
+	logger.InitLogger(nil)
+	defer logger.CloseLogger()
+
+	// 双方通过可信应用层信令约定相同的组合会话标识
+	const conv = uint64(0x0102030405060708)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	udpConn, err := net.ListenUDP("udp4", nil)
+	if err != nil {
+		panic(err)
+	}
+	defer udpConn.Close()
+
+	// 公网服务器在该端点使用 p2p.ServeDiscovery 提供无状态发现服务
+	discoveryServer := &net.UDPAddr{IP: net.IPv4(203, 0, 113, 1), Port: 30000}
+	localPublicEndpoint, err := p2p.DiscoverEndpoint(ctx, udpConn, discoveryServer)
+	if err != nil {
+		panic(err)
+	}
+	logger.Debug("p2p local public endpoint: %v", localPublicEndpoint)
+
+	// 通过可信应用层信令发布 localPublicEndpoint 并取得对端同一轮的公网端点
+	remotePublicEndpoint := &net.UDPAddr{IP: net.IPv4(198, 51, 100, 2), Port: 40000}
+	actualRemoteEndpoint, err := p2p.Punch(ctx, udpConn, conv, remotePublicEndpoint)
+	if err != nil {
+		panic(err)
+	}
+
+	conn, err := kcp.NewP2PConn(ctx, conv, actualRemoteEndpoint, udpConn)
+	if err != nil {
+		panic(err)
+	}
+	defer conn.Close()
+	conn.SetNoDelay(1, 20, 2, 1)
+
+	// 远端地址变更默认开启 应用层验证对端身份后可按需固定当前端点
+	// conn.SetRemoteAddrChange(false)
+	if _, err = conn.Write([]byte("hello p2p")); err != nil {
+		panic(err)
+	}
+	time.Sleep(time.Minute)
+}
+
+// P2PIPv6HolePunching 演示 IPv6 端点交换、防火墙穿透和 KCP 直连衔接
+func P2PIPv6HolePunching() {
+	logger.InitLogger(nil)
+	defer logger.CloseLogger()
+
+	// 双方通过可信应用层信令约定相同的组合会话标识
+	const conv = uint64(0x0102030405060708)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// 实际使用时替换为本机选定的全局单播 IPv6 地址
+	localIPv6 := net.ParseIP("2001:db8::1")
+	udpConn, err := net.ListenUDP("udp6", &net.UDPAddr{IP: localIPv6})
+	if err != nil {
+		panic(err)
+	}
+	defer udpConn.Close()
+
+	// IPv6 不需要公网端点发现 直接通过可信信令交换当前 socket 的地址和端口
+	localEndpoint := udpConn.LocalAddr().(*net.UDPAddr)
+	logger.Debug("p2p local IPv6 endpoint: %v", localEndpoint)
+	remoteEndpoint := &net.UDPAddr{IP: net.ParseIP("2001:db8::2"), Port: 40000}
+	actualRemoteEndpoint, err := p2p.Punch(ctx, udpConn, conv, remoteEndpoint)
+	if err != nil {
+		panic(err)
+	}
+
+	conn, err := kcp.NewP2PConn(ctx, conv, actualRemoteEndpoint, udpConn)
+	if err != nil {
+		panic(err)
+	}
+	defer conn.Close()
+	conn.SetNoDelay(1, 20, 2, 1)
+	if _, err = conn.Write([]byte("hello ipv6 p2p")); err != nil {
+		panic(err)
+	}
+	time.Sleep(time.Minute)
 }
 
 // KcpServerClient 演示 KCP 协议栈的服务端和客户端

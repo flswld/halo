@@ -8,9 +8,11 @@
 package kcp
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strconv"
@@ -52,6 +54,16 @@ const (
 	batchSize = 16
 )
 
+const (
+	// p2pHandshakeRetryInterval 表示 P2P SYN 的重发间隔
+	p2pHandshakeRetryInterval = 100 * time.Millisecond
+	// p2pHandshakeTimeout 表示 P2P SYN/EST 握手的最长等待时间
+	p2pHandshakeTimeout = 5 * time.Second
+)
+
+// ErrP2PHandshakeTimeout 表示 P2P Enet 握手未在固定时间内完成
+var ErrP2PHandshakeTimeout = errors.New("kcp: p2p handshake timeout")
+
 type batchConn interface {
 	WriteBatch(ms []ipv4.Message, flags int) (int, error)
 	ReadBatch(ms []ipv4.Message, flags int) (int, error)
@@ -71,13 +83,15 @@ type (
 		bufptr  []byte
 
 		// settings
-		remote     net.Addr  // remote peer address
-		rd         time.Time // read deadline
-		wd         time.Time // write deadline
-		headerSize int       // the header size additional to a KCP frame
-		ackNoDelay bool      // send ack immediately for each incoming packet(testing purpose)
-		writeDelay bool      // delay kcp.flush() for Write() for bulk transfer
-		dup        int       // duplicate udp packets(testing purpose)
+		remote           net.Addr     // remote peer address
+		remoteAddrChange atomic.Bool  // 是否允许会话根据收到的数据报变更远端地址
+		remoteMu         sync.RWMutex // 保护远端地址的并发读写
+		rd               time.Time    // read deadline
+		wd               time.Time    // write deadline
+		headerSize       int          // the header size additional to a KCP frame
+		ackNoDelay       bool         // send ack immediately for each incoming packet(testing purpose)
+		writeDelay       bool         // delay kcp.flush() for Write() for bulk transfer
+		dup              int          // duplicate udp packets(testing purpose)
 
 		// notifications
 		die          chan struct{} // notify current session has Closed
@@ -124,10 +138,11 @@ func newUDPSession(conv uint64, l *Listener, conn net.PacketConn, ownConn bool, 
 	sess.chWriteEvent = make(chan struct{}, 1)
 	sess.chSocketReadError = make(chan struct{})
 	sess.chSocketWriteError = make(chan struct{})
-	sess.remote = remote
 	sess.conn = conn
 	sess.ownConn = ownConn
 	sess.l = l
+	sess.remote = remote
+	sess.remoteAddrChange.Store(true)
 	sess.recvbuf = make([]byte, mtuLimit)
 
 	// cast to writebatch conn
@@ -402,7 +417,7 @@ func (s *UDPSession) CloseReason(enetType uint32) error {
 	if once {
 		// 只有首次关闭负责发送 FIN 并冲刷待发送数据
 		enet := &Enet{
-			Addr:      s.remote,
+			Addr:      s.getRemoteAddr(),
 			SessionId: s.GetSessionId(),
 			Conv:      s.GetConv(),
 			ConnType:  ConnEnetFin,
@@ -443,7 +458,12 @@ func (s *UDPSession) Close() error {
 func (s *UDPSession) LocalAddr() net.Addr { return s.conn.LocalAddr() }
 
 // RemoteAddr returns the remote network address. The Addr returned is shared by all invocations of RemoteAddr, so do not modify it.
-func (s *UDPSession) RemoteAddr() net.Addr { return s.remote }
+func (s *UDPSession) RemoteAddr() net.Addr { return s.getRemoteAddr() }
+
+// SetRemoteAddrChange 设置会话是否允许根据收到的数据报变更远端地址 默认开启
+func (s *UDPSession) SetRemoteAddrChange(enable bool) {
+	s.remoteAddrChange.Store(enable)
+}
 
 // SetDeadline sets the deadline associated with the listener. A zero time value disables the deadline.
 func (s *UDPSession) SetDeadline(t time.Time) error {
@@ -599,7 +619,7 @@ func (s *UDPSession) output(buf []byte) {
 		bts := xmitBuf.Get(len(buf))
 		copy(bts, buf)
 		msg.Buffers = [][]byte{bts}
-		msg.Addr = s.remote
+		msg.Addr = s.getRemoteAddr()
 		s.txqueue = append(s.txqueue, msg)
 	}
 }
@@ -890,8 +910,12 @@ func (l *Listener) packetInput(data []byte, addr net.Addr) {
 		l.sessionLock.RUnlock()
 		if ok { // existing connection
 			// 组合会话标识命中后允许网络切换产生的远端地址变化
-			if s.remote.String() != addr.String() {
-				s.remote = addr
+			if s.remoteAddrChange.Load() {
+				if s.getRemoteAddr().String() != addr.String() {
+					s.setRemoteAddr(addr)
+				}
+			} else if s.getRemoteAddr().String() != addr.String() {
+				return
 			}
 			if conv == s.kcp.conv { // parity data or valid conversation
 				s.kcpInput(data)
@@ -1160,6 +1184,105 @@ func DialKCP(raddr string) (*UDPSession, error) {
 	rawConv := binary.LittleEndian.Uint64(rawConvData)
 
 	return newUDPSession(rawConv, nil, conn, true, udpaddr), nil
+}
+
+// NewP2PConn 在已完成 UDP 打洞的 PacketConn 上进行双向 Enet 握手并建立 KCP 会话
+func NewP2PConn(ctx context.Context, convid uint64, raddr net.Addr, conn net.PacketConn) (session *UDPSession, err error) {
+	if ctx == nil {
+		return nil, errors.New("kcp: context is nil")
+	}
+	if conn == nil {
+		return nil, errors.New("kcp: packet connection is nil")
+	}
+	if raddr == nil {
+		return nil, errors.New("kcp: remote address is nil")
+	}
+	defer func() {
+		if session == nil {
+			resetErr := conn.SetReadDeadline(time.Time{})
+			if err == nil && resetErr != nil {
+				err = fmt.Errorf("kcp: reset p2p handshake read deadline: %w", resetErr)
+			}
+		}
+	}()
+
+	sessionID := uint32(convid)
+	conv := uint32(convid >> 32)
+	syn := BuildEnet(ConnEnetSyn, EnetClientEditorConnectKey, sessionID, conv)
+	est := BuildEnet(ConnEnetEst, EnetClientEditorConnectKey, sessionID, conv)
+	buffer := make([]byte, mtuLimit)
+	hardDeadline := time.Now().Add(p2pHandshakeTimeout)
+	nextSyn := time.Now()
+	peerSynReceived := false
+	localEstReceived := false
+
+	for {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return nil, contextErr
+		}
+		now := time.Now()
+		if !now.Before(hardDeadline) {
+			return nil, ErrP2PHandshakeTimeout
+		}
+
+		if !now.Before(nextSyn) {
+			_, writeErr := conn.WriteTo(syn, raddr)
+			if writeErr != nil {
+				return nil, fmt.Errorf("kcp: write p2p SYN: %w", writeErr)
+			}
+			nextSyn = time.Now().Add(p2pHandshakeRetryInterval)
+		}
+
+		readDeadline := hardDeadline
+		if nextSyn.Before(readDeadline) {
+			readDeadline = nextSyn
+		}
+		if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(readDeadline) {
+			readDeadline = contextDeadline
+		}
+		if setErr := conn.SetReadDeadline(readDeadline); setErr != nil {
+			return nil, fmt.Errorf("kcp: set p2p handshake read deadline: %w", setErr)
+		}
+
+		n, source, readErr := conn.ReadFrom(buffer)
+		if readErr != nil {
+			var networkErr net.Error
+			if errors.As(readErr, &networkErr) && networkErr.Timeout() {
+				continue
+			}
+			return nil, fmt.Errorf("kcp: read p2p handshake: %w", readErr)
+		}
+		if raddr.String() != source.String() || n != 20 {
+			continue
+		}
+		connType, enetType, packetSessionID, packetConv, _, parseErr := ParseEnet(buffer[:n])
+		if parseErr != nil || enetType != EnetClientEditorConnectKey || packetSessionID != sessionID || packetConv != conv {
+			continue
+		}
+
+		switch connType {
+		case ConnEnetSyn:
+			peerSynReceived = true
+			_, writeErr := conn.WriteTo(est, source)
+			if writeErr != nil {
+				return nil, fmt.Errorf("kcp: write p2p EST: %w", writeErr)
+			}
+		case ConnEnetEst:
+			localEstReceived = true
+		}
+
+		if peerSynReceived && localEstReceived {
+			// 创建会话前再回应一次对端 SYN 降低首个 EST 丢包造成的单边成功概率
+			_, writeErr := conn.WriteTo(est, raddr)
+			if writeErr != nil {
+				return nil, fmt.Errorf("kcp: write final p2p EST: %w", writeErr)
+			}
+			if resetErr := conn.SetReadDeadline(time.Time{}); resetErr != nil {
+				return nil, fmt.Errorf("kcp: reset p2p handshake read deadline: %w", resetErr)
+			}
+			return newUDPSession(convid, nil, conn, false, raddr), nil
+		}
+	}
 }
 
 // NewConn3 establishes a session and talks KCP protocol over a packet connection.

@@ -23,18 +23,18 @@ func (s *UDPSession) rx() {
 	for k := range msgs {
 		msgs[k].Buffers = [][]byte{make([]byte, mtuLimit)}
 	}
-	var src string
 	for {
 		if count, err := s.xconn.ReadBatch(msgs, 0); err == nil {
 			for i := 0; i < count; i++ {
 				msg := &msgs[i]
 				udpPayload := msg.Buffers[0][:msg.N]
-				// Halo 网络切换保持扩展允许已建立会话更新远端地址
-				if src == "" { // set source address if nil
-					src = msg.Addr.String()
-				} else if msg.Addr.String() != src {
-					s.remote = msg.Addr
-					src = msg.Addr.String()
+				if s.getRemoteAddr().String() != msg.Addr.String() {
+					if !s.remoteAddrChange.Load() {
+						// 关闭变更时只接受当前远端地址
+						continue
+					}
+					// Halo 网络切换保持扩展允许已建立会话更新远端地址
+					s.setRemoteAddr(msg.Addr)
 				}
 				if msg.N == 20 {
 					// Enet 控制包必须属于当前组合会话标识
@@ -186,7 +186,7 @@ func (s *UDPSession) sendEnetNotifyToPeer(enet *Enet) {
 	if data == nil {
 		return
 	}
-	_, err := s.xconn.WriteBatch([]ipv4.Message{{Buffers: [][]byte{data}, Addr: s.remote}}, 0)
+	_, err := s.xconn.WriteBatch([]ipv4.Message{{Buffers: [][]byte{data}, Addr: s.getRemoteAddr()}}, 0)
 	if err != nil {
 		// compatibility issue:
 		// for linux kernel<=2.6.32, support for sendmmsg is not available

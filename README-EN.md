@@ -16,6 +16,7 @@ High-performance lightweight Golang network packet send/receive framework
 
 * Packet transmission performance per single NIC queue can exceed 10 Mpps
 * Complete router protocol stack implementation
+* Lightweight IPv4/IPv6 UDP P2P hole punching with IPv4 public endpoint discovery and incremental port prediction, IPv6 stateful-firewall traversal, and KCP direct-connection handoff
 * Cross-platform out-of-the-box utility packages: `logger (logging)`, `cpu (goroutine CPU binding / spinlock)`, `mem (memory allocator / ring buffer)`, `hashmap/list (custom memory allocator)`
 
 ## Environment setup
@@ -392,8 +393,8 @@ func EthernetSwitch() {
 
 <a href="https://www.star-history.com/?repos=flswld%2Fhalo&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=flswld/halo&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=flswld/halo&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=flswld/halo&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=flswld/halo&type=date&theme=dark&legend=top-left&sealed_token=BTG4LZZ055Ot_Ve2JJIV4kDvR9tL3rH4nsxQNJ4j9mRHMlKeKO-eTyephbLYavO8iACqlefd08YkZ2HwQ2K1EkFS5B2R7Yh6v7w1te3eXKObnLWAKj6_BzIeNxNgS4wWsGCOVHESk2EUYER8E1M63aEiEgAJgG3ZNaw6ezvca06DCHaJLfzcZwOvkIih" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=flswld/halo&type=date&legend=top-left&sealed_token=BTG4LZZ055Ot_Ve2JJIV4kDvR9tL3rH4nsxQNJ4j9mRHMlKeKO-eTyephbLYavO8iACqlefd08YkZ2HwQ2K1EkFS5B2R7Yh6v7w1te3eXKObnLWAKj6_BzIeNxNgS4wWsGCOVHESk2EUYER8E1M63aEiEgAJgG3ZNaw6ezvca06DCHaJLfzcZwOvkIih" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=flswld/halo&type=date&legend=top-left&sealed_token=BTG4LZZ055Ot_Ve2JJIV4kDvR9tL3rH4nsxQNJ4j9mRHMlKeKO-eTyephbLYavO8iACqlefd08YkZ2HwQ2K1EkFS5B2R7Yh6v7w1te3eXKObnLWAKj6_BzIeNxNgS4wWsGCOVHESk2EUYER8E1M63aEiEgAJgG3ZNaw6ezvca06DCHaJLfzcZwOvkIih" />
  </picture>
 </a>

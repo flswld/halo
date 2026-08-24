@@ -1,0 +1,234 @@
+package p2p
+
+import (
+	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"math/rand/v2"
+	"net"
+	"time"
+)
+
+const (
+	// contextPollInterval 控制无 deadline context 的取消轮询间隔
+	contextPollInterval = 100 * time.Millisecond
+	// discoveryRetryInterval 控制发现请求的重发间隔
+	discoveryRetryInterval = 500 * time.Millisecond
+	// discoveryRequestSize 表示发现请求的固定字节数
+	discoveryRequestSize = 7
+	// discoveryResponseSize 表示发现响应的固定字节数
+	discoveryResponseSize = 13
+	// discoveryRequestType 标识发现请求报文
+	discoveryRequestType uint8 = 1
+	// discoveryResponseType 标识发现响应报文
+	discoveryResponseType uint8 = 2
+)
+
+var (
+	errNilContext    = errors.New("p2p: context is nil")
+	errInvalidPacket = errors.New("p2p: invalid packet")
+)
+
+// discoveryPacket 保存解析后的公网端点发现控制字段
+type discoveryPacket struct {
+	packetType    uint8   // 报文类型
+	transactionID uint32  // 请求与响应共用的事务标识
+	publicIPv4    [4]byte // 发现服务器观察到的公网 IPv4
+	publicPort    uint16  // 发现服务器观察到的公网端口
+}
+
+// ServeDiscovery 在调用方提供的 PacketConn 上运行无状态公网端点发现服务
+func ServeDiscovery(ctx context.Context, conn net.PacketConn) (err error) {
+	if ctx == nil {
+		return errNilContext
+	}
+	if conn == nil {
+		return fmt.Errorf("p2p: discovery connection is nil")
+	}
+	defer func() {
+		resetErr := conn.SetReadDeadline(time.Time{})
+		if err == nil && resetErr != nil {
+			err = fmt.Errorf("p2p: reset discovery read deadline: %w", resetErr)
+		}
+	}()
+
+	buffer := make([]byte, 64)
+	for {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
+		}
+		if setErr := conn.SetReadDeadline(nextReadDeadline(ctx)); setErr != nil {
+			return fmt.Errorf("p2p: set discovery read deadline: %w", setErr)
+		}
+
+		n, source, readErr := conn.ReadFrom(buffer)
+		if readErr != nil {
+			if isTimeoutError(readErr) {
+				continue
+			}
+			return fmt.Errorf("p2p: read discovery request: %w", readErr)
+		}
+
+		request, parseErr := parseDiscoveryPacket(buffer[:n])
+		if parseErr != nil || request.packetType != discoveryRequestType {
+			continue
+		}
+		sourceUDP := source.(*net.UDPAddr)
+
+		var publicIPv4 [4]byte
+		copy(publicIPv4[:], sourceUDP.IP.To4())
+		response := buildDiscoveryResponse(request.transactionID, publicIPv4, uint16(sourceUDP.Port))
+		if _, writeErr := conn.WriteTo(response, source); writeErr != nil {
+			return fmt.Errorf("p2p: write discovery response: %w", writeErr)
+		}
+	}
+}
+
+// DiscoverEndpoint 使用调用方提供的 PacketConn 获取服务器观察到的公网端点
+func DiscoverEndpoint(ctx context.Context, conn net.PacketConn, server *net.UDPAddr) (endpoint *net.UDPAddr, err error) {
+	if ctx == nil {
+		return nil, errNilContext
+	}
+	if conn == nil {
+		return nil, fmt.Errorf("p2p: discovery connection is nil")
+	}
+	server, err = normalizeUDP4Addr(server)
+	if err != nil {
+		return nil, fmt.Errorf("p2p: invalid discovery server: %w", err)
+	}
+	defer func() {
+		resetErr := conn.SetReadDeadline(time.Time{})
+		if err == nil && resetErr != nil {
+			endpoint = nil
+			err = fmt.Errorf("p2p: reset discovery read deadline: %w", resetErr)
+		}
+	}()
+
+	transactionID := rand.Uint32()
+	request := buildDiscoveryRequest(transactionID)
+	buffer := make([]byte, 64)
+	nextSend := time.Now()
+
+	for {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return nil, contextErr
+		}
+		now := time.Now()
+		if !now.Before(nextSend) {
+			if _, writeErr := conn.WriteTo(request, server); writeErr != nil {
+				return nil, fmt.Errorf("p2p: write discovery request: %w", writeErr)
+			}
+			nextSend = now.Add(discoveryRetryInterval)
+		}
+
+		if setErr := conn.SetReadDeadline(nextReadDeadline(ctx, nextSend)); setErr != nil {
+			return nil, fmt.Errorf("p2p: set discovery read deadline: %w", setErr)
+		}
+		n, source, readErr := conn.ReadFrom(buffer)
+		if readErr != nil {
+			if isTimeoutError(readErr) {
+				continue
+			}
+			return nil, fmt.Errorf("p2p: read discovery response: %w", readErr)
+		}
+
+		if source.String() != server.String() {
+			continue
+		}
+		response, parseErr := parseDiscoveryPacket(buffer[:n])
+		if parseErr != nil || response.packetType != discoveryResponseType || response.transactionID != transactionID || response.publicPort == 0 {
+			continue
+		}
+		return &net.UDPAddr{
+			IP:   response.publicIPv4[:],
+			Port: int(response.publicPort),
+		}, nil
+	}
+}
+
+// buildDiscoveryRequest 构建固定长度的公网端点发现请求
+func buildDiscoveryRequest(transactionID uint32) []byte {
+	packet := make([]byte, discoveryRequestSize)
+	packet[0] = 'H'
+	packet[1] = 'D'
+	packet[2] = discoveryRequestType
+	binary.BigEndian.PutUint32(packet[3:7], transactionID)
+	return packet
+}
+
+// buildDiscoveryResponse 构建固定长度的公网端点发现响应
+func buildDiscoveryResponse(transactionID uint32, publicIPv4 [4]byte, publicPort uint16) []byte {
+	packet := make([]byte, discoveryResponseSize)
+	packet[0] = 'H'
+	packet[1] = 'D'
+	packet[2] = discoveryResponseType
+	binary.BigEndian.PutUint32(packet[3:7], transactionID)
+	copy(packet[7:11], publicIPv4[:])
+	binary.BigEndian.PutUint16(packet[11:13], publicPort)
+	return packet
+}
+
+// parseDiscoveryPacket 解析并严格校验公网端点发现报文
+func parseDiscoveryPacket(packet []byte) (discoveryPacket, error) {
+	var result discoveryPacket
+	if len(packet) < 3 || packet[0] != 'H' || packet[1] != 'D' {
+		return result, errInvalidPacket
+	}
+
+	result.packetType = packet[2]
+	switch result.packetType {
+	case discoveryRequestType:
+		if len(packet) != discoveryRequestSize {
+			return discoveryPacket{}, errInvalidPacket
+		}
+	case discoveryResponseType:
+		if len(packet) != discoveryResponseSize {
+			return discoveryPacket{}, errInvalidPacket
+		}
+	default:
+		return discoveryPacket{}, errInvalidPacket
+	}
+
+	result.transactionID = binary.BigEndian.Uint32(packet[3:7])
+	if result.packetType == discoveryResponseType {
+		copy(result.publicIPv4[:], packet[7:11])
+		result.publicPort = binary.BigEndian.Uint16(packet[11:13])
+	}
+	return result, nil
+}
+
+// normalizeUDP4Addr 复制并规范化 IPv4 UDP 端点
+func normalizeUDP4Addr(addr *net.UDPAddr) (*net.UDPAddr, error) {
+	if addr == nil {
+		return nil, errors.New("p2p: udp address is nil")
+	}
+	ipv4 := addr.IP.To4()
+	if ipv4 == nil {
+		return nil, errors.New("p2p: only IPv4 UDP address is supported")
+	}
+	if addr.Port <= 0 || addr.Port > 65535 {
+		return nil, errors.New("p2p: UDP port must be between 1 and 65535")
+	}
+	return &net.UDPAddr{IP: append(net.IP(nil), ipv4...), Port: addr.Port}, nil
+}
+
+// nextReadDeadline 选择下一次事件或 context 轮询之前的最近时间
+func nextReadDeadline(ctx context.Context, deadlines ...time.Time) time.Time {
+	deadline := time.Now().Add(contextPollInterval)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	for _, candidate := range deadlines {
+		if candidate.Before(deadline) {
+			deadline = candidate
+		}
+	}
+	return deadline
+}
+
+// isTimeoutError 判断 PacketConn 错误是否由 deadline 到期产生
+func isTimeoutError(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}

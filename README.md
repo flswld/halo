@@ -16,6 +16,7 @@ Golang高性能轻量级网络包收发框架
 
 * 网卡单个队列发包性能可超过10Mpps
 * 完整的路由器协议栈实现
+* 轻量级IPv4/IPv6 UDP P2P打洞，支持IPv4公网端点发现与递增端口预测、IPv6有状态防火墙穿透和KCP直连衔接
 * 全平台开箱即用的工具包：`logger(日志)`、`cpu(协程绑核/自旋锁)`、`mem(内存分配器/环状缓冲区)`、`hashmap/list(自定义内存分配器)`
 
 ## 环境搭建
@@ -392,8 +393,8 @@ func EthernetSwitch() {
 
 <a href="https://www.star-history.com/?repos=flswld%2Fhalo&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=flswld/halo&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=flswld/halo&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=flswld/halo&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=flswld/halo&type=date&theme=dark&legend=top-left&sealed_token=BTG4LZZ055Ot_Ve2JJIV4kDvR9tL3rH4nsxQNJ4j9mRHMlKeKO-eTyephbLYavO8iACqlefd08YkZ2HwQ2K1EkFS5B2R7Yh6v7w1te3eXKObnLWAKj6_BzIeNxNgS4wWsGCOVHESk2EUYER8E1M63aEiEgAJgG3ZNaw6ezvca06DCHaJLfzcZwOvkIih" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=flswld/halo&type=date&legend=top-left&sealed_token=BTG4LZZ055Ot_Ve2JJIV4kDvR9tL3rH4nsxQNJ4j9mRHMlKeKO-eTyephbLYavO8iACqlefd08YkZ2HwQ2K1EkFS5B2R7Yh6v7w1te3eXKObnLWAKj6_BzIeNxNgS4wWsGCOVHESk2EUYER8E1M63aEiEgAJgG3ZNaw6ezvca06DCHaJLfzcZwOvkIih" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=flswld/halo&type=date&legend=top-left&sealed_token=BTG4LZZ055Ot_Ve2JJIV4kDvR9tL3rH4nsxQNJ4j9mRHMlKeKO-eTyephbLYavO8iACqlefd08YkZ2HwQ2K1EkFS5B2R7Yh6v7w1te3eXKObnLWAKj6_BzIeNxNgS4wWsGCOVHESk2EUYER8E1M63aEiEgAJgG3ZNaw6ezvca06DCHaJLfzcZwOvkIih" />
  </picture>
 </a>

@@ -51,6 +51,8 @@ const (
 	defaultPunchTimeout = 5 * time.Second
 	// defaultConfirmInterval 表示默认 CONFIRM 重发间隔
 	defaultConfirmInterval = 10 * time.Millisecond
+	// defaultSuccessLinger 表示双方确认完成后的默认收尾等待时间
+	defaultSuccessLinger = 30 * time.Millisecond
 )
 
 // ErrPunchTimeout 表示当前单轮打洞未在固定时间内完成
@@ -63,6 +65,7 @@ type punchConfig struct {
 	burstInterval      time.Duration // 相邻 CHECK 批次间隔
 	timeout            time.Duration // 单轮打洞最长等待时间
 	confirmInterval    time.Duration // CONFIRM 重发间隔
+	successLinger      time.Duration // 双方确认完成后继续响应重复 CONFIRM 的时间
 }
 
 var defaultPunchConfig = punchConfig{
@@ -71,6 +74,7 @@ var defaultPunchConfig = punchConfig{
 	burstInterval:      defaultBurstInterval,
 	timeout:            defaultPunchTimeout,
 	confirmInterval:    defaultConfirmInterval,
+	successLinger:      defaultSuccessLinger,
 }
 
 // Punch 使用调用方提供的 PacketConn 执行一轮 IPv4 或 IPv6 对称 UDP 打洞
@@ -122,12 +126,18 @@ func punch(ctx context.Context, conn net.PacketConn, conv uint64, remote *net.UD
 	var selectedTransactionID uint32
 	var selectedRemote *net.UDPAddr
 	var nextConfirm time.Time
+	var successDeadline time.Time
+	localConfirmed := false
+	peerConfirmed := false
 
 	for {
 		if contextErr := ctx.Err(); contextErr != nil {
 			return nil, contextErr
 		}
 		now := time.Now()
+		if !successDeadline.IsZero() && !now.Before(successDeadline) {
+			return selectedRemote, nil
+		}
 		if !now.Before(hardDeadline) {
 			return nil, ErrPunchTimeout
 		}
@@ -146,7 +156,7 @@ func punch(ctx context.Context, conn net.PacketConn, conv uint64, remote *net.UD
 			now = time.Now()
 		}
 
-		if selectedRemote != nil && !now.Before(nextConfirm) {
+		if selectedRemote != nil && !localConfirmed && !now.Before(nextConfirm) {
 			if _, writeErr := conn.WriteTo(buildPunchPacket(punchConfirm, conv, selectedTransactionID), selectedRemote); writeErr != nil {
 				return nil, fmt.Errorf("p2p: write CONFIRM: %w", writeErr)
 			}
@@ -157,8 +167,11 @@ func punch(ctx context.Context, conn net.PacketConn, conv uint64, remote *net.UD
 		if burst < config.burstCount && nextBurst.Before(readDeadline) {
 			readDeadline = nextBurst
 		}
-		if selectedRemote != nil && nextConfirm.Before(readDeadline) {
+		if selectedRemote != nil && !localConfirmed && nextConfirm.Before(readDeadline) {
 			readDeadline = nextConfirm
+		}
+		if !successDeadline.IsZero() && successDeadline.Before(readDeadline) {
+			readDeadline = successDeadline
 		}
 		if setErr := conn.SetReadDeadline(readDeadline); setErr != nil {
 			return nil, fmt.Errorf("p2p: set punch read deadline: %w", setErr)
@@ -223,12 +236,20 @@ func punch(ctx context.Context, conn net.PacketConn, conv uint64, remote *net.UD
 			if _, writeErr := conn.WriteTo(buildPunchPacket(punchConfirmAck, conv, control.transactionID), sourceUDP); writeErr != nil {
 				return nil, fmt.Errorf("p2p: write CONFIRM_ACK: %w", writeErr)
 			}
+			peerConfirmed = true
 
 		case punchConfirmAck:
 			if selectedRemote == nil || control.transactionID != selectedTransactionID || selectedRemote.String() != sourceEndpoint {
 				continue
 			}
-			return selectedRemote, nil
+			localConfirmed = true
+		}
+
+		if localConfirmed && peerConfirmed && successDeadline.IsZero() {
+			successDeadline = time.Now().Add(config.successLinger)
+			if hardDeadline.Before(successDeadline) {
+				successDeadline = hardDeadline
+			}
 		}
 	}
 }

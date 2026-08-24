@@ -16,7 +16,7 @@ High-performance lightweight Golang network packet send/receive framework
 
 * Packet transmission performance per single NIC queue can exceed 10 Mpps
 * Complete router protocol stack implementation
-* Lightweight IPv4/IPv6 UDP P2P hole punching with IPv4 public endpoint discovery and incremental port prediction, IPv6 stateful-firewall traversal, and KCP direct-connection handoff
+* Lightweight IPv4/IPv6 UDP P2P hole punching with dual-stack public endpoint discovery, IPv4 incremental port prediction, IPv6 stateful-firewall traversal, and KCP direct-connection handoff
 * Cross-platform out-of-the-box utility packages: `logger (logging)`, `cpu (goroutine CPU binding / spinlock)`, `mem (memory allocator / ring buffer)`, `hashmap/list (custom memory allocator)`
 
 ## Environment setup

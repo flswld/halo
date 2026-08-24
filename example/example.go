@@ -422,9 +422,13 @@ func DDoS() {
 	dpdk.Exit()
 }
 
-// P2PDiscoveryServer 演示启动无状态公网端点发现服务
+// P2PDiscoveryServer 演示根据监听地址启动 IPv4 或 IPv6 无状态公网端点发现服务
 func P2PDiscoveryServer(ctx context.Context, listenAddr *net.UDPAddr) error {
-	conn, err := net.ListenUDP("udp4", listenAddr)
+	network := "udp4"
+	if listenAddr != nil && listenAddr.IP.To16() != nil && listenAddr.IP.To4() == nil {
+		network = "udp6"
+	}
+	conn, err := net.ListenUDP(network, listenAddr)
 	if err != nil {
 		return err
 	}
@@ -478,7 +482,7 @@ func P2PHolePunching() {
 	time.Sleep(time.Minute)
 }
 
-// P2PIPv6HolePunching 演示 IPv6 端点交换、防火墙穿透和 KCP 直连衔接
+// P2PIPv6HolePunching 演示 IPv6 公网端点发现、防火墙穿透和 KCP 直连衔接
 func P2PIPv6HolePunching() {
 	logger.InitLogger(nil)
 	defer logger.CloseLogger()
@@ -496,9 +500,15 @@ func P2PIPv6HolePunching() {
 	}
 	defer udpConn.Close()
 
-	// IPv6 不需要公网端点发现 直接通过可信信令交换当前 socket 的地址和端口
-	localEndpoint := udpConn.LocalAddr().(*net.UDPAddr)
-	logger.Debug("p2p local IPv6 endpoint: %v", localEndpoint)
+	// IPv6 没有地址转换时也可以跳过发现并直接交换本地全局单播端点
+	discoveryServer := &net.UDPAddr{IP: net.ParseIP("2001:db8::100"), Port: 30000}
+	localEndpoint, err := p2p.DiscoverEndpoint(ctx, udpConn, discoveryServer)
+	if err != nil {
+		panic(err)
+	}
+	logger.Debug("p2p discovered IPv6 endpoint: %v", localEndpoint)
+
+	// 通过可信应用层信令发布 localEndpoint 并取得对端 IPv6 端点
 	remoteEndpoint := &net.UDPAddr{IP: net.ParseIP("2001:db8::2"), Port: 40000}
 	actualRemoteEndpoint, err := p2p.Punch(ctx, udpConn, conv, remoteEndpoint)
 	if err != nil {

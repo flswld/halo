@@ -109,10 +109,9 @@ func (s *UDPSession) defaultSendEnetNotifyToPeer(enet *Enet) {
 
 // rxChanConn 执行 Halo 内存管道客户端收包循环
 func (s *UDPSession) rxChanConn() {
-	buf := make([]byte, mtuLimit)
+	conn := s.conn.(*ChanConn)
 	for {
-		if n, addr, err := s.conn.ReadFrom(buf); err == nil {
-			udpPayload := buf[:n]
+		if udpPayload, addr, err := conn.ReadPacket(); err == nil {
 			if s.getRemoteAddr().String() != addr.String() {
 				if !s.remoteAddrChange.Load() {
 					// 关闭变更时管道会话与 UDP 会话使用相同过滤语义
@@ -121,7 +120,7 @@ func (s *UDPSession) rxChanConn() {
 				// 管道端点变化与 UDP 网络切换使用相同的会话保持语义
 				s.setRemoteAddr(addr)
 			}
-			if n == 20 {
+			if len(udpPayload) == 20 {
 				// 仅处理属于当前组合会话标识的 Enet 控制包
 				connType, enetType, sessionId, conv, _, err := ParseEnet(udpPayload)
 				if err != nil {
@@ -145,10 +144,10 @@ func (s *UDPSession) rxChanConn() {
 
 // rxChanConn 执行 Halo 内存管道服务端全局收包循环
 func (l *Listener) rxChanConn() {
-	buf := make([]byte, mtuLimit)
+	conn := l.conn.(*ChanConn)
 	for {
-		if n, from, err := l.conn.ReadFrom(buf); err == nil {
-			l.packetInput(buf[:n], from)
+		if udpPayload, from, err := conn.ReadPacket(); err == nil {
+			l.packetInput(udpPayload, from)
 		} else {
 			l.notifyReadError(err)
 			return

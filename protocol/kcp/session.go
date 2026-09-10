@@ -1327,7 +1327,7 @@ func (a ChanConnAddr) String() string {
 // ChanConnMsg 表示 Halo 内存管道中的单个数据报
 type ChanConnMsg struct {
 	Addr ChanConnAddr // 对端地址
-	Pkt  []byte       // 独立持有的数据报
+	Pkt  []byte       // 独立持有的数据报 入队后发送方不得修改或复用
 }
 
 // ChanConn 使用通道实现 net PacketConn 语义
@@ -1338,17 +1338,31 @@ type ChanConn struct {
 	isClose atomic.Uint32    // 原子关闭标记
 }
 
-// ReadFrom 从接收通道复制一个完整数据报
-func (c *ChanConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
+// ReadPacket 读取完整数据报并将 Pkt 所有权移交给调用方
+// 入队方必须保证消息入队后不再修改或复用 Pkt
+func (c *ChanConn) ReadPacket() ([]byte, net.Addr, error) {
 	if c.isClose.Load() == 1 {
-		return 0, nil, errChanConnAlreadyClose
+		return nil, nil, errChanConnAlreadyClose
 	}
 	msg, ok := <-c.RxChan
 	if !ok {
-		return 0, nil, errChanConnAlreadyClose
+		return nil, nil, errChanConnAlreadyClose
 	}
-	copy(p, msg.Pkt)
-	return len(msg.Pkt), msg.Addr, nil
+	return msg.Pkt, msg.Addr, nil
+}
+
+// ReadFrom 从接收通道消费一个数据报并复制到 p
+// 缓冲区不足时返回已复制长度和 io.ErrShortBuffer 未复制部分不会保留
+func (c *ChanConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
+	pkt, addr, err := c.ReadPacket()
+	if err != nil {
+		return 0, addr, err
+	}
+	n = copy(p, pkt)
+	if n < len(pkt) {
+		return n, addr, io.ErrShortBuffer
+	}
+	return n, addr, nil
 }
 
 // WriteTo 复制数据报后移交给发送通道
@@ -1416,12 +1430,10 @@ func DialChanConn(conn *ChanConn, addr ChanConnAddr) (*UDPSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	buf := make([]byte, mtuLimit)
-	n, _, err := conn.ReadFrom(buf)
+	udpPayload, _, err := conn.ReadPacket()
 	if err != nil {
 		return nil, err
 	}
-	udpPayload := buf[:n]
 	connType, enetType, sessionId, conv, _, err := ParseEnet(udpPayload)
 	if err != nil || connType != ConnEnetEst || enetType != EnetClientConnectKey {
 		return nil, errors.New("recv packet format error")

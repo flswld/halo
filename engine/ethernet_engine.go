@@ -18,6 +18,16 @@ func (i *NetIf) RxEthernet(ethFrm []byte) {
 		Log(fmt.Sprintf("parse ethernet frame error: %v\n", err))
 		return
 	}
+	// IPv6 透传先于本机 MAC 过滤 保留完整帧且不进入 IPv4 路由 NAT 或转发钩子
+	if eth.EthProto == protocol.ETH_PROTO_IPV6 {
+		if peer := i.Ipv6PassthroughPeer; peer != nil {
+			// 与原有发送共用出口锁 同步发送完成后接收缓冲区才允许复用
+			peer.EthTxLock.Lock()
+			peer.Config.EthTxFunc(ethFrm)
+			peer.EthTxLock.Unlock()
+		}
+		return
+	}
 	if eth.DstMac == i.MacAddr || eth.DstMac == protocol.BROADCAST_MAC_ADDR {
 		switch eth.EthProto {
 		case protocol.ETH_PROTO_ARP:

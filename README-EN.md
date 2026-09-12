@@ -228,6 +228,11 @@ func EthernetRouter() {
 	r, err := engine.InitRouter(&engine.RouterConfig{
 		DebugLog:      false,      // Debug logging
 		StaticMemSize: 8 * mem.MB, // Shared static memory pool size for the router
+		// IPv6 passthrough
+		Ipv6Passthrough: engine.Ipv6PassthroughConfig{
+			WanNetIf: "", // WAN interface name
+			LanNetIf: "", // LAN interface name
+		},
 		// Network interface list
 		NetIfList: []*engine.NetIfConfig{
 			{
@@ -373,7 +378,6 @@ func EthernetSwitch() {
 	// Stop DPDK
 	dpdk.Exit()
 }
-
 ```
 
 ## TODO

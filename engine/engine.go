@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -52,10 +53,17 @@ func (h MacAddrHash) GetHashCode() uint64 {
 
 // RouterConfig 路由器配置
 type RouterConfig struct {
-	DebugLog      bool                // 调试日志
-	NetIfList     []*NetIfConfig      // 网卡列表
-	RouteList     []*RouteEntryConfig // 静态路由列表
-	StaticMemSize int                 // 静态内存池大小
+	DebugLog        bool                  // 调试日志
+	NetIfList       []*NetIfConfig        // 网卡列表
+	RouteList       []*RouteEntryConfig   // 静态路由列表
+	StaticMemSize   int                   // 静态内存池大小
+	Ipv6Passthrough Ipv6PassthroughConfig // IPv6 二层透传配置
+}
+
+// Ipv6PassthroughConfig 指定唯一一对 IPv6 原始帧透传接口
+type Ipv6PassthroughConfig struct {
+	WanNetIf string // WAN 接口名称
+	LanNetIf string // LAN 接口名称
 }
 
 // NetIfConfig 网卡配置
@@ -104,6 +112,7 @@ type NetIf struct {
 	EthTxLock               cpu.SpinLock                               // 网卡发包锁
 	LoChan                  chan []byte                                // 本地回环管道
 	Router                  *Router                                    // 归属路由器
+	Ipv6PassthroughPeer     *NetIf                                     // IPv6 透传对端
 	ArpCacheTable           *hashmap.HashMap[IpAddrHash, *ArpCache]    // ARP 缓存表 键为 IP 地址 值为缓存项
 	ArpLock                 sync.RWMutex                               // ARP 表读写锁
 	NatFlowTable            *hashmap.HashMap[NatFlowHash, *NatFlow]    // NAT 流表 键为流摘要 值为流信息
@@ -197,6 +206,9 @@ func InitRouter(config *RouterConfig) (*Router, error) {
 				return nil, err
 			}
 		}
+		if netIfConfig.EthRxFunc == nil || netIfConfig.EthTxFunc == nil {
+			return nil, errors.New("network interface receive and transmit functions must not be nil")
+		}
 		netIf := &NetIf{
 			Config:                  netIfConfig,
 			MacAddr:                 macAddr,
@@ -232,6 +244,16 @@ func InitRouter(config *RouterConfig) (*Router, error) {
 			})
 		}
 		r.NetIfMap[netIf.Config.Name] = netIf
+	}
+	// IPv6 透传对端
+	passthrough := config.Ipv6Passthrough
+	if passthrough.WanNetIf != "" && passthrough.LanNetIf != "" {
+		wan, lan := r.NetIfMap[passthrough.WanNetIf], r.NetIfMap[passthrough.LanNetIf]
+		if wan == nil || lan == nil || wan == lan {
+			return nil, errors.New("invalid IPv6 passthrough interface configuration")
+		}
+		wan.Ipv6PassthroughPeer = lan
+		lan.Ipv6PassthroughPeer = wan
 	}
 	// 路由表
 	for _, routingEntryConfig := range config.RouteList {

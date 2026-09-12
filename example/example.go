@@ -91,6 +91,11 @@ func EthernetRouter() {
 	r, err := engine.InitRouter(&engine.RouterConfig{
 		DebugLog:      false,      // 调试日志
 		StaticMemSize: 8 * mem.MB, // 静态内存大小
+		// IPv6 透传
+		Ipv6Passthrough: engine.Ipv6PassthroughConfig{
+			WanNetIf: "", // WAN 接口名称
+			LanNetIf: "", // LAN 接口名称
+		},
 		// 网卡列表
 		NetIfList: []*engine.NetIfConfig{
 			{

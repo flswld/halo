@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"bytes"
 	"fmt"
 	"time"
 
@@ -11,15 +10,21 @@ import (
 
 // ArpCache 保存一条 ARP 缓存记录
 type ArpCache struct {
-	IpAddr  uint32  // IP 地址
-	MacAddr [6]byte // MAC 地址
-	ExpTime uint32  // 过期时间
+	IpAddr  uint32           // IP 地址
+	MacAddr protocol.MacAddr // MAC 地址
+	ExpTime uint32           // 过期时间
 }
 
 // SendFreeArp 发送免费 ARP 请求
 func (i *NetIf) SendFreeArp() {
 	arpPkt := make([]byte, 0, 28)
-	arpPkt, err := protocol.BuildArpPkt(arpPkt, protocol.ARP_REQUEST, i.MacAddr, i.IpAddr, protocol.BROADCAST_MAC_ADDR, i.IpAddr)
+	arpPkt, err := protocol.BuildArpPkt(arpPkt, protocol.ArpPkt{
+		Option:  protocol.ARP_REQUEST,
+		SrcMac:  i.MacAddr,
+		SrcAddr: i.IpAddr,
+		DstMac:  protocol.BROADCAST_MAC_ADDR,
+		DstAddr: i.IpAddr,
+	})
 	if err != nil {
 		Log(fmt.Sprintf("build arp packet error: %v\n", err))
 		return
@@ -28,8 +33,8 @@ func (i *NetIf) SendFreeArp() {
 }
 
 // GetArpCache 查询指定 IP 地址的 ARP 缓存
-func (i *NetIf) GetArpCache(ipAddr []byte) *ArpCache {
-	if bytes.Equal(ipAddr, i.IpAddr) {
+func (i *NetIf) GetArpCache(ipAddr protocol.Ipv4Addr) *ArpCache {
+	if ipAddr == i.IpAddr {
 		return nil
 	}
 	ipAddrU := protocol.IpAddrToU(ipAddr)
@@ -46,9 +51,15 @@ func (i *NetIf) GetArpCache(ipAddr []byte) *ArpCache {
 }
 
 // SendArpReq 发送指定 IP 地址的 ARP 查询请求
-func (i *NetIf) SendArpReq(ipAddr []byte) {
+func (i *NetIf) SendArpReq(ipAddr protocol.Ipv4Addr) {
 	arpPkt := make([]byte, 0, 28)
-	arpPkt, err := protocol.BuildArpPkt(arpPkt, protocol.ARP_REQUEST, i.MacAddr, i.IpAddr, protocol.BROADCAST_MAC_ADDR, ipAddr)
+	arpPkt, err := protocol.BuildArpPkt(arpPkt, protocol.ArpPkt{
+		Option:  protocol.ARP_REQUEST,
+		SrcMac:  i.MacAddr,
+		SrcAddr: i.IpAddr,
+		DstMac:  protocol.BROADCAST_MAC_ADDR,
+		DstAddr: ipAddr,
+	})
 	if err != nil {
 		Log(fmt.Sprintf("build arp packet error: %v\n", err))
 		return
@@ -57,7 +68,7 @@ func (i *NetIf) SendArpReq(ipAddr []byte) {
 }
 
 // SetArpCache 新增或刷新一条 ARP 缓存
-func (i *NetIf) SetArpCache(ipAddr []byte, macAddr []byte) {
+func (i *NetIf) SetArpCache(ipAddr protocol.Ipv4Addr, macAddr protocol.MacAddr) {
 	i.ArpLock.Lock()
 	defer i.ArpLock.Unlock()
 	ipAddrU := protocol.IpAddrToU(ipAddr)
@@ -70,37 +81,43 @@ func (i *NetIf) SetArpCache(ipAddr []byte, macAddr []byte) {
 		}
 	}
 	arpCache.IpAddr = ipAddrU
-	copy(arpCache.MacAddr[:], macAddr)
+	arpCache.MacAddr = macAddr
 	arpCache.ExpTime = i.Router.TimeNow + 300
 	i.ArpCacheTable.Set(IpAddrHash(ipAddrU), arpCache)
 }
 
 // HandleArp 处理收到的 ARP 报文并按需回应请求
-func (i *NetIf) HandleArp(ethPayload []byte, ethSrcMac []byte) {
-	arpOption, arpSrcMac, arpSrcAddr, _, arpDstAddr, err := protocol.ParseArpPkt(ethPayload)
+func (i *NetIf) HandleArp(ethPayload []byte, ethSrcMac protocol.MacAddr) {
+	arp, err := protocol.ParseArpPkt(ethPayload)
 	if err != nil {
 		Log(fmt.Sprintf("parse arp packet error: %v\n", err))
 		return
 	}
-	if !bytes.Equal(arpSrcMac, ethSrcMac) {
+	if arp.SrcMac != ethSrcMac {
 		// 二层源地址和 ARP 声明不一致时拒绝污染缓存
 		Log(fmt.Sprintf("arp packet src mac addr not match\n"))
 		return
 	}
-	if bytes.Equal(arpSrcAddr, i.IpAddr) {
+	if arp.SrcAddr == i.IpAddr {
 		Log(fmt.Sprintf("arp find ip addr conflect\n"))
 		return
 	}
-	i.SetArpCache(arpSrcAddr, arpSrcMac)
+	i.SetArpCache(arp.SrcAddr, arp.SrcMac)
 	// 对目的IP为本机的ARP询问请求进行回应
-	if arpOption == protocol.ARP_REQUEST && bytes.Equal(arpDstAddr, i.IpAddr) {
+	if arp.Option == protocol.ARP_REQUEST && arp.DstAddr == i.IpAddr {
 		arpPkt := make([]byte, 0, 28)
-		arpPkt, err := protocol.BuildArpPkt(arpPkt, protocol.ARP_REPLY, i.MacAddr, i.IpAddr, arpSrcMac, arpSrcAddr)
+		arpPkt, err := protocol.BuildArpPkt(arpPkt, protocol.ArpPkt{
+			Option:  protocol.ARP_REPLY,
+			SrcMac:  i.MacAddr,
+			SrcAddr: i.IpAddr,
+			DstMac:  arp.SrcMac,
+			DstAddr: arp.SrcAddr,
+		})
 		if err != nil {
 			Log(fmt.Sprintf("build arp packet error: %v\n", err))
 			return
 		}
-		i.TxEthernet(arpPkt, arpSrcMac, protocol.ETH_PROTO_ARP)
+		i.TxEthernet(arpPkt, arp.SrcMac, protocol.ETH_PROTO_ARP)
 	}
 }
 

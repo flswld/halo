@@ -7,28 +7,35 @@ import (
 )
 
 // RxTcp 接收 TCP 报文并执行简易握手与服务分发
-func (i *NetIf) RxTcp(ipv4Payload []byte, ipv4SrcAddr []byte) {
-	tcpPayload, tcpSrcPort, tcpDstPort, seqNum, ackNum, flags, err := protocol.ParseTcpPkt(ipv4Payload, ipv4SrcAddr, i.IpAddr)
+func (i *NetIf) RxTcp(ipv4Payload []byte, ipv4SrcAddr protocol.Ipv4Addr) {
+	tcp, err := protocol.ParseTcpPkt(ipv4Payload, protocol.Ipv4AddrPair{SrcAddr: ipv4SrcAddr, DstAddr: i.IpAddr})
 	if err != nil {
 		Log(fmt.Sprintf("parse tcp packet error: %v\n", err))
 		return
 	}
-	handleFunc, exist := i.TcpServiceMap[tcpDstPort]
+	handleFunc, exist := i.TcpServiceMap[tcp.DstPort]
 	if !exist {
 		return
 	}
-	if flags&protocol.TCP_FLAGS_SYN != 0 && flags&protocol.TCP_FLAGS_ACK == 0 {
-		i.TxTcp(nil, tcpDstPort, tcpSrcPort, ipv4SrcAddr, 1234567890, seqNum+1, protocol.TCP_FLAGS_SYN|protocol.TCP_FLAGS_ACK)
-	} else if flags&protocol.TCP_FLAGS_SYN != 0 && flags&protocol.TCP_FLAGS_ACK != 0 {
-		i.TxTcp(nil, tcpDstPort, tcpSrcPort, ipv4SrcAddr, 1234567891, seqNum+1, protocol.TCP_FLAGS_ACK)
+	if tcp.Flags&protocol.TCP_FLAGS_SYN != 0 && tcp.Flags&protocol.TCP_FLAGS_ACK == 0 {
+		i.TxTcp(nil, tcp.DstPort, tcp.SrcPort, ipv4SrcAddr, 1234567890, tcp.SeqNum+1, protocol.TCP_FLAGS_SYN|protocol.TCP_FLAGS_ACK)
+	} else if tcp.Flags&protocol.TCP_FLAGS_SYN != 0 && tcp.Flags&protocol.TCP_FLAGS_ACK != 0 {
+		i.TxTcp(nil, tcp.DstPort, tcp.SrcPort, ipv4SrcAddr, 1234567891, tcp.SeqNum+1, protocol.TCP_FLAGS_ACK)
 	}
-	handleFunc(TcpSession{RemoteIp: protocol.IpAddrToU(ipv4SrcAddr), RemotePort: tcpSrcPort}, tcpPayload, seqNum, ackNum, flags)
+	handleFunc(TcpSession{RemoteIp: protocol.IpAddrToU(ipv4SrcAddr), RemotePort: tcp.SrcPort}, tcp.Payload, tcp.SeqNum, tcp.AckNum, tcp.Flags)
 }
 
 // TxTcp 构建并发送 TCP 报文
-func (i *NetIf) TxTcp(tcpPayload []byte, tcpSrcPort uint16, tcpDstPort uint16, ipv4DstAddr []byte, seqNum uint32, ackNum uint32, flags uint8) bool {
+func (i *NetIf) TxTcp(tcpPayload []byte, tcpSrcPort uint16, tcpDstPort uint16, ipv4DstAddr protocol.Ipv4Addr, seqNum uint32, ackNum uint32, flags uint8) bool {
 	tcpPkt := make([]byte, 0, 1480)
-	tcpPkt, err := protocol.BuildTcpPkt(tcpPkt, tcpPayload, tcpSrcPort, tcpDstPort, i.IpAddr, ipv4DstAddr, seqNum, ackNum, flags)
+	tcpPkt, err := protocol.BuildTcpPkt(tcpPkt, protocol.TcpPkt{
+		Payload: tcpPayload,
+		SrcPort: tcpSrcPort,
+		DstPort: tcpDstPort,
+		SeqNum:  seqNum,
+		AckNum:  ackNum,
+		Flags:   flags,
+	}, protocol.Ipv4AddrPair{SrcAddr: i.IpAddr, DstAddr: ipv4DstAddr})
 	if err != nil {
 		Log(fmt.Sprintf("build tcp packet error: %v\n", err))
 		return false
@@ -56,6 +63,6 @@ func (i *NetIf) SendTcp(tcpPort uint16, session TcpSession, payload []byte, seqN
 }
 
 // DialTcp 向目标地址发送 TCP SYN 报文
-func (i *NetIf) DialTcp(ipv4DstAddr []byte, tcpDstPort uint16, tcpSrcPort uint16) {
+func (i *NetIf) DialTcp(ipv4DstAddr protocol.Ipv4Addr, tcpDstPort uint16, tcpSrcPort uint16) {
 	i.TxTcp(nil, tcpSrcPort, tcpDstPort, ipv4DstAddr, 1234567890, 0, protocol.TCP_FLAGS_SYN)
 }

@@ -7,23 +7,27 @@ import (
 )
 
 // RxUdp 接收 UDP 报文并分发给端口处理函数
-func (i *NetIf) RxUdp(ipv4Payload []byte, ipv4SrcAddr []byte) {
-	udpPayload, udpSrcPort, udpDstPort, err := protocol.ParseUdpPkt(ipv4Payload, ipv4SrcAddr, i.IpAddr)
+func (i *NetIf) RxUdp(ipv4Payload []byte, ipv4SrcAddr protocol.Ipv4Addr) {
+	udp, err := protocol.ParseUdpPkt(ipv4Payload, protocol.Ipv4AddrPair{SrcAddr: ipv4SrcAddr, DstAddr: i.IpAddr})
 	if err != nil {
 		Log(fmt.Sprintf("parse udp packet error: %v\n", err))
 		return
 	}
-	handleFunc, exist := i.UdpServiceMap[udpDstPort]
+	handleFunc, exist := i.UdpServiceMap[udp.DstPort]
 	if !exist {
 		return
 	}
-	handleFunc(UdpSession{RemoteIp: protocol.IpAddrToU(ipv4SrcAddr), RemotePort: udpSrcPort}, udpPayload)
+	handleFunc(UdpSession{RemoteIp: protocol.IpAddrToU(ipv4SrcAddr), RemotePort: udp.SrcPort}, udp.Payload)
 }
 
 // TxUdp 构建并发送 UDP 报文
-func (i *NetIf) TxUdp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, ipv4DstAddr []byte) bool {
+func (i *NetIf) TxUdp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, ipv4DstAddr protocol.Ipv4Addr) bool {
 	udpPkt := make([]byte, 0, 1480)
-	udpPkt, err := protocol.BuildUdpPkt(udpPkt, udpPayload, udpSrcPort, udpDstPort, i.IpAddr, ipv4DstAddr)
+	udpPkt, err := protocol.BuildUdpPkt(udpPkt, protocol.UdpPkt{
+		Payload: udpPayload,
+		SrcPort: udpSrcPort,
+		DstPort: udpDstPort,
+	}, protocol.Ipv4AddrPair{SrcAddr: i.IpAddr, DstAddr: ipv4DstAddr})
 	if err != nil {
 		Log(fmt.Sprintf("build udp packet error: %v\n", err))
 		return false
@@ -32,14 +36,14 @@ func (i *NetIf) TxUdp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, i
 }
 
 // RxUdpBroadcast 接收广播 UDP 报文并分发 DHCP 消息
-func (i *NetIf) RxUdpBroadcast(ipv4Payload []byte, ipv4SrcAddr []byte, ipv4DstAddr []byte) {
-	udpPayload, udpSrcPort, udpDstPort, err := protocol.ParseUdpPkt(ipv4Payload, ipv4SrcAddr, ipv4DstAddr)
+func (i *NetIf) RxUdpBroadcast(ipv4Payload []byte, ipv4SrcAddr protocol.Ipv4Addr, ipv4DstAddr protocol.Ipv4Addr) {
+	udp, err := protocol.ParseUdpPkt(ipv4Payload, protocol.Ipv4AddrPair{SrcAddr: ipv4SrcAddr, DstAddr: ipv4DstAddr})
 	if err != nil {
 		Log(fmt.Sprintf("parse udp packet error: %v\n", err))
 		return
 	}
-	if udpDstPort == DhcpClientPort || udpDstPort == DhcpServerPort {
-		i.RxDhcp(udpPayload, udpSrcPort, udpDstPort, ipv4SrcAddr)
+	if udp.DstPort == protocol.DhcpClientPort || udp.DstPort == protocol.DhcpServerPort {
+		i.RxDhcp(udp.Payload, udp.SrcPort, udp.DstPort, ipv4SrcAddr)
 	}
 }
 

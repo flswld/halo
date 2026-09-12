@@ -163,9 +163,9 @@ func EthernetRouter() {
 	r.RunRouter()
 
 	r.Ipv4PktFwdHook = func(raw []byte, dir int) (drop bool, mod []byte) {
-		payload, _, srcAddr, dstAddr, err := protocol.ParseIpv4Pkt(raw)
+		ipv4, err := protocol.ParseIpv4Pkt(raw)
 		if err == nil {
-			logger.Debug("[IPV4 ROUTE FWD] src: %v -> dst: %v, len: %v", srcAddr, dstAddr, len(payload))
+			logger.Debug("[IPV4 ROUTE FWD] src: %v -> dst: %v, len: %v", ipv4.SrcAddr, ipv4.DstAddr, len(ipv4.Payload))
 		}
 		return false, raw
 	}
@@ -386,7 +386,7 @@ func DDoS() {
 
 	// 一分钟icmp洪水攻击
 	for {
-		ok := r.GetNetIf("eth0").TxIcmp(protocol.ICMP_DEFAULT_PAYLOAD, protocol.ICMP_REQUEST, []byte{0x00, 0x01}, 1, []byte{192, 168, 100, 1})
+		ok := r.GetNetIf("eth0").TxIcmp(protocol.ICMP_DEFAULT_PAYLOAD, protocol.ICMP_REQUEST, []byte{0x00, 0x01}, 1, protocol.Ipv4Addr{192, 168, 100, 1})
 		if ok {
 			break
 		}
@@ -584,7 +584,7 @@ func KcpServerClient() {
 	r1.RunRouter()
 	r2.RunRouter()
 
-	r2.GetNetIf("eth0").Ping([]byte{192, 168, 100, 100}, 1)
+	r2.GetNetIf("eth0").Ping(protocol.Ipv4Addr{192, 168, 100, 100}, 1)
 
 	kcpServer := func(netIf *engine.NetIf) {
 		rxChan := make(chan kcp.ChanConnMsg, 1024)
@@ -616,7 +616,7 @@ func KcpServerClient() {
 			RxChan: rxChan,
 			TxChan: txChan,
 			Addr: kcp.ChanConnAddr{
-				Ip:   protocol.IpAddrToU([]byte{192, 168, 100, 100}),
+				Ip:   protocol.IpAddrToU(protocol.Ipv4Addr{192, 168, 100, 100}),
 				Port: 22222,
 			},
 		})
@@ -678,11 +678,11 @@ func KcpServerClient() {
 			RxChan: rxChan,
 			TxChan: txChan,
 			Addr: kcp.ChanConnAddr{
-				Ip:   protocol.IpAddrToU([]byte{192, 168, 100, 200}),
+				Ip:   protocol.IpAddrToU(protocol.Ipv4Addr{192, 168, 100, 200}),
 				Port: 33333,
 			},
 		}, kcp.ChanConnAddr{
-			Ip:   protocol.IpAddrToU([]byte{192, 168, 100, 100}),
+			Ip:   protocol.IpAddrToU(protocol.Ipv4Addr{192, 168, 100, 100}),
 			Port: 22222,
 		})
 		if err != nil {
@@ -774,12 +774,12 @@ func MagicPacketModifier() {
 
 	r.Ipv4PktFwdHook = func(raw []byte, dir int) (drop bool, mod []byte) {
 		// 数据包监听回调
-		ipv4Payload, ipHeadProto, srcAddr, dstAddr, err := protocol.ParseIpv4Pkt(raw)
+		ipv4, err := protocol.ParseIpv4Pkt(raw)
 		if err != nil {
 			return false, raw
 		}
 		// 只对UDP包加魔法
-		if ipHeadProto != protocol.IPH_PROTO_UDP {
+		if ipv4.IpHeadProto != protocol.IPH_PROTO_UDP {
 			return false, raw
 		}
 		if len(raw) > 1000 {
@@ -798,19 +798,19 @@ func MagicPacketModifier() {
 			// 500以下的包
 			if dir == engine.WanToLan {
 				// 对于服务器下行包复制一份延迟一秒后再裁剪一半数据发给客户端
-				udpPayload, srcPort, dstPort, err := protocol.ParseUdpPkt(ipv4Payload, srcAddr, dstAddr)
+				udp, err := protocol.ParseUdpPkt(ipv4.Payload, protocol.Ipv4AddrPair{SrcAddr: ipv4.SrcAddr, DstAddr: ipv4.DstAddr})
 				if err != nil {
 					return false, raw
 				}
 				go func() {
 					time.Sleep(time.Second)
 					r.GetNetIf("wan0").SendUdpPktByFlow(engine.NatFlowHash{
-						RemoteIpAddr:  protocol.IpAddrToU(srcAddr),
-						RemotePort:    srcPort,
-						LanHostIpAddr: protocol.IpAddrToU(dstAddr),
-						LanHostPort:   dstPort,
+						RemoteIpAddr:  protocol.IpAddrToU(ipv4.SrcAddr),
+						RemotePort:    udp.SrcPort,
+						LanHostIpAddr: protocol.IpAddrToU(ipv4.DstAddr),
+						LanHostPort:   udp.DstPort,
 						Ipv4HeadProto: protocol.IPH_PROTO_UDP,
-					}, engine.WanToLan, udpPayload[:len(udpPayload)/2])
+					}, engine.WanToLan, udp.Payload[:len(udp.Payload)/2])
 				}()
 			}
 			return false, raw
@@ -857,7 +857,7 @@ func UsePcapDev() {
 			logger.Error("pcap handle read packet error: %v", err)
 			return nil
 		}
-		if bytes.Equal(data[6:12], selfMacAddr) {
+		if bytes.Equal(data[6:12], selfMacAddr[:]) {
 			return nil
 		}
 		return data
@@ -899,7 +899,7 @@ func UsePcapDev() {
 	// 启动路由器
 	r.RunRouter()
 
-	r.GetNetIf("eth0").Ping([]byte{192, 168, 100, 1}, 3)
+	r.GetNetIf("eth0").Ping(protocol.Ipv4Addr{192, 168, 100, 1}, 3)
 
 	// 停止路由器
 	r.StopRouter()

@@ -31,47 +31,52 @@ const (
 	ARP_UNKNOWN uint16 = 0xffff
 )
 
+// ArpPkt 保存 ARP 报文的编解码字段
+// Parse 返回的地址按值保存 不引用输入缓冲区
+type ArpPkt struct {
+	Option  uint16   // ARP 操作类型
+	SrcMac  MacAddr  // 发送方 MAC 地址
+	SrcAddr Ipv4Addr // 发送方 IPv4 地址
+	DstMac  MacAddr  // 目标 MAC 地址
+	DstAddr Ipv4Addr // 目标 IPv4 地址
+}
+
 // ParseArpPkt 解析 ARP 报文的操作类型和地址字段
-func ParseArpPkt(pkt []byte) (option uint16, srcMac []byte, srcAddr []byte, dstMac []byte, dstAddr []byte, err error) {
+func ParseArpPkt(pkt []byte) (result ArpPkt, err error) {
 	if len(pkt) < 28 {
-		return ARP_UNKNOWN, nil, nil, nil, nil, errors.New("arp packet len < 28 bytes")
+		return ArpPkt{Option: ARP_UNKNOWN}, errors.New("arp packet len < 28 bytes")
 	}
 	// 操作类型
 	switch binary.BigEndian.Uint16([]byte{pkt[6], pkt[7]}) {
 	case ARP_REQUEST:
-		option = ARP_REQUEST
+		result.Option = ARP_REQUEST
 	case ARP_REPLY:
-		option = ARP_REPLY
+		result.Option = ARP_REPLY
 	default:
-		return ARP_UNKNOWN, nil, nil, nil, nil, errors.New("unknown arp option")
+		return ArpPkt{Option: ARP_UNKNOWN}, errors.New("unknown arp option")
 	}
 	// 地址
-	srcMac = pkt[8:14]
-	srcAddr = pkt[14:18]
-	dstMac = pkt[18:24]
-	dstAddr = pkt[24:28]
-	return option, srcMac, srcAddr, dstMac, dstAddr, nil
+	result.SrcMac = MacAddr(pkt[8:14])
+	result.SrcAddr = Ipv4Addr(pkt[14:18])
+	result.DstMac = MacAddr(pkt[18:24])
+	result.DstAddr = Ipv4Addr(pkt[24:28])
+	return result, nil
 }
 
 // BuildArpPkt 构建以太网和 IPv4 使用的 ARP 报文
-func BuildArpPkt(pkt []byte, option uint16, srcMac []byte, srcAddr []byte, dstMac []byte, dstAddr []byte) ([]byte, error) {
+// pkt 应为 nil 或长度为 0 的可复用缓冲区 返回值持有构建后的报文字节
+func BuildArpPkt(pkt []byte, packet ArpPkt) ([]byte, error) {
 	if pkt == nil {
 		pkt = make([]byte, 0, 28)
-	}
-	if len(srcMac) != 6 || len(dstMac) != 6 {
-		return nil, errors.New("src mac addr or dst mac addr len is not 6 bytes")
-	}
-	if len(srcAddr) != 4 || len(dstAddr) != 4 {
-		return nil, errors.New("src ip addr or dst ip addr len is not 4 bytes")
 	}
 	// 固定编码以太网和 IPv4 的硬件类型 协议类型及地址长度
 	pkt = append(pkt, 0x00, 0x01, 0x08, 0x00, 0x06, 0x04)
 	// 操作类型
-	pkt = append(pkt, byte(option>>8), byte(option))
+	pkt = append(pkt, byte(packet.Option>>8), byte(packet.Option))
 	// 地址
-	pkt = append(pkt, srcMac...)
-	pkt = append(pkt, srcAddr...)
-	pkt = append(pkt, dstMac...)
-	pkt = append(pkt, dstAddr...)
+	pkt = append(pkt, packet.SrcMac[:]...)
+	pkt = append(pkt, packet.SrcAddr[:]...)
+	pkt = append(pkt, packet.DstMac[:]...)
+	pkt = append(pkt, packet.DstAddr[:]...)
 	return pkt, nil
 }

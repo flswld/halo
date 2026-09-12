@@ -29,59 +29,72 @@ const (
 	ICMP_UNKNOWN uint8 = 0xff
 )
 
+// IcmpPkt 保存 ICMP 报文的编解码字段
+// Parse 返回的切片引用输入缓冲区 使用期间不得复用该缓冲区
+type IcmpPkt struct {
+	Payload  []byte // ICMP 载荷
+	IcmpType uint8  // ICMP 类型
+	IcmpId   []byte // 两字节 ICMP 标识
+	IcmpSeq  uint16 // ICMP 序号
+}
+
 // ParseIcmpPkt 解析受支持的 ICMP 报文并验证校验和
-func ParseIcmpPkt(pkt []byte) (payload []byte, icmpType uint8, icmpId []byte, icmpSeq uint16, err error) {
+func ParseIcmpPkt(pkt []byte) (result IcmpPkt, err error) {
 	if len(pkt) < 8 || len(pkt) > 1480 {
-		return nil, ICMP_UNKNOWN, nil, 0, errors.New("icmp packet len must >= 8 and <= 1480 bytes")
+		return IcmpPkt{IcmpType: ICMP_UNKNOWN}, errors.New("icmp packet len must >= 8 and <= 1480 bytes")
 	}
 	// 类型
 	switch pkt[0] {
 	case ICMP_REQUEST:
-		icmpType = ICMP_REQUEST
+		result.IcmpType = ICMP_REQUEST
 	case ICMP_REPLY:
-		icmpType = ICMP_REPLY
+		result.IcmpType = ICMP_REPLY
 	case ICMP_TTL:
-		icmpType = ICMP_TTL
+		result.IcmpType = ICMP_TTL
 	default:
-		return nil, ICMP_UNKNOWN, nil, 0, errors.New("not support type of icmp packet")
+		return IcmpPkt{IcmpType: ICMP_UNKNOWN}, errors.New("not support type of icmp packet")
 	}
 	// 代码
 	if pkt[1] != 0x00 {
-		return nil, ICMP_UNKNOWN, nil, 0, errors.New("not support type of icmp packet")
+		return IcmpPkt{IcmpType: ICMP_UNKNOWN}, errors.New("not support type of icmp packet")
 	}
 	// 完整报文包含原校验和时计算结果应为零
 	if GetCheckSum(pkt) != 0 {
-		return nil, ICMP_UNKNOWN, nil, 0, errors.New("check sum error")
+		return IcmpPkt{IcmpType: ICMP_UNKNOWN}, errors.New("check sum error")
 	}
 	// 标识
-	icmpId = pkt[4:6]
+	result.IcmpId = pkt[4:6]
 	// 序号
-	icmpSeq = binary.BigEndian.Uint16(pkt[6:8])
+	result.IcmpSeq = binary.BigEndian.Uint16(pkt[6:8])
 	// 数据
-	payload = pkt[8:]
-	return payload, icmpType, icmpId, icmpSeq, nil
+	result.Payload = pkt[8:]
+	return result, nil
 }
 
 // BuildIcmpPkt 构建 ICMP 报文并计算校验和
-func BuildIcmpPkt(pkt []byte, payload []byte, icmpType uint8, icmpId []byte, icmpSeq uint16) ([]byte, error) {
+// pkt 应为 nil 或长度为 0 的可复用缓冲区 返回值持有构建后的报文字节
+func BuildIcmpPkt(pkt []byte, packet IcmpPkt) ([]byte, error) {
 	if pkt == nil {
 		pkt = make([]byte, 0, 40)
 	}
-	if len(payload) > 1472 {
+	if len(packet.Payload) > 1472 {
 		return nil, errors.New("payload len must <= 1472")
 	}
+	if len(packet.IcmpId) != 2 {
+		return nil, errors.New("icmp id len is not 2 bytes")
+	}
 	// 类型
-	pkt = append(pkt, icmpType)
+	pkt = append(pkt, packet.IcmpType)
 	// 代码
 	pkt = append(pkt, 0x00)
 	// 校验和字段先清零再对完整 ICMP 报文计算
 	pkt = append(pkt, 0x00, 0x00)
 	// 标识
-	pkt = append(pkt, icmpId...)
+	pkt = append(pkt, packet.IcmpId...)
 	// 序号
-	pkt = append(pkt, uint8(icmpSeq>>8), uint8(icmpSeq))
+	pkt = append(pkt, uint8(packet.IcmpSeq>>8), uint8(packet.IcmpSeq))
 	// 数据
-	pkt = append(pkt, payload...)
+	pkt = append(pkt, packet.Payload...)
 	sum := GetCheckSum(pkt)
 	pkt[2] = byte(sum >> 8)
 	pkt[3] = byte(sum)

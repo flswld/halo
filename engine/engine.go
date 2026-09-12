@@ -1,9 +1,7 @@
 package engine
 
 import (
-	"bytes"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -45,7 +43,7 @@ func (h PortHash) GetHashCode() uint64 {
 }
 
 // MacAddrHash 表示可计算哈希值的 MAC 地址
-type MacAddrHash [6]byte
+type MacAddrHash protocol.MacAddr
 
 // GetHashCode 计算 MAC 地址的哈希值
 func (h MacAddrHash) GetHashCode() uint64 {
@@ -97,10 +95,11 @@ type RouteEntryConfig struct {
 // NetIf 网卡
 type NetIf struct {
 	Config                  *NetIfConfig                               // 配置
-	MacAddr                 []byte                                     // MAC 地址
-	IpAddr                  []byte                                     // IP 地址
-	NetworkMask             []byte                                     // 子网掩码
-	Gateway                 []byte                                     // 网关地址
+	MacAddr                 protocol.MacAddr                           // MAC 地址
+	IpAddr                  protocol.Ipv4Addr                          // IP 地址
+	NetworkMask             protocol.Ipv4Addr                          // 子网掩码
+	Gateway                 protocol.Ipv4Addr                          // 网关地址
+	HasGateway              bool                                       // 是否已配置或通过 DHCP 获得网关
 	EthTxBuffer             []byte                                     // 网卡发包缓冲区
 	EthTxLock               cpu.SpinLock                               // 网卡发包锁
 	LoChan                  chan []byte                                // 本地回环管道
@@ -112,7 +111,7 @@ type NetIf struct {
 	NatPortAlloc            *hashmap.HashMap[IpAddrHash, *PortAlloc]   // NAT 端口分配表 键为远程 IP 地址 值为端口分配信息
 	NatPortMappingTable     []*NatPortMappingEntry                     // 网络地址转换端口映射表
 	NatLock                 sync.RWMutex                               // NAT 表读写锁
-	DnsServerAddr           []byte                                     // DNS 服务器地址
+	DnsServerAddr           protocol.Ipv4Addr                          // DNS 服务器地址
 	DhcpLeaseTable          *hashmap.HashMap[IpAddrHash, *DhcpLease]   // DHCP 租期表 键为 IP 地址 值为租期信息
 	DhcpLock                sync.RWMutex                               // DHCP 表读写锁
 	DhcpClientTransactionId []byte                                     // DHCP 客户端事务 ID
@@ -155,8 +154,7 @@ func InitRouter(config *RouterConfig) (*Router, error) {
 		Config:   config,
 		NetIfMap: make(map[string]*NetIf),
 		RouteTable: &RouteTable{
-			Root:   new(TrieNode),
-			IpHash: fnv.New32a(),
+			Root: new(TrieNode),
 		},
 		NatPortMappingFlowTable: hashmap.NewHashMap[NatFlowHash, *NatPortMappingFlow](staticAllocator),
 		Ipv4PktFwdHook:          nil,
@@ -171,28 +169,28 @@ func InitRouter(config *RouterConfig) (*Router, error) {
 		if err != nil {
 			return nil, err
 		}
-		ipAddr := []byte{0x00, 0x00, 0x00, 0x00}
+		ipAddr := protocol.Ipv4Addr{}
 		if netIfConfig.IpAddr != "" {
 			ipAddr, err = protocol.ParseIpAddr(netIfConfig.IpAddr)
 			if err != nil {
 				return nil, err
 			}
 		}
-		networkMask := []byte{0x00, 0x00, 0x00, 0x00}
+		networkMask := protocol.Ipv4Addr{}
 		if netIfConfig.NetworkMask != "" {
 			networkMask, err = protocol.ParseIpAddr(netIfConfig.NetworkMask)
 			if err != nil {
 				return nil, err
 			}
 		}
-		gateway := []byte{0x00, 0x00, 0x00, 0x00}
+		gateway := protocol.Ipv4Addr{}
 		if netIfConfig.Gateway != "" {
 			gateway, err = protocol.ParseIpAddr(netIfConfig.Gateway)
 			if err != nil {
 				return nil, err
 			}
 		}
-		dnsServerAddr := []byte{0x00, 0x00, 0x00, 0x00}
+		dnsServerAddr := protocol.Ipv4Addr{}
 		if netIfConfig.DnsServerAddr != "" {
 			dnsServerAddr, err = protocol.ParseIpAddr(netIfConfig.DnsServerAddr)
 			if err != nil {
@@ -205,6 +203,7 @@ func InitRouter(config *RouterConfig) (*Router, error) {
 			IpAddr:                  ipAddr,
 			NetworkMask:             networkMask,
 			Gateway:                 gateway,
+			HasGateway:              netIfConfig.Gateway != "",
 			EthTxBuffer:             make([]byte, 0, 1514),
 			LoChan:                  make(chan []byte, 1024),
 			Router:                  r,
@@ -245,14 +244,18 @@ func InitRouter(config *RouterConfig) (*Router, error) {
 		if err != nil {
 			return nil, err
 		}
-		nextHop, err := protocol.ParseIpAddr(routingEntryConfig.NextHop)
-		if err != nil {
-			return nil, err
+		var nextHop protocol.Ipv4Addr
+		if routingEntryConfig.NextHop != "" {
+			nextHop, err = protocol.ParseIpAddr(routingEntryConfig.NextHop)
+			if err != nil {
+				return nil, err
+			}
 		}
 		r.RouteTable.AddRoute(&RouteEntry{
 			DstIpAddr:   dstIpAddr,
 			NetworkMask: networkMask,
 			NextHop:     nextHop,
+			HasNextHop:  routingEntryConfig.NextHop != "",
 			NetIf:       routingEntryConfig.NetIf,
 		})
 	}
@@ -267,7 +270,7 @@ func InitRouter(config *RouterConfig) (*Router, error) {
 		r.RouteTable.AddRoute(&RouteEntry{
 			DstIpAddr:   dstIpAddr,
 			NetworkMask: netIf.NetworkMask,
-			NextHop:     nil,
+			HasNextHop:  false,
 			NetIf:       netIf.Config.Name,
 		})
 	}
@@ -358,21 +361,21 @@ func (i *NetIf) PacketHandle() {
 				}
 				select {
 				case ipv4Pkt := <-i.LoChan:
-					ipv4Payload, ipv4HeadProto, ipv4SrcAddr, ipv4DstAddr, err := protocol.ParseIpv4Pkt(ipv4Pkt)
+					ipv4, err := protocol.ParseIpv4Pkt(ipv4Pkt)
 					if err != nil {
 						Log(fmt.Sprintf("parse ip packet error: %v\n", err))
 						continue
 					}
-					if !bytes.Equal(ipv4DstAddr, i.IpAddr) {
+					if ipv4.DstAddr != i.IpAddr {
 						continue
 					}
-					switch ipv4HeadProto {
+					switch ipv4.IpHeadProto {
 					case protocol.IPH_PROTO_ICMP:
-						i.RxIcmp(ipv4Payload, ipv4SrcAddr)
+						i.RxIcmp(ipv4.Payload, ipv4.SrcAddr)
 					case protocol.IPH_PROTO_UDP:
-						i.RxUdp(ipv4Payload, ipv4SrcAddr)
+						i.RxUdp(ipv4.Payload, ipv4.SrcAddr)
 					case protocol.IPH_PROTO_TCP:
-						i.RxTcp(ipv4Payload, ipv4SrcAddr)
+						i.RxTcp(ipv4.Payload, ipv4.SrcAddr)
 					default:
 					}
 				default:

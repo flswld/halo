@@ -45,7 +45,7 @@ func UsePcapDev() {
 			logger.Error("pcap handle read packet error: %v", err)
 			return nil
 		}
-		if len(data) >= 12 && bytes.Equal(data[6:12], selfMacAddr) {
+		if len(data) >= 12 && bytes.Equal(data[6:12], selfMacAddr[:]) {
 			return nil
 		}
 		return data
@@ -87,7 +87,7 @@ func UsePcapDev() {
 	// Start router
 	r.RunRouter()
 
-	r.GetNetIf("eth0").Ping([]byte{192, 168, 100, 1}, 3)
+	r.GetNetIf("eth0").Ping(protocol.Ipv4Addr{192, 168, 100, 1}, 3)
 
 	// Stop router
 	r.StopRouter()
@@ -300,9 +300,9 @@ func EthernetRouter() {
 	r.RunRouter()
 
 	r.Ipv4PktFwdHook = func(raw []byte, dir int) (drop bool, mod []byte) {
-		payload, _, srcAddr, dstAddr, err := protocol.ParseIpv4Pkt(raw)
+		ipv4, err := protocol.ParseIpv4Pkt(raw)
 		if err == nil {
-			logger.Debug("[IPV4 ROUTE FWD] src: %v -> dst: %v, len: %v", srcAddr, dstAddr, len(payload))
+			logger.Debug("[IPV4 ROUTE FWD] src: %v -> dst: %v, len: %v", ipv4.SrcAddr, ipv4.DstAddr, len(ipv4.Payload))
 		}
 		return false, raw
 	}

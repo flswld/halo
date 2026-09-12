@@ -44,62 +44,79 @@ func SetRandIpHeaderId() {
 	iphId = binary.BigEndian.Uint16([]byte{randByte[0], randByte[1]})
 }
 
+// Ipv4AddrPair 保存 UDP 和 TCP 伪首部校验使用的 IPv4 地址对
+// 地址不属于传输层报文字节 按值传入
+type Ipv4AddrPair struct {
+	SrcAddr Ipv4Addr // 源 IPv4 地址
+	DstAddr Ipv4Addr // 目的 IPv4 地址
+}
+
+// Ipv4Pkt 保存 IPv4 报文的编解码字段
+// 地址按值保存 Payload 引用输入缓冲区 使用载荷期间不得复用该缓冲区
+type Ipv4Pkt struct {
+	Payload     []byte   // 上层载荷
+	IpHeadProto uint8    // IPv4 上层协议
+	SrcAddr     Ipv4Addr // 源 IPv4 地址
+	DstAddr     Ipv4Addr // 目的 IPv4 地址
+}
+
 // ParseIpv4Pkt 解析固定 20 字节头部的 IPv4 报文
-func ParseIpv4Pkt(pkt []byte) (payload []byte, ipHeadProto uint8, srcAddr []byte, dstAddr []byte, err error) {
+func ParseIpv4Pkt(pkt []byte) (result Ipv4Pkt, err error) {
 	if len(pkt) < 20 || len(pkt) > 1500 {
-		return nil, IPH_PROTO_UNKNOWN, nil, nil, errors.New("ip packet len must >= 20 and <= 1500 bytes")
+		return Ipv4Pkt{IpHeadProto: IPH_PROTO_UNKNOWN}, errors.New("ip packet len must >= 20 and <= 1500 bytes")
 	}
 	if pkt[0] != 0x45 {
-		return nil, IPH_PROTO_UNKNOWN, nil, nil, errors.New("not support type of ip packet")
+		return Ipv4Pkt{IpHeadProto: IPH_PROTO_UNKNOWN}, errors.New("not support type of ip packet")
 	}
 	// 版本和首部长度固定为 IPv4 无选项的 20 字节头部
 	// 总长度限定本次解析返回的上层载荷范围
 	totalLen := int(binary.BigEndian.Uint16([]byte{pkt[2], pkt[3]}))
+	if totalLen < 20 || totalLen > len(pkt) {
+		return Ipv4Pkt{IpHeadProto: IPH_PROTO_UNKNOWN}, errors.New("invalid ip total length")
+	}
 	// 不支持分片
 	if (pkt[6] != 0x40 && pkt[6] != 0x00) || pkt[7] != 0x00 {
-		return nil, IPH_PROTO_UNKNOWN, nil, nil, errors.New("not support ip frg")
+		return Ipv4Pkt{IpHeadProto: IPH_PROTO_UNKNOWN}, errors.New("not support ip frg")
 	}
 	// 协议
 	switch pkt[9] {
 	case IPH_PROTO_ICMP:
-		ipHeadProto = IPH_PROTO_ICMP
+		result.IpHeadProto = IPH_PROTO_ICMP
 	case IPH_PROTO_TCP:
-		ipHeadProto = IPH_PROTO_TCP
+		result.IpHeadProto = IPH_PROTO_TCP
 	case IPH_PROTO_UDP:
-		ipHeadProto = IPH_PROTO_UDP
+		result.IpHeadProto = IPH_PROTO_UDP
 	default:
-		return nil, IPH_PROTO_UNKNOWN, nil, nil, errors.New("unknown ip protocol")
+		return Ipv4Pkt{IpHeadProto: IPH_PROTO_UNKNOWN}, errors.New("unknown ip protocol")
 	}
 	// 检查首部校验和
 	if CheckSumEnable {
 		if GetCheckSum(pkt[0:20]) != 0 {
-			return nil, IPH_PROTO_UNKNOWN, nil, nil, errors.New("header check sum error")
+			return Ipv4Pkt{IpHeadProto: IPH_PROTO_UNKNOWN}, errors.New("header check sum error")
 		}
 	}
 	// 源地址
-	srcAddr = pkt[12:16]
+	result.SrcAddr = Ipv4Addr(pkt[12:16])
 	// 目的地址
-	dstAddr = pkt[16:20]
+	result.DstAddr = Ipv4Addr(pkt[16:20])
 	// 数据
-	payload = pkt[20:totalLen]
-	return payload, ipHeadProto, srcAddr, dstAddr, nil
+	result.Payload = pkt[20:totalLen]
+	return result, nil
 }
 
 // BuildIpv4Pkt 构建固定 20 字节头部的 IPv4 报文
-func BuildIpv4Pkt(pkt []byte, payload []byte, ipHeadProto uint8, srcAddr []byte, dstAddr []byte) ([]byte, error) {
+// pkt 应为 nil 或长度为 0 的可复用缓冲区 返回值持有构建后的报文字节
+func BuildIpv4Pkt(pkt []byte, packet Ipv4Pkt) ([]byte, error) {
 	if pkt == nil {
 		pkt = make([]byte, 0, 20)
 	}
-	if len(payload) > 1480 {
+	if len(packet.Payload) > 1480 {
 		return nil, errors.New("payload len must <= 1480 bytes")
-	}
-	if len(srcAddr) != 4 || len(dstAddr) != 4 {
-		return nil, errors.New("src ip addr or dst ip addr len is not 4 bytes")
 	}
 	// 版本(IPV4)+首部长度(20字节)+服务类型(0x00)
 	pkt = append(pkt, 0x45, 0x00)
 	// 总长度
-	ipPktLen := uint16(len(payload) + 20)
+	ipPktLen := uint16(len(packet.Payload) + 20)
 	pkt = append(pkt, byte(ipPktLen>>8), byte(ipPktLen))
 	// 每次构包递增进程级报文标识
 	iphId++
@@ -109,13 +126,13 @@ func BuildIpv4Pkt(pkt []byte, payload []byte, ipHeadProto uint8, srcAddr []byte,
 	// 生存时间(128)
 	pkt = append(pkt, 0x80)
 	// 协议
-	pkt = append(pkt, ipHeadProto)
+	pkt = append(pkt, packet.IpHeadProto)
 	// 首部校验和(填充零)
 	pkt = append(pkt, 0x00, 0x00)
 	// 源地址
-	pkt = append(pkt, srcAddr...)
+	pkt = append(pkt, packet.SrcAddr[:]...)
 	// 目的地址
-	pkt = append(pkt, dstAddr...)
+	pkt = append(pkt, packet.DstAddr[:]...)
 	// 计算首部校验和
 	if CheckSumEnable {
 		sum := GetCheckSum(pkt)
@@ -126,7 +143,7 @@ func BuildIpv4Pkt(pkt []byte, payload []byte, ipHeadProto uint8, srcAddr []byte,
 		pkt[11] = 0x00
 	}
 	// 上层数据
-	pkt = append(pkt, payload...)
+	pkt = append(pkt, packet.Payload...)
 	return pkt, nil
 }
 
@@ -246,7 +263,7 @@ func NatGetSrcDstPort(pkt []byte) (srcPort uint16, dstPort uint16) {
 }
 
 // NatChangeSrc 修改 IPv4 报文的源地址和源端口并更新校验和
-func NatChangeSrc(pkt []byte, ipAddr []byte, port uint16) []byte {
+func NatChangeSrc(pkt []byte, ipAddr Ipv4Addr, port uint16) []byte {
 	if len(pkt) < 26 {
 		return pkt
 	}
@@ -274,7 +291,7 @@ func NatChangeSrc(pkt []byte, ipAddr []byte, port uint16) []byte {
 }
 
 // NatChangeDst 修改 IPv4 报文的目的地址和目的端口并更新校验和
-func NatChangeDst(pkt []byte, ipAddr []byte, port uint16) []byte {
+func NatChangeDst(pkt []byte, ipAddr Ipv4Addr, port uint16) []byte {
 	if len(pkt) < 26 {
 		return pkt
 	}

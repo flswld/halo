@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"bytes"
 	"fmt"
 	"time"
 
@@ -14,27 +13,32 @@ func (i *NetIf) RxEthernet(ethFrm []byte) {
 	if i.Router.Config.DebugLog {
 		Log(fmt.Sprintf("rx eth frm, if: %v, len: %v, data: %02x\n", i.Config.Name, len(ethFrm), ethFrm))
 	}
-	ethPayload, ethDstMac, ethSrcMac, ethProto, err := protocol.ParseEthFrm(ethFrm)
+	eth, err := protocol.ParseEthFrm(ethFrm)
 	if err != nil {
 		Log(fmt.Sprintf("parse ethernet frame error: %v\n", err))
 		return
 	}
-	if bytes.Equal(ethDstMac, i.MacAddr) || bytes.Equal(ethDstMac, protocol.BROADCAST_MAC_ADDR) {
-		switch ethProto {
+	if eth.DstMac == i.MacAddr || eth.DstMac == protocol.BROADCAST_MAC_ADDR {
+		switch eth.EthProto {
 		case protocol.ETH_PROTO_ARP:
-			i.HandleArp(ethPayload, ethSrcMac)
+			i.HandleArp(eth.Payload, eth.SrcMac)
 		case protocol.ETH_PROTO_IPV4:
-			i.RxIpv4(ethPayload)
+			i.RxIpv4(eth.Payload)
 		default:
 		}
 	}
 }
 
 // TxEthernet 封装并发送网络接口的以太网帧
-func (i *NetIf) TxEthernet(ethPayload []byte, ethDstMac []byte, ethProto uint16) bool {
+func (i *NetIf) TxEthernet(ethPayload []byte, ethDstMac protocol.MacAddr, ethProto uint16) bool {
 	i.EthTxLock.Lock()
 	i.EthTxBuffer = i.EthTxBuffer[0:0]
-	ethFrm, err := protocol.BuildEthFrm(i.EthTxBuffer, ethPayload, ethDstMac, i.MacAddr, ethProto)
+	ethFrm, err := protocol.BuildEthFrm(i.EthTxBuffer, protocol.EthFrm{
+		Payload:  ethPayload,
+		DstMac:   ethDstMac,
+		SrcMac:   i.MacAddr,
+		EthProto: ethProto,
+	})
 	if err != nil {
 		Log(fmt.Sprintf("build ethernet frame error: %v\n", err))
 		i.EthTxLock.Unlock()
@@ -50,23 +54,23 @@ func (i *NetIf) TxEthernet(ethPayload []byte, ethDstMac []byte, ethProto uint16)
 
 // SwitchMacAddr 保存交换机学习到的 MAC 地址记录
 type SwitchMacAddr struct {
-	MacAddr    [6]byte            // MAC 地址
+	MacAddr    protocol.MacAddr   // MAC 地址
 	NetIf      mem.StaticString64 // 交换机端口名
 	CreateTime uint32             // 创建时间
 }
 
 // RxEthernet 接收并解析交换机端口的以太网帧
 func (s *SwitchPort) RxEthernet(ethFrm []byte) {
-	ethPayload, ethDstMac, ethSrcMac, ethProto, err := protocol.ParseEthFrm(ethFrm)
+	eth, err := protocol.ParseEthFrm(ethFrm)
 	if err != nil {
 		Log(fmt.Sprintf("parse ethernet frame error: %v\n", err))
 		return
 	}
-	s.HandleEthernet(ethPayload, ethDstMac, ethSrcMac, ethProto)
+	s.HandleEthernet(eth.Payload, eth.DstMac, eth.SrcMac, eth.EthProto)
 }
 
 // HandleEthernet 学习源 MAC 地址并转发以太网帧
-func (s *SwitchPort) HandleEthernet(ethPayload []byte, ethDstMac []byte, ethSrcMac []byte, ethProto uint16) {
+func (s *SwitchPort) HandleEthernet(ethPayload []byte, ethDstMac protocol.MacAddr, ethSrcMac protocol.MacAddr, ethProto uint16) {
 	// 组播源地址不具备可学习性
 	if ethSrcMac[0]&0x01 == 0x01 {
 		return
@@ -89,7 +93,7 @@ func (s *SwitchPort) HandleEthernet(ethPayload []byte, ethDstMac []byte, ethSrcM
 		}
 		s.Switch.SwitchMacAddrLock.Unlock()
 	}
-	copy(srcMacAddr.MacAddr[:], ethSrcMac)
+	srcMacAddr.MacAddr = ethSrcMac
 	srcMacAddr.NetIf.Set(s.Config.Name)
 	srcMacAddr.CreateTime = s.Switch.TimeNow
 	s.Switch.SwitchMacAddrLock.RLock()
@@ -114,10 +118,15 @@ func (s *SwitchPort) HandleEthernet(ethPayload []byte, ethDstMac []byte, ethSrcM
 }
 
 // TxEthernet 封装并发送交换机端口的以太网帧
-func (s *SwitchPort) TxEthernet(ethPayload []byte, ethDstMac []byte, ethSrcMac []byte, ethProto uint16) bool {
+func (s *SwitchPort) TxEthernet(ethPayload []byte, ethDstMac protocol.MacAddr, ethSrcMac protocol.MacAddr, ethProto uint16) bool {
 	s.EthTxLock.Lock()
 	s.EthTxBuffer = s.EthTxBuffer[0:0]
-	ethFrm, err := protocol.BuildEthFrm(s.EthTxBuffer, ethPayload, ethDstMac, ethSrcMac, ethProto)
+	ethFrm, err := protocol.BuildEthFrm(s.EthTxBuffer, protocol.EthFrm{
+		Payload:  ethPayload,
+		DstMac:   ethDstMac,
+		SrcMac:   ethSrcMac,
+		EthProto: ethProto,
+	})
 	if err != nil {
 		Log(fmt.Sprintf("build ethernet frame error: %v\n", err))
 		s.EthTxLock.Unlock()

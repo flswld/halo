@@ -81,8 +81,8 @@ func (i *NetIf) IcmpTtlDeepNat(ethPayload []byte) ([]byte, bool) {
 	wanIpAddr := protocol.Ipv4Addr(icmp.Payload[12:16])
 	remoteIpAddr := protocol.Ipv4Addr(icmp.Payload[16:20])
 	wanPort, remotePort := protocol.NatGetSrcDstPort(icmp.Payload)
-	natFlow := i.NatGetFlowByWan(remoteIpAddr, remotePort, wanIpAddr, wanPort, _ipv4HeadProto)
-	if natFlow == nil {
+	natFlow, exist := i.NatGetFlowByWan(remoteIpAddr, remotePort, wanIpAddr, wanPort, _ipv4HeadProto)
+	if !exist {
 		return ethPayload, false
 	}
 	icmp.Payload = protocol.NatChangeSrc(icmp.Payload, protocol.UToIpAddr(natFlow.LanHostIpAddr), natFlow.LanHostPort)

@@ -31,6 +31,9 @@ const (
 	IPH_PROTO_UNKNOWN uint8 = 0xff
 )
 
+// BROADCAST_IPV4_ADDR 表示 IPv4 有限广播地址
+var BROADCAST_IPV4_ADDR = Ipv4Addr{255, 255, 255, 255}
+
 var iphId uint16 = 0x0000
 
 // SetRandIpHeaderId 随机初始化 IPv4 报文标识

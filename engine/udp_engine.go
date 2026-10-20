@@ -13,6 +13,10 @@ func (i *NetIf) RxUdp(ipv4Payload []byte, ipv4SrcAddr protocol.Ipv4Addr) {
 		Log(fmt.Sprintf("parse udp packet error: %v\n", err))
 		return
 	}
+	if i.Config.DhcpServerEnable && udp.SrcPort == protocol.DhcpClientPort && udp.DstPort == protocol.DhcpServerPort {
+		i.RxDhcp(udp.Payload, udp.SrcPort, udp.DstPort, ipv4SrcAddr)
+		return
+	}
 	handleFunc, exist := i.UdpServiceMap[udp.DstPort]
 	if !exist {
 		return

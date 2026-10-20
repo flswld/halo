@@ -104,7 +104,7 @@ func ParseDhcpOption(optionData []byte) map[uint8]*DhcpOption {
 				Type:     code,
 				HostName: string(data),
 			}
-		case DhcpOptionReqIpAddr:
+		case DhcpOptionReqIpAddr, DhcpOptionServerIdentifier:
 			if len(data) != 4 {
 				break
 			}
@@ -176,6 +176,7 @@ func BuildDhcpOption(dhcpOptionMap map[uint8]*DhcpOption) []byte {
 type DhcpPkt struct {
 	BootMsgType   uint8                 // BOOTP 消息类型
 	TransactionId []byte                // 四字节事务 ID
+	ClientIpAddr  Ipv4Addr              // 客户端当前 IPv4 地址 ciaddr
 	YourIpAddr    Ipv4Addr              // 分配给客户端的 IPv4 地址
 	ClientMacAddr MacAddr               // 客户端 MAC 地址
 	OptionMap     map[uint8]*DhcpOption // 已识别的 DHCP 选项
@@ -191,6 +192,7 @@ func ParseDhcpPkt(pkt []byte) (result DhcpPkt, err error) {
 	}
 	result.BootMsgType = pkt[0]
 	result.TransactionId = pkt[4:8]
+	result.ClientIpAddr = Ipv4Addr(pkt[12:16])
 	result.YourIpAddr = Ipv4Addr(pkt[16:20])
 	result.ClientMacAddr = MacAddr(pkt[28:34])
 	result.OptionMap = ParseDhcpOption(pkt[240:])
@@ -210,7 +212,7 @@ func BuildDhcpPkt(pkt []byte, packet DhcpPkt) ([]byte, error) {
 	pkt = append(pkt, packet.TransactionId...)
 	pkt = append(pkt, 0x00, 0x00)
 	pkt = append(pkt, 0x80, 0x00)
-	pkt = append(pkt, 0x00, 0x00, 0x00, 0x00)
+	pkt = append(pkt, packet.ClientIpAddr[:]...)
 	pkt = append(pkt, packet.YourIpAddr[:]...)
 	pkt = append(pkt, 0x00, 0x00, 0x00, 0x00)
 	pkt = append(pkt, 0x00, 0x00, 0x00, 0x00)

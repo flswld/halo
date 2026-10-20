@@ -20,7 +20,7 @@ func (i *NetIf) RxIpv4(ethPayload []byte) {
 		Log(fmt.Sprintf("parse ip packet error: %v\n", err))
 		return
 	}
-	if ipv4.DstAddr[3] == 255 {
+	if ipv4.DstAddr == protocol.BROADCAST_IPV4_ADDR {
 		// 广播 UDP 仅进入 DHCP 分发路径 不参与普通路由转发
 		if ipv4.IpHeadProto == protocol.IPH_PROTO_UDP {
 			i.RxUdpBroadcast(ipv4.Payload, ipv4.SrcAddr, ipv4.DstAddr)
@@ -62,7 +62,7 @@ func (i *NetIf) TxIpv4(ipv4Payload []byte, ipv4HeadProto uint8, ipv4DstAddr prot
 	var nextHopIpAddr protocol.Ipv4Addr
 	var hasNextHop bool
 	var outNetIf *NetIf = nil
-	if ipv4DstAddr[3] == 255 {
+	if ipv4DstAddr == protocol.BROADCAST_IPV4_ADDR {
 		outNetIf = i
 	} else {
 		// HasNextHop 为 false 表示直连 出接口为空表示没有路由
@@ -87,7 +87,7 @@ func (i *NetIf) TxIpv4(ipv4Payload []byte, ipv4HeadProto uint8, ipv4DstAddr prot
 	}
 	// 二层封装
 	var arpCache *ArpCache = nil
-	if ipv4DstAddr[3] == 255 {
+	if ipv4DstAddr == protocol.BROADCAST_IPV4_ADDR {
 		return outNetIf.TxEthernet(ipv4Pkt, protocol.BROADCAST_MAC_ADDR, protocol.ETH_PROTO_IPV4)
 	} else if hasNextHop {
 		arpCache = outNetIf.GetArpCache(nextHopIpAddr)

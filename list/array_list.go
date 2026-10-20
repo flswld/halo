@@ -70,7 +70,7 @@ func (a *ArrayList[T]) Add(value T) bool {
 
 // Set 更新指定索引的元素
 func (a *ArrayList[T]) Set(index int, value T) {
-	if index >= a.len {
+	if index < 0 || index >= a.len {
 		return
 	}
 	p := mem.OffsetType[T](a.data, int64(index))
@@ -79,7 +79,7 @@ func (a *ArrayList[T]) Set(index int, value T) {
 
 // Get 返回指定索引的元素
 func (a *ArrayList[T]) Get(index int) T {
-	if index >= a.len {
+	if index < 0 || index >= a.len {
 		var t T
 		return t
 	}
@@ -89,7 +89,7 @@ func (a *ArrayList[T]) Get(index int) T {
 
 // Del 删除指定索引的元素
 func (a *ArrayList[T]) Del(index int) {
-	if index >= a.len {
+	if index < 0 || index >= a.len {
 		return
 	}
 	// memmove 支持区域重叠 将后续元素整体左移一位

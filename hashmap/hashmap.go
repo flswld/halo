@@ -210,6 +210,9 @@ func (m *HashMap[K, V]) Del(key K) {
 	}
 	if e.key == key {
 		m.bucket.Set(int(i), e.next)
+		if e.next != nil {
+			e.next.front = nil
+		}
 		mem.FreeType[entry[K, V]](m.allocator, e)
 		m.len--
 		return

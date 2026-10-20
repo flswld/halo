@@ -155,7 +155,7 @@ func InitLogger(cfg *Config) {
 		if config.FileMaxSize == 0 {
 			config.FileMaxSize = defaultFileMaxSize
 		}
-		err := os.MkdirAll(config.FilePath, 0644)
+		err := os.MkdirAll(config.FilePath, 0755)
 		if err != nil {
 			panic(fmt.Sprintf("make log dir error: %v", err))
 		}
@@ -278,7 +278,14 @@ func (l *Logger) doLog() {
 			}
 		}
 		if exit && exitCountDown == 0 {
-			logger.CloseChan <- struct{}{}
+			if len(l.WriteBuf) != 0 {
+				l.flushLog()
+			}
+			for tag, file := range l.FileTagMap {
+				_ = file.Close()
+				delete(l.FileTagMap, tag)
+			}
+			l.CloseChan <- struct{}{}
 			return
 		}
 	}

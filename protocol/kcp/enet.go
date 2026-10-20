@@ -98,6 +98,9 @@ func BuildEnet(connType string, enetType uint32, sessionId uint32, conv uint32) 
 
 // ParseEnet 解析固定 20 字节的 Enet 连接控制报文
 func ParseEnet(data []byte) (connType string, enetType uint32, sessionId uint32, conv uint32, rawConv uint64, err error) {
+	if len(data) != 20 {
+		return "", 0, 0, 0, 0, errors.New("invalid enet packet length")
+	}
 	// 会话 ID 与 KCP 会话号在控制报文中分别使用大端编码
 	sessionId = binary.BigEndian.Uint32(data[4:8])
 	conv = binary.BigEndian.Uint32(data[8:12])

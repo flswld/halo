@@ -13,12 +13,17 @@ import (
 // DhcpLeaseTime 是引擎默认分配的租期 单位为秒
 const DhcpLeaseTime = 3600
 
-// DhcpLease 保存一条 DHCP 租约
+// DhcpOfferTime 是待确认地址的保留时间 单位为秒
+const DhcpOfferTime = 60
+
+// DhcpLease 保存一条 DHCP 租约及其最近一次 OFFER 信息
 type DhcpLease struct {
-	IpAddr   protocol.Ipv4Addr  // IP 地址
-	MacAddr  protocol.MacAddr   // MAC 地址
-	ExpTime  uint32             // 过期时间
-	HostName mem.StaticString64 // 主机名
+	IpAddr             protocol.Ipv4Addr  // IP 地址
+	MacAddr            protocol.MacAddr   // MAC 地址
+	ExpTime            uint32             // 正式租约到期时间 0 表示尚未确认
+	HostName           mem.StaticString64 // 主机名
+	OfferExpTime       uint32             // OFFER 到期时间 0 表示没有 OFFER 记录
+	OfferTransactionId [4]byte            // 最近一次 OFFER 的事务 ID 确认后保留以处理重传
 }
 
 // RxDhcp 接收并处理 DHCP 客户端或服务器消息
@@ -33,6 +38,9 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 			Log(fmt.Sprintf("parse dhcp packet error: %v\n", err))
 			return
 		}
+		if packet.BootMsgType != protocol.DhcpBootMsgTypeRequest {
+			return
+		}
 		optionMsgType := packet.OptionMap[protocol.DhcpOptionMsgType]
 		if optionMsgType == nil {
 			return
@@ -44,43 +52,80 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 		}
 		i.DhcpLock.Lock()
 		defer i.DhcpLock.Unlock()
+		now := i.Router.TimeNow
 		selfIpAddrU := protocol.IpAddrToU(i.IpAddr)
 		networkMaskU := protocol.IpAddrToU(i.NetworkMask)
 		networkU := selfIpAddrU & networkMaskU
 		broadcastU := networkU | ^networkMaskU
 		switch optionMsgType.MsgType {
 		case protocol.DhcpOptionMsgTypeDiscover:
-			// 优先复用同一客户端请求且仍归属于该 MAC 地址的租约
+			// 同一 MAC 优先复用有效正式租约 其次复用待确认地址
 			clientIpAddrU := uint32(0)
-			optionReqIpAddr := packet.OptionMap[protocol.DhcpOptionReqIpAddr]
-			if optionReqIpAddr != nil {
-				reqIpAddrU := protocol.IpAddrToU(optionReqIpAddr.IpAddr)
-				dhcpLease, exist := i.DhcpLeaseTable.Get(IpAddrHash(reqIpAddrU))
-				if exist && dhcpLease.MacAddr == packet.ClientMacAddr &&
-					reqIpAddrU > networkU && reqIpAddrU < broadcastU &&
-					reqIpAddrU != selfIpAddrU {
-					clientIpAddrU = reqIpAddrU
+			var dhcpLease *DhcpLease
+			i.DhcpLeaseTable.For(func(key IpAddrHash, lease *DhcpLease) (next bool) {
+				ipAddrU := uint32(key)
+				if lease.MacAddr != packet.ClientMacAddr {
+					return true
 				}
-			}
+				if lease.ExpTime <= now && lease.OfferExpTime <= now {
+					return true
+				}
+				if ipAddrU <= networkU || ipAddrU >= broadcastU || ipAddrU == selfIpAddrU {
+					return true
+				}
+				if ipAddrU&networkMaskU != networkU {
+					return true
+				}
+				if dhcpLease == nil || lease.ExpTime > now {
+					dhcpLease = lease
+					clientIpAddrU = ipAddrU
+				}
+				return lease.ExpTime <= now
+			})
 			if clientIpAddrU == 0 {
-				// 仅在子网主机范围内查找 从网络地址起步避免 /32 地址加一溢出
-				for ipAddrU := networkU; ipAddrU < broadcastU; ipAddrU++ {
-					if ipAddrU == networkU || ipAddrU == selfIpAddrU || ipAddrU&networkMaskU != networkU {
+				// 先排除 /31 和 /32 再用 64 位运算避免主机数及回绕计算溢出
+				if uint64(broadcastU)-uint64(networkU) <= 1 {
+					return
+				}
+				hostCount := uint64(broadcastU) - uint64(networkU) - 1
+				start := MacAddrHash(packet.ClientMacAddr).GetHashCode() % hostCount
+				// 从 MAC 哈希确定的起点循环查找 每个候选地址最多检查一次
+				for offset := uint64(0); offset < hostCount; offset++ {
+					ipAddrU := uint32(uint64(networkU) + 1 + (start+offset)%hostCount)
+					if ipAddrU == selfIpAddrU || ipAddrU&networkMaskU != networkU {
 						continue
 					}
-					_, exist := i.DhcpLeaseTable.Get(IpAddrHash(ipAddrU))
+					lease, exist := i.DhcpLeaseTable.Get(IpAddrHash(ipAddrU))
 					if exist {
-						continue
+						if lease.ExpTime > now || lease.OfferExpTime > now {
+							continue
+						}
+						i.DhcpLeaseTable.Del(IpAddrHash(ipAddrU))
+						mem.FreeType[DhcpLease](i.Router.StaticAllocator, lease)
 					}
 					clientIpAddrU = ipAddrU
 					break
 				}
-			}
-			if clientIpAddrU == 0 {
-				Log(fmt.Sprintf("dhcp server no ip found\n"))
-				return
+				if clientIpAddrU == 0 {
+					Log(fmt.Sprintf("dhcp server no ip found\n"))
+					return
+				}
 			}
 			clientIpAddr := protocol.UToIpAddr(clientIpAddrU)
+			if dhcpLease == nil {
+				dhcpLease = mem.MallocType[DhcpLease](i.Router.StaticAllocator, 1)
+				if dhcpLease == nil {
+					return
+				}
+				*dhcpLease = DhcpLease{IpAddr: clientIpAddr, MacAddr: packet.ClientMacAddr}
+				if !i.DhcpLeaseTable.Set(IpAddrHash(clientIpAddrU), dhcpLease) {
+					mem.FreeType[DhcpLease](i.Router.StaticAllocator, dhcpLease)
+					return
+				}
+			}
+			// 只更新 OFFER 信息 不能缩短或提前续期已有正式租约
+			dhcpLease.OfferExpTime = now + DhcpOfferTime
+			copy(dhcpLease.OfferTransactionId[:], packet.TransactionId)
 			hostName := ""
 			optionHostName := packet.OptionMap[protocol.DhcpOptionHostName]
 			if optionHostName != nil {
@@ -104,16 +149,18 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 				},
 			}, protocol.BROADCAST_IPV4_ADDR)
 		case protocol.DhcpOptionMsgTypeRequest:
-			// REQUEST 只有在地址属于本子网且未被其他 MAC 占用时才确认
+			// SELECTING 和 INIT-REBOOT 使用请求地址 续租和重绑定使用 ciaddr
 			reqIpAddr := packet.ClientIpAddr
 			dstIpAddr := packet.ClientIpAddr
+			optionReqIpAddr := packet.OptionMap[protocol.DhcpOptionReqIpAddr]
 			if reqIpAddr == (protocol.Ipv4Addr{}) {
-				optionReqIpAddr := packet.OptionMap[protocol.DhcpOptionReqIpAddr]
 				if optionReqIpAddr == nil {
 					return
 				}
 				reqIpAddr = optionReqIpAddr.IpAddr
 				dstIpAddr = protocol.BROADCAST_IPV4_ADDR
+			} else if optionServerIdentifier != nil || optionReqIpAddr != nil {
+				return
 			}
 			hostName := ""
 			optionHostName := packet.OptionMap[protocol.DhcpOptionHostName]
@@ -122,7 +169,6 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 			}
 			var dhcpLease *DhcpLease
 			var exist bool
-			var ok bool
 			reqIpAddrU := protocol.IpAddrToU(reqIpAddr)
 			// 不允许分配本机地址 网络地址或子网广播地址
 			if reqIpAddrU <= networkU || reqIpAddrU >= broadcastU || reqIpAddrU == selfIpAddrU {
@@ -132,29 +178,40 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 				goto dhcp_nak
 			}
 			dhcpLease, exist = i.DhcpLeaseTable.Get(IpAddrHash(reqIpAddrU))
-			if exist && dhcpLease.MacAddr != packet.ClientMacAddr {
-				goto dhcp_nak
-			}
-			if !exist {
-				dhcpLease = mem.MallocType[DhcpLease](i.Router.StaticAllocator, 1)
-				if dhcpLease == nil {
+			if optionServerIdentifier != nil {
+				if !exist || dhcpLease.MacAddr != packet.ClientMacAddr || dhcpLease.OfferExpTime == 0 {
+					goto dhcp_nak
+				}
+				if !bytes.Equal(dhcpLease.OfferTransactionId[:], packet.TransactionId) {
+					return
+				}
+				if dhcpLease.OfferExpTime <= now && dhcpLease.ExpTime <= now {
+					goto dhcp_nak
+				}
+			} else {
+				if !exist || dhcpLease.MacAddr != packet.ClientMacAddr || dhcpLease.ExpTime == 0 {
+					knownClient := false
+					i.DhcpLeaseTable.For(func(key IpAddrHash, lease *DhcpLease) (next bool) {
+						if lease.MacAddr == packet.ClientMacAddr && lease.ExpTime != 0 {
+							knownClient = true
+							return false
+						}
+						return true
+					})
+					if !knownClient {
+						return
+					}
+					goto dhcp_nak
+				}
+				if dhcpLease.ExpTime <= now {
 					goto dhcp_nak
 				}
 			}
-			dhcpLease.IpAddr = reqIpAddr
-			dhcpLease.MacAddr = packet.ClientMacAddr
-			dhcpLease.ExpTime = i.Router.TimeNow + DhcpLeaseTime
+			dhcpLease.ExpTime = now + DhcpLeaseTime
 			if hostName == "" {
 				dhcpLease.HostName = mem.StaticString64{}
 			} else {
 				dhcpLease.HostName.Set(hostName)
-			}
-			ok = i.DhcpLeaseTable.Set(IpAddrHash(reqIpAddrU), dhcpLease)
-			if !ok {
-				if !exist {
-					mem.FreeType[DhcpLease](i.Router.StaticAllocator, dhcpLease)
-				}
-				goto dhcp_nak
 			}
 			Log(fmt.Sprintf("dhcp server ack ip: %v, name: %v, mac: % 02x\n", reqIpAddr, hostName, packet.ClientMacAddr))
 			// 续租和重绑定向 ciaddr 单播 ACK 首次分配仍广播
@@ -177,7 +234,6 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 			}, dstIpAddr)
 			return
 		dhcp_nak:
-			// 任一校验或内存分配失败均向客户端返回 NAK
 			i.TxDhcp(protocol.DhcpServerPort, protocol.DhcpClientPort, protocol.DhcpPkt{
 				BootMsgType:   protocol.DhcpBootMsgTypeReply,
 				TransactionId: packet.TransactionId,
@@ -194,7 +250,7 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 			}
 			clientIpAddrU := protocol.IpAddrToU(packet.ClientIpAddr)
 			dhcpLease, exist := i.DhcpLeaseTable.Get(IpAddrHash(clientIpAddrU))
-			if exist && dhcpLease.MacAddr == packet.ClientMacAddr {
+			if exist && dhcpLease.MacAddr == packet.ClientMacAddr && dhcpLease.ExpTime != 0 {
 				Log(fmt.Sprintf("dhcp server release ip: %v, name: %v, mac: % 02x\n", dhcpLease.IpAddr, dhcpLease.HostName, packet.ClientMacAddr))
 				i.DhcpLeaseTable.Del(IpAddrHash(clientIpAddrU))
 				mem.FreeType[DhcpLease](i.Router.StaticAllocator, dhcpLease)
@@ -214,6 +270,9 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 			Log(fmt.Sprintf("parse dhcp packet error: %v\n", err))
 			return
 		}
+		if packet.BootMsgType != protocol.DhcpBootMsgTypeReply || packet.ClientMacAddr != i.MacAddr {
+			return
+		}
 		if !bytes.Equal(packet.TransactionId, i.DhcpClientTransactionId) {
 			return
 		}
@@ -223,6 +282,10 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 		}
 		switch optionMsgType.MsgType {
 		case protocol.DhcpOptionMsgTypeOffer:
+			optionServerIdentifier := packet.OptionMap[protocol.DhcpOptionServerIdentifier]
+			if optionServerIdentifier == nil {
+				return
+			}
 			// 接受 OFFER 后携带服务器标识和请求地址发出 REQUEST
 			i.TxDhcp(protocol.DhcpClientPort, protocol.DhcpServerPort, protocol.DhcpPkt{
 				BootMsgType:   protocol.DhcpBootMsgTypeRequest,
@@ -232,19 +295,24 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 					protocol.DhcpOptionMsgType:              {Type: protocol.DhcpOptionMsgType, MsgType: protocol.DhcpOptionMsgTypeRequest},
 					protocol.DhcpOptionClientIdentifier:     {Type: protocol.DhcpOptionClientIdentifier, MacAddr: i.MacAddr},
 					protocol.DhcpOptionReqIpAddr:            {Type: protocol.DhcpOptionReqIpAddr, IpAddr: packet.YourIpAddr},
-					protocol.DhcpOptionServerIdentifier:     {Type: protocol.DhcpOptionServerIdentifier, ServerIpAddr: ipv4SrcAddr},
+					protocol.DhcpOptionServerIdentifier:     {Type: protocol.DhcpOptionServerIdentifier, ServerIpAddr: optionServerIdentifier.IpAddr},
 					protocol.DhcpOptionParameterRequestList: {Type: protocol.DhcpOptionParameterRequestList},
 				},
 			}, protocol.BROADCAST_IPV4_ADDR)
 		case protocol.DhcpOptionMsgTypeAck:
-			// ACK 将租约参数写入运行时接口并安装默认路由与直连路由
-			i.IpAddr = packet.YourIpAddr
-			Log(fmt.Sprintf("dhcp client get ip: %v\n", packet.YourIpAddr))
+			networkMask := i.NetworkMask
 			optionSubnetMask := packet.OptionMap[protocol.DhcpOptionSubnetMask]
 			if optionSubnetMask != nil {
-				i.NetworkMask = optionSubnetMask.SubnetMask
-				Log(fmt.Sprintf("dhcp client get subnet mask: %v\n", optionSubnetMask.SubnetMask))
+				networkMask = optionSubnetMask.SubnetMask
 			}
+			if packet.YourIpAddr == (protocol.Ipv4Addr{}) || networkMask == (protocol.Ipv4Addr{}) {
+				return
+			}
+			// ACK 将租约参数写入运行时接口并安装默认路由与直连路由
+			i.IpAddr = packet.YourIpAddr
+			i.NetworkMask = networkMask
+			Log(fmt.Sprintf("dhcp client get ip: %v\n", i.IpAddr))
+			Log(fmt.Sprintf("dhcp client get subnet mask: %v\n", i.NetworkMask))
 			optionRouter := packet.OptionMap[protocol.DhcpOptionRouter]
 			if optionRouter != nil {
 				i.Gateway = optionRouter.IpAddr
@@ -258,16 +326,14 @@ func (i *NetIf) RxDhcp(udpPayload []byte, udpSrcPort uint16, udpDstPort uint16, 
 				})
 				Log(fmt.Sprintf("dhcp client get router: %v\n", i.Gateway))
 			}
-			if i.IpAddr != (protocol.Ipv4Addr{}) && i.NetworkMask != (protocol.Ipv4Addr{}) {
-				dstIpAddrU := protocol.IpAddrToU(i.IpAddr) & protocol.IpAddrToU(i.NetworkMask)
-				dstIpAddr := protocol.UToIpAddr(dstIpAddrU)
-				i.Router.RouteTable.AddRoute(&RouteEntry{
-					DstIpAddr:   dstIpAddr,
-					NetworkMask: i.NetworkMask,
-					HasNextHop:  false,
-					NetIf:       i.Config.Name,
-				})
-			}
+			dstIpAddrU := protocol.IpAddrToU(i.IpAddr) & protocol.IpAddrToU(i.NetworkMask)
+			dstIpAddr := protocol.UToIpAddr(dstIpAddrU)
+			i.Router.RouteTable.AddRoute(&RouteEntry{
+				DstIpAddr:   dstIpAddr,
+				NetworkMask: i.NetworkMask,
+				HasNextHop:  false,
+				NetIf:       i.Config.Name,
+			})
 			optionDomainNameServer := packet.OptionMap[protocol.DhcpOptionDomainNameServer]
 			if optionDomainNameServer != nil {
 				// WAN 获得的 DNS 地址同步给本路由器上的 DHCP 服务接口
@@ -320,12 +386,15 @@ func (i *NetIf) DhcpDiscover() {
 	}, protocol.BROADCAST_IPV4_ADDR)
 }
 
-// ListDhcp 返回当前 DHCP 租约表的副本
+// ListDhcp 返回有效正式租约的副本 不包含待确认地址
 func (i *NetIf) ListDhcp() []*DhcpLease {
 	i.DhcpLock.Lock()
 	defer i.DhcpLock.Unlock()
 	ret := make([]*DhcpLease, 0)
 	i.DhcpLeaseTable.For(func(key IpAddrHash, value *DhcpLease) (next bool) {
+		if value.ExpTime <= i.Router.TimeNow {
+			return true
+		}
 		v := *value
 		ret = append(ret, &v)
 		return true
@@ -333,7 +402,7 @@ func (i *NetIf) ListDhcp() []*DhcpLease {
 	return ret
 }
 
-// DhcpLeaseClear 定期清理过期的 DHCP 租约
+// DhcpLeaseClear 定期回收正式租约和 OFFER 均已过期的记录
 func (i *NetIf) DhcpLeaseClear() {
 	ticker := time.NewTicker(time.Second * 1)
 	for {
@@ -343,7 +412,7 @@ func (i *NetIf) DhcpLeaseClear() {
 		}
 		i.DhcpLock.Lock()
 		i.DhcpLeaseTable.For(func(ipAddrU IpAddrHash, dhcpLease *DhcpLease) (next bool) {
-			if i.Router.TimeNow > dhcpLease.ExpTime {
+			if dhcpLease.ExpTime <= i.Router.TimeNow && dhcpLease.OfferExpTime <= i.Router.TimeNow {
 				i.DhcpLeaseTable.Del(ipAddrU)
 				mem.FreeType[DhcpLease](i.Router.StaticAllocator, dhcpLease)
 			}
@@ -351,5 +420,6 @@ func (i *NetIf) DhcpLeaseClear() {
 		})
 		i.DhcpLock.Unlock()
 	}
+	ticker.Stop()
 	i.Router.StopWaitGroup.Done()
 }

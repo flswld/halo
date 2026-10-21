@@ -389,9 +389,9 @@ func EthernetSwitch() {
 - [X] NAT functionality
 - [X] NIC multi-queue support
 - [X] DHCP functionality
+- [X] Lightweight TCP protocol stack support
 - [ ] PPPoE functionality
 - [ ] IPv6 support
-- [ ] Lightweight TCP protocol stack support
 
 ## Star History
 

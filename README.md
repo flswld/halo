@@ -389,9 +389,9 @@ func EthernetSwitch() {
 - [X] NAT功能
 - [X] 网卡多队列支持
 - [X] DHCP功能
+- [X] 轻量级TCP协议栈支持
 - [ ] PPPOE功能
 - [ ] IPV6支持
-- [ ] 轻量级TCP协议栈支持
 
 ## Star History
 

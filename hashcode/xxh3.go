@@ -1,5 +1,4 @@
 // 当前实现移植自 github.com/zeebo/xxh3 v1.1.0 并裁剪了流式、seed、128 位和 SIMD 路径
-// 算法与原始代码按 BSD-2-Clause License 使用 许可证文本见同目录 LICENSE
 package hashcode
 
 import (

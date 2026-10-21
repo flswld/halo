@@ -27,21 +27,38 @@ func (i *NetIf) RxIpv4(ethPayload []byte) {
 		}
 		return
 	}
-	if ipv4.DstAddr != i.IpAddr || i.Config.NatEnable {
-		ok := i.Ipv4RouteForward(ethPayload, ipv4.SrcAddr, ipv4.DstAddr, ipv4.IpHeadProto)
-		if !ok && ipv4.IpHeadProto == protocol.IPH_PROTO_ICMP {
-			i.RxIcmp(ipv4.Payload, ipv4.SrcAddr)
-		}
+	if ipv4.DstAddr != i.IpAddr {
+		// 非本接口地址的报文交给路由和 NAT 处理
+		i.Ipv4RouteForward(ethPayload, ipv4.SrcAddr, ipv4.DstAddr, ipv4.IpHeadProto)
 		return
 	}
+	// 本接口地址的报文按协议决定本地处理或 NAT 转发
 	switch ipv4.IpHeadProto {
 	case protocol.IPH_PROTO_ICMP:
-		i.RxIcmp(ipv4.Payload, ipv4.SrcAddr)
+		icmp, err := protocol.ParseIcmpPkt(ipv4.Payload)
+		if err != nil {
+			Log(fmt.Sprintf("parse icmp packet error: %v\n", err))
+			return
+		}
+		if !i.Config.NatEnable || icmp.IcmpType == protocol.ICMP_REQUEST {
+			i.RxIcmp(ipv4.Payload, ipv4.SrcAddr)
+		} else {
+			i.Ipv4RouteForward(ethPayload, ipv4.SrcAddr, ipv4.DstAddr, ipv4.IpHeadProto)
+		}
 	case protocol.IPH_PROTO_UDP:
-		i.RxUdp(ipv4.Payload, ipv4.SrcAddr)
+		_, port := protocol.NatGetSrcDstPort(ethPayload)
+		if !i.Config.NatEnable || i.UdpServiceMap[port] != nil {
+			i.RxUdp(ipv4.Payload, ipv4.SrcAddr)
+		} else {
+			i.Ipv4RouteForward(ethPayload, ipv4.SrcAddr, ipv4.DstAddr, ipv4.IpHeadProto)
+		}
 	case protocol.IPH_PROTO_TCP:
-		i.RxTcp(ipv4.Payload, ipv4.SrcAddr)
-	default:
+		_, port := protocol.NatGetSrcDstPort(ethPayload)
+		if !i.Config.NatEnable || i.TcpServiceMap[port] != nil {
+			i.RxTcp(ipv4.Payload, ipv4.SrcAddr)
+		} else {
+			i.Ipv4RouteForward(ethPayload, ipv4.SrcAddr, ipv4.DstAddr, ipv4.IpHeadProto)
+		}
 	}
 }
 
@@ -81,8 +98,12 @@ func (i *NetIf) TxIpv4(ipv4Payload []byte, ipv4HeadProto uint8, ipv4DstAddr prot
 			// 复制报文后写入回环管道 避免后续复用发送缓冲区覆盖数据
 			_ipv4Pkt := make([]byte, len(ipv4Pkt))
 			copy(_ipv4Pkt, ipv4Pkt)
-			outNetIf.LoChan <- _ipv4Pkt
-			return true
+			select {
+			case outNetIf.LoChan <- _ipv4Pkt:
+				return true
+			default:
+				return false
+			}
 		}
 	}
 	// 二层封装
@@ -108,7 +129,7 @@ const (
 )
 
 // Ipv4RouteForward 对 IPv4 报文执行路由转发与网络地址转换
-func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr protocol.Ipv4Addr, ipv4DstAddr protocol.Ipv4Addr, ipv4HeadProto uint8) bool {
+func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr protocol.Ipv4Addr, ipv4DstAddr protocol.Ipv4Addr, ipv4HeadProto uint8) {
 	var inNatPortMappingEntry *NatPortMappingEntry
 	// DNAT 公网地址 -> 私网地址
 	if i.Config.NatEnable {
@@ -121,9 +142,7 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr protocol.Ipv4Add
 			if inNatPortMappingEntry == nil {
 				natFlow, exist := i.NatGetFlowByWan(ipv4SrcAddr, srcPort, ipv4DstAddr, dstPort, ipv4HeadProto)
 				if !exist {
-					// 没有nat表项
-					// 返回未处理状态 允许目标为路由器本机的 ICMP 报文继续交给本地协议栈
-					return false
+					return
 				}
 				ethPayload = protocol.NatChangeDst(ethPayload, protocol.UToIpAddr(natFlow.LanHostIpAddr), natFlow.LanHostPort)
 			} else {
@@ -140,7 +159,7 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr protocol.Ipv4Add
 			ethPayload = ethPayload[:28]
 		}
 		i.TxIcmp(ethPayload, protocol.ICMP_TTL, []byte{0x00, 0x00}, 0, ipv4SrcAddr)
-		return true
+		return
 	}
 	// 外部钩子回调
 	if i.Router.Ipv4PktFwdHook != nil {
@@ -154,14 +173,14 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr protocol.Ipv4Add
 		drop, mod := i.Router.Ipv4PktFwdHook(ethPayload, dir)
 		if drop {
 			// 外部钩子回调强制丢弃
-			return true
+			return
 		}
 		ethPayload = mod
 	}
 	// 地址已改为值类型 DNAT 或外部钩子改包后重新解析当前报文
 	ipv4, err := protocol.ParseIpv4Pkt(ethPayload)
 	if err != nil {
-		return true
+		return
 	}
 	ipv4SrcAddr, ipv4DstAddr, ipv4HeadProto = ipv4.SrcAddr, ipv4.DstAddr, ipv4.IpHeadProto
 	// 三层路由
@@ -192,7 +211,7 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr protocol.Ipv4Add
 		outNetIfName = outNatPortMappingFlow.WanNetIf
 		wanNetIf := i.Router.NetIfMap[outNetIfName]
 		if wanNetIf == nil || !wanNetIf.HasGateway {
-			return true
+			return
 		}
 		nextHopIpAddr = wanNetIf.Gateway
 		hasNextHop = true
@@ -200,7 +219,7 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr protocol.Ipv4Add
 	if outNetIfName == "" {
 		// 没有路由
 		Log(fmt.Sprintf("no route found for: %v\n", ipv4DstAddr))
-		return true
+		return
 	}
 	outNetIf := i.Router.NetIfMap[outNetIfName]
 	dstIpAddrU := protocol.IpAddrToU(ipv4DstAddr)
@@ -209,8 +228,11 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr protocol.Ipv4Add
 		// 本地回环
 		_ethPayload := make([]byte, len(ethPayload))
 		copy(_ethPayload, ethPayload)
-		outNetIf.LoChan <- _ethPayload
-		return true
+		select {
+		case outNetIf.LoChan <- _ethPayload:
+		default:
+		}
+		return
 	}
 	// SNAT 私网地址 -> 公网地址
 	if outNetIf.Config.NatEnable {
@@ -226,7 +248,7 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr protocol.Ipv4Add
 					natFlow, exist = outNetIf.NatAddFlow(ipv4SrcAddr, ipv4DstAddr, srcPort, dstPort, ipv4HeadProto)
 					if !exist {
 						// nat端口分配失败
-						return true
+						return
 					}
 				}
 				ethPayload = protocol.NatChangeSrc(ethPayload, protocol.UToIpAddr(natFlow.WanIpAddr), natFlow.WanPort)
@@ -244,7 +266,7 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr protocol.Ipv4Add
 	}
 	if arpCache == nil {
 		// 二层地址查询失败
-		return true
+		return
 	}
 	// 端口映射首包转发前尽量记录回程NAT流
 	if inNatPortMappingEntry != nil {
@@ -264,12 +286,12 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr protocol.Ipv4Add
 			inNatPortMappingFlow = mem.MallocType[NatPortMappingFlow](i.Router.StaticAllocator, 1)
 			if inNatPortMappingFlow == nil {
 				i.Router.NatPortMappingFlowLock.Unlock()
-				return true
+				return
 			}
 			if !i.Router.NatPortMappingFlowTable.Set(natFlowHash, inNatPortMappingFlow) {
 				mem.FreeType[NatPortMappingFlow](i.Router.StaticAllocator, inNatPortMappingFlow)
 				i.Router.NatPortMappingFlowLock.Unlock()
-				return true
+				return
 			}
 		}
 		inNatPortMappingFlow.WanNetIf = i.Config.Name
@@ -278,7 +300,6 @@ func (i *NetIf) Ipv4RouteForward(ethPayload []byte, ipv4SrcAddr protocol.Ipv4Add
 		i.Router.NatPortMappingFlowLock.Unlock()
 	}
 	outNetIf.TxEthernet(ethPayload, arpCache.MacAddr, protocol.ETH_PROTO_IPV4)
-	return true
 }
 
 // RouteTable 路由表
@@ -661,17 +682,31 @@ func (i *NetIf) NatAddFlow(lanHostIpAddr protocol.Ipv4Addr, remoteIpAddr protoco
 			}
 		}()
 	}
-	wanPort := uint16(32768)
+	wanPort := uint16(32767)
 	// 从动态端口区起点顺序寻找空闲端口 溢出到零表示耗尽
 	for {
-		_, use := portAlloc.UsePortMap.Get(PortHash(wanPort))
-		if !use {
-			break
-		}
 		wanPort++
 		if wanPort == 0 {
 			break
 		}
+		_, use := portAlloc.UsePortMap.Get(PortHash(wanPort))
+		if use {
+			continue
+		}
+		switch ipv4HeadProto {
+		case protocol.IPH_PROTO_TCP:
+			if i.TcpServiceMap[wanPort] != nil {
+				continue
+			}
+		case protocol.IPH_PROTO_UDP:
+			if i.UdpServiceMap[wanPort] != nil {
+				continue
+			}
+		}
+		if i.CheckNatPortMapping(WanToLan, i.IpAddr, wanPort, ipv4HeadProto) != nil {
+			continue
+		}
+		break
 	}
 	if wanPort == 0 {
 		return NatFlow{}, false

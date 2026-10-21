@@ -41,6 +41,8 @@ type TcpPkt struct {
 	SeqNum  uint32 // 序号
 	AckNum  uint32 // 确认号
 	Flags   uint8  // TCP 标志位
+	Window  uint16 // 接收窗口
+	Mss     uint16 // SYN 的 MSS 选项 零值不携带
 }
 
 // ParseTcpPkt 解析 TCP 报文并按配置验证校验和
@@ -62,6 +64,30 @@ func ParseTcpPkt(pkt []byte, addr Ipv4AddrPair) (result TcpPkt, err error) {
 		return TcpPkt{}, errors.New("invalid tcp header length")
 	}
 	result.Flags = pkt[13]
+	result.Window = binary.BigEndian.Uint16(pkt[14:16])
+	for offset := 20; offset < headerLen; {
+		kind := pkt[offset]
+		if kind == 0 {
+			break
+		}
+		if kind == 1 {
+			offset++
+			continue
+		}
+		if offset+2 > headerLen || pkt[offset+1] < 2 || offset+int(pkt[offset+1]) > headerLen {
+			return TcpPkt{}, errors.New("invalid tcp option length")
+		}
+		length := int(pkt[offset+1])
+		if kind == 2 {
+			if length != 4 || binary.BigEndian.Uint16(pkt[offset+2:offset+4]) == 0 {
+				return TcpPkt{}, errors.New("invalid tcp mss option")
+			}
+			if result.Flags&TCP_FLAGS_SYN != 0 {
+				result.Mss = binary.BigEndian.Uint16(pkt[offset+2 : offset+4])
+			}
+		}
+		offset += length
+	}
 	// 检查校验和
 	if CheckSumEnable {
 		// TCP 校验和覆盖 IPv4 伪首部和完整 TCP 报文
@@ -83,14 +109,24 @@ func ParseTcpPkt(pkt []byte, addr Ipv4AddrPair) (result TcpPkt, err error) {
 	return result, nil
 }
 
-// BuildTcpPkt 构建固定 20 字节头部的 TCP 报文
+// BuildTcpPkt 构建 TCP 报文 SYN 可携带 MSS 选项
 // pkt 应为 nil 或长度为 0 的可复用缓冲区 返回值持有构建后的报文字节
 func BuildTcpPkt(pkt []byte, packet TcpPkt, addr Ipv4AddrPair) ([]byte, error) {
 	if pkt == nil {
 		pkt = make([]byte, 0, 20)
 	}
-	if len(packet.Payload) > 1460 {
-		return nil, errors.New("payload len must <= 1460")
+	if len(pkt) != 0 {
+		return nil, errors.New("tcp output buffer length must be zero")
+	}
+	headerLen := 20
+	if packet.Mss != 0 {
+		if packet.Flags&TCP_FLAGS_SYN == 0 {
+			return nil, errors.New("tcp mss option requires SYN")
+		}
+		headerLen += 4
+	}
+	if len(packet.Payload) > 1480-headerLen {
+		return nil, errors.New("tcp packet length exceeds 1480 bytes")
 	}
 	// 源端口
 	pkt = append(pkt, byte(packet.SrcPort>>8), byte(packet.SrcPort))
@@ -100,14 +136,16 @@ func BuildTcpPkt(pkt []byte, packet TcpPkt, addr Ipv4AddrPair) ([]byte, error) {
 	pkt = append(pkt, byte(packet.SeqNum>>24), byte(packet.SeqNum>>16), byte(packet.SeqNum>>8), byte(packet.SeqNum))
 	// 确认号
 	pkt = append(pkt, byte(packet.AckNum>>24), byte(packet.AckNum>>16), byte(packet.AckNum>>8), byte(packet.AckNum))
-	// 数据偏移+保留+FLAGS为头部长度20字节的TCP包
-	pkt = append(pkt, 0x50, packet.Flags)
-	// 窗口大小 256
-	pkt = append(pkt, 0x01, 0x00)
+	// 数据偏移以 4 字节为单位
+	pkt = append(pkt, byte(headerLen/4)<<4, packet.Flags)
+	pkt = append(pkt, byte(packet.Window>>8), byte(packet.Window))
 	// 校验和(填充零)
 	pkt = append(pkt, 0x00, 0x00)
 	// 紧急指针
 	pkt = append(pkt, 0x00, 0x00)
+	if packet.Mss != 0 {
+		pkt = append(pkt, 2, 4, byte(packet.Mss>>8), byte(packet.Mss))
+	}
 	// 数据
 	pkt = append(pkt, packet.Payload...)
 	// 计算校验和
@@ -119,7 +157,7 @@ func BuildTcpPkt(pkt []byte, packet TcpPkt, addr Ipv4AddrPair) ([]byte, error) {
 		// 保留字节0x00+TCP协议号0x06
 		fakeHeader = append(fakeHeader, 0x00, 0x06)
 		// TCP报文总长度
-		totalLen := 20 + len(packet.Payload)
+		totalLen := len(pkt)
 		fakeHeader = append(fakeHeader, byte(totalLen>>8), byte(totalLen))
 		sumData := make([]byte, 0, 12+1500)
 		sumData = append(sumData, fakeHeader...)

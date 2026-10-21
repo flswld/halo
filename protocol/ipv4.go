@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"sync/atomic"
 )
 
 /*
@@ -34,7 +35,7 @@ const (
 // BROADCAST_IPV4_ADDR 表示 IPv4 有限广播地址
 var BROADCAST_IPV4_ADDR = Ipv4Addr{255, 255, 255, 255}
 
-var iphId uint16 = 0x0000
+var iphId atomic.Uint32
 
 // SetRandIpHeaderId 随机初始化 IPv4 报文标识
 func SetRandIpHeaderId() {
@@ -44,7 +45,7 @@ func SetRandIpHeaderId() {
 		randByte[0] = 0x45
 		randByte[1] = 0x67
 	}
-	iphId = binary.BigEndian.Uint16([]byte{randByte[0], randByte[1]})
+	iphId.Store(uint32(binary.BigEndian.Uint16(randByte)))
 }
 
 // Ipv4AddrPair 保存 UDP 和 TCP 伪首部校验使用的 IPv4 地址对
@@ -122,8 +123,8 @@ func BuildIpv4Pkt(pkt []byte, packet Ipv4Pkt) ([]byte, error) {
 	ipPktLen := uint16(len(packet.Payload) + 20)
 	pkt = append(pkt, byte(ipPktLen>>8), byte(ipPktLen))
 	// 每次构包递增进程级报文标识
-	iphId++
-	pkt = append(pkt, byte(iphId>>8), byte(iphId))
+	id := uint16(iphId.Add(1))
+	pkt = append(pkt, byte(id>>8), byte(id))
 	// 标志位+片偏移(不分片)
 	pkt = append(pkt, 0x00, 0x00)
 	// 生存时间(128)

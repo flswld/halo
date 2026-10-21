@@ -16,6 +16,7 @@ import (
 	"github.com/flswld/halo/pcap"
 	"github.com/flswld/halo/protocol"
 	"github.com/flswld/halo/protocol/kcp"
+	"github.com/flswld/halo/protocol/tcp"
 )
 
 // DirectDpdk 直接使用 DPDK 收发网络报文
@@ -724,6 +725,122 @@ func KcpServerClient() {
 	// 停止路由器
 	r1.StopRouter()
 	r2.StopRouter()
+
+	// 停止dpdk
+	dpdk.Exit()
+}
+
+// TcpServerClient 演示 TCP 服务端与客户端
+func TcpServerClient() {
+	logger.InitLogger(nil)
+	defer logger.CloseLogger()
+
+	// 启动dpdk
+	protocol.CheckSumEnable = true
+	dpdk.Run(&dpdk.Config{
+		PortIdList: []int{0, 1},
+		StatsLog:   true,
+		IdleSleep:  true,
+		SingleCore: true,
+	})
+
+	// 初始化路由器
+	r1, err := engine.InitRouter(&engine.RouterConfig{
+		NetIfList: []*engine.NetIfConfig{{
+			Name:        "eth0",
+			MacAddr:     "02:00:00:00:00:01",
+			IpAddr:      "192.0.2.1",
+			NetworkMask: "255.255.255.0",
+			BindCpuCore: -1,
+			EthRxFunc:   func() []byte { return dpdk.EthRxPkt(0) },
+			EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(0, pkt) },
+		}},
+	})
+	if err != nil {
+		panic(err)
+	}
+	r2, err := engine.InitRouter(&engine.RouterConfig{
+		NetIfList: []*engine.NetIfConfig{{
+			Name:        "eth0",
+			MacAddr:     "02:00:00:00:00:02",
+			IpAddr:      "192.0.2.2",
+			NetworkMask: "255.255.255.0",
+			BindCpuCore: -1,
+			EthRxFunc:   func() []byte { return dpdk.EthRxPkt(1) },
+			EthTxFunc:   func(pkt []byte) { dpdk.EthTxPkt(1, pkt) },
+		}},
+	})
+	if err != nil {
+		panic(err)
+	}
+	serverIf, clientIf := r1.GetNetIf("eth0"), r2.GetNetIf("eth0")
+
+	server, err := tcp.NewStack()
+	if err != nil {
+		panic(err)
+	}
+	server.SetOutput(func(p tcp.Packet) bool {
+		return serverIf.SendTcp(p.Addr.DstAddr, p.Data)
+	})
+	serverIf.RecvTcp(22222, func(remoteIp protocol.Ipv4Addr, raw []byte) {
+		_ = server.Input(tcp.Packet{
+			Addr: protocol.Ipv4AddrPair{SrcAddr: remoteIp, DstAddr: serverIf.IpAddr},
+			Data: raw,
+		})
+	})
+
+	client, err := tcp.NewStack()
+	if err != nil {
+		panic(err)
+	}
+	client.SetOutput(func(p tcp.Packet) bool {
+		return clientIf.SendTcp(p.Addr.DstAddr, p.Data)
+	})
+	clientIf.RecvTcp(33333, func(remoteIp protocol.Ipv4Addr, raw []byte) {
+		_ = client.Input(tcp.Packet{
+			Addr: protocol.Ipv4AddrPair{SrcAddr: remoteIp, DstAddr: clientIf.IpAddr},
+			Data: raw,
+		})
+	})
+
+	// 启动路由器
+	r1.RunRouter()
+	r2.RunRouter()
+
+	listener, err := server.Listen(tcp.Addr{Ip: serverIf.IpAddr, Port: 22222})
+	if err != nil {
+		panic(err)
+	}
+	conn, err := client.Dial(tcp.Addr{Ip: serverIf.IpAddr, Port: 22222}, tcp.Addr{Ip: clientIf.IpAddr, Port: 33333})
+	if err != nil {
+		panic(err)
+	}
+	peer, err := listener.Accept()
+	if err != nil {
+		panic(err)
+	}
+
+	msg := []byte("halo tcp")
+	_, err = conn.Write(msg)
+	if err != nil {
+		panic(err)
+	}
+	buf := make([]byte, len(msg))
+	_, err = peer.Read(buf)
+	if err != nil {
+		panic(err)
+	}
+	logger.Debug("tcp client recv data: %s", buf)
+
+	_ = peer.Close()
+	_ = conn.Close()
+	_ = listener.Close()
+	_ = client.Close()
+	_ = server.Close()
+
+	// 停止路由器
+	r2.StopRouter()
+	r1.StopRouter()
 
 	// 停止dpdk
 	dpdk.Exit()
